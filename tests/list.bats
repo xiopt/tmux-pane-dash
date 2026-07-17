@@ -94,3 +94,11 @@ basepane() { # basepane <id> — native fields every pane has
   run "$SCRIPT"
   [[ "${lines[0]}" == *idle* ]]
 }
+
+@test "zero-valued stale threshold with leading zeroes defaults to 60" {
+  printf '00' > "$TMUX_STUB_DIR/global/@pane-dash-stale-secs"
+  basepane %1
+  mkpane %1 @pane_dash_status idle @pane_dash_status_since 999990 @pane_dash_heartbeat 999990
+  run "$SCRIPT"
+  [[ "${lines[0]}" == *idle* ]]
+}

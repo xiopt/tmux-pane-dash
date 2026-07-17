@@ -7,7 +7,8 @@ set -euo pipefail
 now="${PANE_DASH_NOW:-$(date +%s)}"
 
 stale_secs="$(tmux show-option -gqv @pane-dash-stale-secs || true)"
-case "$stale_secs" in ('' | 0 | *[!0-9]*) stale_secs=60 ;; esac
+case "$stale_secs" in ('' | *[!0-9]*) stale_secs=60 ;; esac
+[ "$stale_secs" -gt 0 ] 2>/dev/null || stale_secs=60
 
 match="$(tmux show-option -gqv @pane-dash-match || true)"
 match="${match:-opencode}"
