@@ -41,3 +41,41 @@ EOF
   [ "$status" -eq 0 ]
   grep -Fx 'reload succeeded' "$FZF_LOG"
 }
+
+@test "inner mode pins fzf to bash and ignores a hostile defaults file" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  defaults_file="$BATS_TEST_TMPDIR/fzf-defaults"
+  printf '%s\n' '--not-an-fzf-option' > "$defaults_file"
+  export FZF_LOG="$BATS_TEST_TMPDIR/fzf.log"
+
+  cat > "$BATS_TEST_TMPDIR/bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-panes) exit 0 ;;
+  show-option | display-message) exit 0 ;;
+esac
+EOF
+  cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+shell=""
+transform=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --with-shell) shell="$2"; shift 2 ;;
+    esc:transform:*) transform="${1#esc:transform:}"; shift ;;
+    *) shift ;;
+  esac
+done
+[ "$shell" = 'bash -c' ]
+[ -z "${FZF_DEFAULT_OPTS_FILE:-}" ]
+FZF_INPUT_STATE=enabled bash -c "$transform" >> "$FZF_LOG"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/tmux" "$BATS_TEST_TMPDIR/bin/fzf"
+
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" SHELL=/usr/bin/false \
+    FZF_DEFAULT_OPTS_FILE="$defaults_file" "$BATS_TEST_DIRNAME/../scripts/dash.sh" --inner /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  grep -Fx 'hide-input+rebind(j,k,g,G,q,/)' "$FZF_LOG"
+}

@@ -61,11 +61,14 @@ client_tty="${2:-}"
 
 # Neutralize user defaults so they cannot break our bindings (spec M8)
 export FZF_DEFAULT_OPTS=""
+unset FZF_DEFAULT_OPTS_FILE
 export PANE_DASH_DIR="$DIR"
 export PANE_DASH_CLIENT="$client_tty"
 
 # shellcheck disable=SC2016 # fzf expands these variables later via $SHELL -c.
+# Pin action commands to Bash because the transform binding uses Bash syntax.
 "$DIR/list.sh" | fzf \
+  --with-shell 'bash -c' \
   --ansi \
   --delimiter '\t' \
   --with-nth 2.. \
