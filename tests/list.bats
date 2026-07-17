@@ -1,0 +1,96 @@
+setup() {
+  export TMUX_STUB_DIR="$BATS_TEST_TMPDIR/stub"
+  mkdir -p "$TMUX_STUB_DIR/global"
+  : > "$TMUX_STUB_DIR/calls.log"
+  export PATH="$BATS_TEST_DIRNAME/stubs:$PATH"
+  export PANE_DASH_NOW=1000000
+  SCRIPT="$BATS_TEST_DIRNAME/../scripts/list.sh"
+}
+
+mkpane() { # mkpane <id> <key> <value>...
+  local id="$1"; shift
+  mkdir -p "$TMUX_STUB_DIR/panes.d/$id"
+  grep -q "^$id$" "$TMUX_STUB_DIR/panes" 2>/dev/null || echo "$id" >> "$TMUX_STUB_DIR/panes"
+  while [ $# -gt 1 ]; do printf '%s' "$2" > "$TMUX_STUB_DIR/panes.d/$id/$1"; shift 2; done
+}
+
+basepane() { # basepane <id> — native fields every pane has
+  mkpane "$1" pane_current_command zsh pane_current_path /tmp/proj \
+    session_name work window_index 1 pane_index 0
+}
+
+@test "plugin pane with fresh heartbeat is listed with its status" {
+  basepane %1
+  mkpane %1 @pane_dash_status working @pane_dash_status_since 999940 \
+    @pane_dash_heartbeat 999990 @pane_dash_title "Fix auth" @pane_dash_model sonnet
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "${lines[0]}" == "%1"$'\t'* ]]
+  [[ "${lines[0]}" == *working* ]]
+}
+
+@test "stale heartbeat shows stale" {
+  basepane %1
+  mkpane %1 @pane_dash_status working @pane_dash_status_since 900000 @pane_dash_heartbeat 900000
+  run "$SCRIPT"
+  [[ "${lines[0]}" == *stale* ]]
+}
+
+@test "opencode by process name without plugin shows unknown" {
+  basepane %2
+  mkpane %2 pane_current_command opencode
+  run "$SCRIPT"
+  [[ "${lines[0]}" == "%2"$'\t'* ]]
+  [[ "${lines[0]}" == *unknown* ]]
+}
+
+@test "tagged pane is listed; plain pane is not" {
+  basepane %3; mkpane %3 @pane_dash_tag deploy
+  basepane %4
+  run "$SCRIPT"
+  [ "${#lines[@]}" -eq 1 ]
+  [[ "${lines[0]}" == "%3"$'\t'* ]]
+}
+
+@test "sort order: needs_input, error, working, idle, unknown, stale" {
+  for i in 1 2 3 4 5 6; do basepane "%$i"; done
+  mkpane %1 @pane_dash_status idle        @pane_dash_status_since 999000 @pane_dash_heartbeat 999990
+  mkpane %2 @pane_dash_status needs_input @pane_dash_status_since 999000 @pane_dash_heartbeat 999990
+  mkpane %3 @pane_dash_status working     @pane_dash_status_since 999000 @pane_dash_heartbeat 999990
+  mkpane %4 @pane_dash_status error       @pane_dash_status_since 999000 @pane_dash_heartbeat 999990
+  mkpane %5 pane_current_command opencode
+  mkpane %6 @pane_dash_status working     @pane_dash_status_since 900000 @pane_dash_heartbeat 900000
+  run "$SCRIPT"
+  [[ "${lines[0]}" == "%2"$'\t'* ]]
+  [[ "${lines[1]}" == "%4"$'\t'* ]]
+  [[ "${lines[2]}" == "%3"$'\t'* ]]
+  [[ "${lines[3]}" == "%1"$'\t'* ]]
+  [[ "${lines[4]}" == "%5"$'\t'* ]]
+  [[ "${lines[5]}" == "%6"$'\t'* ]]
+}
+
+@test "within a group, oldest status_since first" {
+  basepane %1; basepane %2
+  mkpane %1 @pane_dash_status working @pane_dash_status_since 999900 @pane_dash_heartbeat 999990
+  mkpane %2 @pane_dash_status working @pane_dash_status_since 999000 @pane_dash_heartbeat 999990
+  run "$SCRIPT"
+  [[ "${lines[0]}" == "%2"$'\t'* ]]
+}
+
+@test "hostile path with tabs/newlines cannot break row framing" {
+  basepane %1
+  mkpane %1 pane_current_command opencode
+  printf 'evil\tpath\nline2' > "$TMUX_STUB_DIR/panes.d/%1/pane_current_path"
+  run "$SCRIPT"
+  [ "${#lines[@]}" -eq 1 ]
+  ntabs="$(printf '%s' "${lines[0]}" | awk -F'\t' '{print NF-1}')"
+  [ "$ntabs" -eq 1 ]
+}
+
+@test "custom stale threshold via @pane-dash-stale-secs" {
+  printf '3600' > "$TMUX_STUB_DIR/global/@pane-dash-stale-secs"
+  basepane %1
+  mkpane %1 @pane_dash_status idle @pane_dash_status_since 998000 @pane_dash_heartbeat 998000
+  run "$SCRIPT"
+  [[ "${lines[0]}" == *idle* ]]
+}
