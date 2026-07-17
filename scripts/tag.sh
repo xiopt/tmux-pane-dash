@@ -5,6 +5,7 @@
 set -euo pipefail
 
 sanitize() { printf '%s' "$1" | tr '\t\n\r' '   ' | tr -d '\000-\037\177' | cut -c1-80; }
+escape_format() { printf '%s' "$1" | sed 's/#/##/g'; }
 
 cmd="${1:?usage: tag.sh toggle|label <pane_id> [label]}"
 pane="${2:?pane id required}"
@@ -17,8 +18,9 @@ case "$cmd" in
       tmux display-message "pane-dash: untagged"
     else
       label="$(sanitize "$(tmux display-message -p -t "$pane" '#{pane_current_command}')")"
-      tmux set-option -p -t "$pane" @pane_dash_tag "${label:-pane}"
-      tmux display-message "pane-dash: tagged as ${label:-pane}"
+      tag="${label:-pane}"
+      tmux set-option -p -t "$pane" @pane_dash_tag "$tag"
+      tmux display-message "pane-dash: tagged as $(escape_format "$tag")"
     fi
     ;;
   label)
@@ -27,7 +29,7 @@ case "$cmd" in
     label="$(printf '%s' "$label" | sed 's/^ *//; s/ *$//')"
     if [ -n "$label" ]; then
       tmux set-option -p -t "$pane" @pane_dash_tag "$label"
-      tmux display-message "pane-dash: tagged as $label"
+      tmux display-message "pane-dash: tagged as $(escape_format "$label")"
     else
       tmux display-message "pane-dash: empty label, not tagged"
     fi

@@ -4,8 +4,17 @@
 #   panes                      one pane id per line (%0, %1, ...)
 #   global/<option-name>       value of a global option (show-option -gqv)
 #   panes.d/<pane>/<key>       value for format '#{key}' (display-message -p -t)
-# Mutations (set-option, send-keys, ...) are appended to calls.log verbatim.
+# Mutations (set-option, send-keys, ...) are appended to calls.log as
+# unit-separator-delimited argv records. Notifications are kept separately.
 set -euo pipefail
+
+log_args() {
+  local file="$1"
+  shift
+  printf '%s\037' "$@" >> "$TMUX_STUB_DIR/$file"
+  printf '\n' >> "$TMUX_STUB_DIR/$file"
+}
+
 cmd="${1:-}"
 case "$cmd" in
   list-panes)
@@ -22,8 +31,8 @@ case "$cmd" in
       key="${fmt#\#\{}"; key="${key%\}}"
       cat "$TMUX_STUB_DIR/panes.d/$pane/$key" 2>/dev/null || true
     else
-      printf '%s\n' "$*" >> "$TMUX_STUB_DIR/calls.log"
+      log_args notifications.log "$@"
     fi ;;
   *)
-    printf '%s\n' "$*" >> "$TMUX_STUB_DIR/calls.log" ;;
+    log_args calls.log "$@" ;;
 esac
