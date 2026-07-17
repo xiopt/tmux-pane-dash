@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # scripts/dash.sh — entry: version checks, then popup running fzf (--inner).
+# Outer usage: dash.sh [client_tty] [source_pane]. Task 9 passes tmux's
+# #{client_tty} and #{pane_id} expansions to keep multi-client popups pinned.
 # Spec sections: "Version requirements", "dash.sh", "Key model".
 set -euo pipefail
 
@@ -49,10 +51,17 @@ if [ "${1:-}" != "--inner" ]; then
     exit 1
   fi
 
-  client_tty="$(tmux display-message -p '#{client_tty}')"
+  client_tty="${1:-}"
+  source_pane="${2:-}"
+  [ -n "$client_tty" ] || client_tty="$(tmux display-message -p '#{client_tty}')"
+  [ -n "$source_pane" ] || source_pane="$(tmux display-message -p '#{pane_id}')"
   width="$(get_opt @pane-dash-width 80%)"
   height="$(get_opt @pane-dash-height 70%)"
-  exec tmux display-popup -E -w "$width" -h "$height" \
+  popup_args=()
+  [ -n "$client_tty" ] && popup_args+=(-c "$client_tty")
+  [ -n "$source_pane" ] && popup_args+=(-t "$source_pane")
+  popup_args+=(-E -w "$width" -h "$height")
+  exec tmux display-popup "${popup_args[@]}" \
     "$DIR/dash.sh" --inner "$client_tty"
 fi
 
