@@ -64,6 +64,15 @@ describe("derive precedence", () => {
     ).toBe("working")
   })
 
+  test("retry does not clear the error latch", () => {
+    expect(
+      run([
+        { type: "error", sessionID: "a" },
+        { type: "status", sessionID: "a", status: "retry" },
+      ]).status,
+    ).toBe("error")
+  })
+
   test("user message clears latch but does not set working", () => {
     const r = run([
       { type: "status", sessionID: "a", status: "idle" },
@@ -114,6 +123,17 @@ describe("active-session attribution", () => {
       apply(store, event)
     }
     expect(store.activeSessionID).toBe("parent")
+  })
+
+  test("active subtree includes children when the active parent has no state entry", () => {
+    expect(
+      run([
+        { type: "session.meta", sessionID: "child", parentID: "P" },
+        { type: "user-message", sessionID: "child" },
+        { type: "status", sessionID: "child", status: "idle" },
+        { type: "status", sessionID: "background", status: "busy" },
+      ]).status,
+    ).toBe("idle")
   })
 
   test("subagent (descendant) pending request blocks the parent", () => {

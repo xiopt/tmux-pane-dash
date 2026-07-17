@@ -64,7 +64,7 @@ export function apply(store: Store, ev: NormEvent): void {
     case "status": {
       const s = session(store, ev.sessionID)
       s.runtime = ev.status
-      if (ev.status === "busy" || ev.status === "retry") s.errorLatched = false
+      if (ev.status === "busy") s.errorLatched = false
       break
     }
     case "request.open":
@@ -106,7 +106,7 @@ export function apply(store: Store, ev: NormEvent): void {
 function relevant(store: Store): SessionState[] {
   const all = [...store.sessions.entries()]
   const active = store.activeSessionID
-  if (!active || !store.sessions.has(active)) return all.map(([, s]) => s)
+  if (!active) return all.map(([, s]) => s)
   const included = new Set([active])
   let grew = true
   while (grew) {
