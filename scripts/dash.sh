@@ -61,7 +61,10 @@ client_tty="${2:-}"
 
 # Neutralize user defaults so they cannot break our bindings (spec M8)
 export FZF_DEFAULT_OPTS=""
+export PANE_DASH_DIR="$DIR"
+export PANE_DASH_CLIENT="$client_tty"
 
+# shellcheck disable=SC2016 # fzf expands these variables later via $SHELL -c.
 "$DIR/list.sh" | fzf \
   --ansi \
   --delimiter '\t' \
@@ -74,9 +77,9 @@ export FZF_DEFAULT_OPTS=""
   --no-sort \
   --pointer '▶' \
   --header 'enter:jump  /:filter  ctrl-s:send  ctrl-z:zoom  q:quit' \
-  --preview "$DIR/preview.sh {1}" \
+  --preview '"$PANE_DASH_DIR/preview.sh" {1}' \
   --preview-window 'right,60%,border-left' \
-  --bind "every(1):reload-sync($DIR/list.sh)+refresh-preview" \
+  --bind 'every(1):reload-sync("$PANE_DASH_DIR/list.sh")+refresh-preview' \
   --bind 'j:down,k:up,g:first,G:last,q:abort' \
   --bind '/:show-input+unbind(j,k,g,G,q,/)' \
   --bind "esc:transform:
@@ -85,7 +88,7 @@ export FZF_DEFAULT_OPTS=""
     else
       echo abort
     fi" \
-  --bind "enter:become($DIR/action.sh jump {1} \"$client_tty\")" \
-  --bind "ctrl-z:become($DIR/action.sh zoom {1} \"$client_tty\")" \
-  --bind "ctrl-s:execute($DIR/action.sh send {1})+reload-sync($DIR/list.sh)" \
+  --bind 'enter:become("$PANE_DASH_DIR/action.sh" jump {1} "$PANE_DASH_CLIENT")' \
+  --bind 'ctrl-z:become("$PANE_DASH_DIR/action.sh" zoom {1} "$PANE_DASH_CLIENT")' \
+  --bind 'ctrl-s:execute("$PANE_DASH_DIR/action.sh" send {1})+reload-sync("$PANE_DASH_DIR/list.sh")' \
   || true

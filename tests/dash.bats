@@ -6,3 +6,38 @@
   [ "$status" -eq 1 ]
   [ "$output" = "pane-dash: must be run inside tmux" ]
 }
+
+@test "inner mode reloads list.sh when scripts live in a path with spaces" {
+  copy_root="$BATS_TEST_TMPDIR/with space"
+  mkdir -p "$copy_root" "$BATS_TEST_TMPDIR/bin"
+  cp -R "$BATS_TEST_DIRNAME/../scripts" "$copy_root/scripts"
+  export FZF_LOG="$BATS_TEST_TMPDIR/fzf.log"
+
+  cat > "$BATS_TEST_TMPDIR/bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-panes) exit 0 ;;
+  show-option | display-message) exit 0 ;;
+esac
+EOF
+  cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+for arg; do
+  case "$arg" in
+    every\(1\):reload-sync\(*)
+      command="${arg#every(1):reload-sync(}"
+      command="${command%%)+refresh-preview}"
+      bash -c "$command"
+      printf 'reload succeeded\n' >> "$FZF_LOG"
+      ;;
+  esac
+done
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/tmux" "$BATS_TEST_TMPDIR/bin/fzf"
+
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" "$copy_root/scripts/dash.sh" --inner /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  grep -Fx 'reload succeeded' "$FZF_LOG"
+}
