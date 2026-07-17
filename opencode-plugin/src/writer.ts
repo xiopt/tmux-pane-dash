@@ -13,7 +13,11 @@ const SPAWN_OPTIONS = { stdout: "ignore", stderr: "ignore" } as const
 
 export class TmuxWriter {
   private pending = Promise.resolve()
-  private readonly written = new Map<string, string | undefined>()
+  private draining = false
+  private generation = 0
+  private completedGeneration = 0
+  private readonly desired = new Map<string, string | undefined>()
+  private readonly confirmed = new Map<string, string | undefined>()
 
   constructor(
     private readonly pane: string,
@@ -21,40 +25,58 @@ export class TmuxWriter {
   ) {}
 
   get(name: string): string | undefined {
-    return this.written.get(name)
+    return this.desired.get(name)
   }
 
   setOption(name: string, value: string, force = false): void {
     const sanitized = sanitize(value)
-    if (!force && this.written.has(name) && this.written.get(name) === sanitized) return
-
-    this.written.set(name, sanitized)
-    this.enqueue(name, sanitized, ["tmux", "set-option", "-pt", this.pane, name, sanitized])
+    this.desired.set(name, sanitized)
+    if (force) this.confirmed.delete(name)
+    this.kick()
   }
 
   unsetOption(name: string, force = false): void {
-    if (!force && this.written.has(name) && this.written.get(name) === undefined) return
-
-    this.written.set(name, undefined)
-    this.enqueue(name, undefined, ["tmux", "set-option", "-pu", "-t", this.pane, name])
+    this.desired.set(name, undefined)
+    if (force) this.confirmed.delete(name)
+    this.kick()
   }
 
   flush(): Promise<void> {
     return this.pending
   }
 
-  private enqueue(name: string, value: string | undefined, command: string[]): void {
-    const write = async () => {
-      try {
-        if ((await this.spawn(command, SPAWN_OPTIONS).exited) !== 0) this.invalidate(name, value)
-      } catch {
-        this.invalidate(name, value)
-      }
-    }
-    this.pending = this.pending.then(write, write)
+  private kick(): void {
+    this.generation += 1
+    if (this.draining) return
+
+    this.draining = true
+    this.pending = Promise.resolve().then(() => this.drain())
   }
 
-  private invalidate(name: string, value: string | undefined): void {
-    if (this.written.get(name) === value) this.written.delete(name)
+  private async drain(): Promise<void> {
+    while (this.completedGeneration < this.generation) {
+      const generation = this.generation
+      for (const [name, value] of this.desired) {
+        if (this.matches(name, value)) continue
+        await this.write(name, value)
+      }
+      this.completedGeneration = generation
+    }
+    this.draining = false
+  }
+
+  private matches(name: string, value: string | undefined): boolean {
+    return this.confirmed.has(name) && this.confirmed.get(name) === value
+  }
+
+  private async write(name: string, value: string | undefined): Promise<void> {
+    const command = value === undefined
+      ? ["tmux", "set-option", "-pu", "-t", this.pane, name]
+      : ["tmux", "set-option", "-pt", this.pane, name, value]
+    try {
+      if ((await this.spawn(command, SPAWN_OPTIONS).exited) === 0) this.confirmed.set(name, value)
+    } catch {
+      // Keep the desired value so the next kick retries it.
+    }
   }
 }

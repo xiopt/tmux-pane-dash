@@ -9,38 +9,23 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-test("serializes startup unsets before a following status write", async () => {
+test("converges directly to the final startup status", async () => {
   const options = new Map([["@pane_dash_status", "stale"]])
   const calls: string[][] = []
-  const exits: Array<ReturnType<typeof deferred<number>>> = []
-  const secondStarted = deferred<void>()
   const spawn: Spawn = (command) => {
     calls.push(command)
-    if (calls.length === 2) secondStarted.resolve()
-    const exit = deferred<number>()
-    exits.push(exit)
-    exit.promise.then((code) => {
-      if (code !== 0) return
-      const name = command.at(command.includes("-pu") ? -1 : -2)!
-      if (command.includes("-pu")) options.delete(name)
-      else options.set(name, command.at(-1)!)
-    })
-    return { exited: exit.promise }
+    const name = command.at(command.includes("-pu") ? -1 : -2)!
+    if (command.includes("-pu")) options.delete(name)
+    else options.set(name, command.at(-1)!)
+    return { exited: Promise.resolve(0) }
   }
   const writer = new TmuxWriter("%1", spawn)
 
   writer.unsetOption("@pane_dash_status", true)
   writer.setOption("@pane_dash_status", "idle")
-
-  await Promise.resolve()
-  expect(calls).toEqual([["tmux", "set-option", "-pu", "-t", "%1", "@pane_dash_status"]])
-
-  exits[0]!.resolve(0)
-  await secondStarted.promise
-  expect(calls[1]).toEqual(["tmux", "set-option", "-pt", "%1", "@pane_dash_status", "idle"])
-
-  exits[1]!.resolve(0)
   await writer.flush()
+
+  expect(calls).toEqual([["tmux", "set-option", "-pt", "%1", "@pane_dash_status", "idle"]])
   expect(options.get("@pane_dash_status")).toBe("idle")
 })
 
@@ -76,4 +61,53 @@ test("retries an unset after its tmux write fails", async () => {
   await writer.flush()
 
   expect(calls).toHaveLength(2)
+})
+
+test("retains a duplicate unset requested while the first unset is in flight", async () => {
+  const calls: string[][] = []
+  const firstStarted = deferred<void>()
+  const firstExit = deferred<number>()
+  const spawn: Spawn = (command) => {
+    calls.push(command)
+    if (calls.length === 1) {
+      firstStarted.resolve()
+      return { exited: firstExit.promise }
+    }
+    return { exited: Promise.resolve(0) }
+  }
+  const writer = new TmuxWriter("%1", spawn)
+
+  writer.unsetOption("@pane_dash_status", true)
+  await firstStarted.promise
+  writer.unsetOption("@pane_dash_status")
+  firstExit.resolve(1)
+  await writer.flush()
+
+  expect(calls).toHaveLength(2)
+})
+
+test("converges to the latest value when a newer set arrives in flight", async () => {
+  const options = new Map<string, string>()
+  const calls: string[][] = []
+  const firstStarted = deferred<void>()
+  const firstExit = deferred<number>()
+  const spawn: Spawn = (command) => {
+    calls.push(command)
+    const exited = calls.length === 1 ? firstExit.promise : Promise.resolve(0)
+    if (calls.length === 1) firstStarted.resolve()
+    exited.then((code) => {
+      if (code === 0) options.set(command.at(-2)!, command.at(-1)!)
+    })
+    return { exited }
+  }
+  const writer = new TmuxWriter("%1", spawn)
+
+  writer.setOption("@pane_dash_status", "working")
+  await firstStarted.promise
+  writer.setOption("@pane_dash_status", "idle")
+  firstExit.resolve(0)
+  await writer.flush()
+
+  expect(calls).toHaveLength(2)
+  expect(options.get("@pane_dash_status")).toBe("idle")
 })
