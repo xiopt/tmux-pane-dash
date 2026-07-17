@@ -37,17 +37,27 @@ T capture-pane -ep -t "$pane" | grep -q NORMALMARKER || fail "normal capture"
 [ "$(T display-message -p -t "$pane" '#{alternate_on}')" = "0" ] || fail "alternate_on flag 0"
 pass "capture normal screen"
 
-# 4. switch-client with a pane target in another session (no client attached:
-#    verify the command is accepted against a detached target instead)
+# 4. switch-client requires a client. A script(1)-backed PTY is not reliable
+#    here because this non-interactive test runner closes its stdin, so assert
+#    tmux's documented detached-server failure precisely instead.
 T new-session -d -s beta
 pane_b="$(T display-message -p -t beta '#{pane_id}')"
-T switch-client -t "$pane_b" 2>/dev/null || pass "switch-client (no client attached — accepted/skipped)"
+if switch_error="$(T switch-client -t "$pane_b" 2>&1)"; then
+  fail "switch-client unexpectedly accepted a detached target"
+fi
+case "$switch_error" in
+  'no current client' | 'no clients') ;;
+  *) fail "switch-client detached failure: $switch_error" ;;
+esac
+pass "switch-client detached failure"
 
 # 5. send-keys -l literal: C-c must arrive as text, not as a key
-T send-keys -l -t "$pane_b" -- 'echo C-c-literal-ok'
+T send-keys -t "$pane_b" cat Enter
+sleep 0.2
+T send-keys -l -t "$pane_b" -- 'C-c'
 T send-keys -t "$pane_b" Enter
-sleep 1
-T capture-pane -p -t "$pane_b" | grep -q 'C-c-literal-ok' || fail "literal send-keys"
+sleep 0.2
+T capture-pane -p -t "$pane_b" | grep -qx 'C-c' || fail "literal send-keys"
 pass "literal send-keys"
 
 echo "ALL INTEGRATION CHECKS PASSED"
