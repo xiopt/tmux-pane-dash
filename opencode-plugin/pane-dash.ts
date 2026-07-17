@@ -1,8 +1,8 @@
 // OpenCode plugin: publishes agent status to tmux pane options.
 // Install: ln -sf <repo>/opencode-plugin/pane-dash.ts ~/.config/opencode/plugin/
 import { normalize } from "./src/normalize"
-import { sanitize } from "./src/sanitize"
 import { apply, createStore, derive } from "./src/state"
+import { TmuxWriter } from "./src/writer"
 
 const HEARTBEAT_MS = 20_000
 const OPTIONS = [
@@ -24,54 +24,29 @@ export const PaneDash = async () => {
   if (!pane) return {}
 
   const store = createStore()
-  const written = new Map<string, string>()
-
-  const setOption = (name: string, value: string) => {
-    const sanitized = sanitize(value)
-    if (written.get(name) === sanitized) return
-
-    written.set(name, sanitized)
-    Bun.spawn(["tmux", "set-option", "-pt", pane, name, sanitized], {
-      stdout: "ignore",
-      stderr: "ignore",
-    })
-  }
-
-  const unsetOption = (name: string, force = false) => {
-    if (!force && !written.has(name)) return
-
-    written.delete(name)
-    Bun.spawn(["tmux", "set-option", "-pu", "-t", pane, name], {
-      stdout: "ignore",
-      stderr: "ignore",
-    })
-  }
+  const writer = new TmuxWriter(pane, (command, options) => Bun.spawn(command, options))
 
   const publish = () => {
     const derived = derive(store)
-    const previousStatus = written.get("@pane_dash_status")
+    const previousStatus = writer.get("@pane_dash_status")
 
-    setOption("@pane_dash_status", derived.status)
+    writer.setOption("@pane_dash_status", derived.status)
     if (previousStatus !== derived.status) {
-      setOption("@pane_dash_status_since", String(Math.floor(Date.now() / 1000)))
+      writer.setOption("@pane_dash_status_since", String(Math.floor(Date.now() / 1000)))
     }
 
-    if (derived.title === undefined) unsetOption("@pane_dash_title")
-    else setOption("@pane_dash_title", derived.title)
-    if (derived.model === undefined) unsetOption("@pane_dash_model")
-    else setOption("@pane_dash_model", derived.model)
+    if (derived.title === undefined) writer.unsetOption("@pane_dash_title")
+    else writer.setOption("@pane_dash_title", derived.title)
+    if (derived.model === undefined) writer.unsetOption("@pane_dash_model")
+    else writer.setOption("@pane_dash_model", derived.model)
   }
 
   const heartbeat = () => {
     const value = String(Math.floor(Date.now() / 1000))
-    written.set("@pane_dash_heartbeat", value)
-    Bun.spawn(["tmux", "set-option", "-pt", pane, "@pane_dash_heartbeat", value], {
-      stdout: "ignore",
-      stderr: "ignore",
-    })
+    writer.setOption("@pane_dash_heartbeat", value, true)
   }
 
-  for (const name of STARTUP_OPTIONS) unsetOption(name, true)
+  for (const name of STARTUP_OPTIONS) writer.unsetOption(name, true)
   heartbeat()
   const timer = setInterval(heartbeat, HEARTBEAT_MS)
   timer.unref?.()
