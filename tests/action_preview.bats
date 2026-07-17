@@ -19,8 +19,17 @@ case "${1:-}" in
     format="$5"
     key="${format#\#\{}"; key="${key%\}}"
     value="$FAKE_TMUX_VALUES/$pane/$key"
-    [ -f "$value" ] || exit 1
-    cat "$value"
+    # tmux 3.7b returns success with no output for an unknown pane.
+    if [ "$key" = 'pane_id' ] && [ "${FAKE_TMUX_VANISH_AFTER_FIRST_PROBE:-}" = "$pane" ]; then
+      probes_file="$FAKE_TMUX_VALUES/$pane.probes"
+      probes="$(cat "$probes_file" 2>/dev/null || echo 0)"
+      probes=$((probes + 1))
+      printf '%s' "$probes" > "$probes_file"
+      [ "$probes" -eq 1 ] || exit 0
+    fi
+    if [ -f "$value" ]; then
+      cat "$value"
+    fi
     ;;
   capture-pane)
     log "$*"
@@ -58,6 +67,19 @@ pane() {
   run "$PREVIEW" %999
   [ "$status" -eq 0 ]
   [ "$output" = '[pane %999 is gone]' ]
+  [ ! -s "$FAKE_TMUX_LOG" ]
+}
+
+@test "preview builds a multibyte separator without tr" {
+  pane
+  cat > "$BATS_TEST_TMPDIR/bin/tr" <<'EOF'
+#!/usr/bin/env bash
+cat
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/tr"
+  FZF_PREVIEW_COLUMNS=5 run "$PREVIEW" %5
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'─────'* ]]
 }
 
 @test "jump switches the requested client in one zoom-preserving command" {
@@ -74,6 +96,42 @@ pane() {
   [ "$status" -eq 0 ]
   [ "$(sed -n '1p' "$FAKE_TMUX_LOG")" = 'resize-pane -Z -t %5' ]
   [ "$(sed -n '2p' "$FAKE_TMUX_LOG")" = 'switch-client -Z -c /dev/ttys001 -t %5' ]
+}
+
+@test "send injects a literal line then a separate Enter" {
+  pane
+  tty="$BATS_TEST_TMPDIR/tty"
+  printf 'deploy this\n' > "$tty"
+  PANE_DASH_TTY="$tty" run "$ACTION" send %5
+  [ "$status" -eq 0 ]
+  [ "$(sed -n '1p' "$FAKE_TMUX_LOG")" = 'send-keys -l -t %5 -- deploy this' ]
+  [ "$(sed -n '2p' "$FAKE_TMUX_LOG")" = 'send-keys -t %5 Enter' ]
+}
+
+@test "send cancels on an empty injected line" {
+  pane
+  tty="$BATS_TEST_TMPDIR/tty"
+  printf '\n' > "$tty"
+  PANE_DASH_TTY="$tty" run "$ACTION" send %5
+  [ "$status" -eq 0 ]
+  [ ! -s "$FAKE_TMUX_LOG" ]
+}
+
+@test "send does not send when its pane is already gone" {
+  tty="$BATS_TEST_TMPDIR/tty"
+  : > "$tty"
+  PANE_DASH_TTY="$tty" run "$ACTION" send %999
+  [ "$status" -eq 0 ]
+  [ ! -s "$FAKE_TMUX_LOG" ]
+}
+
+@test "send rechecks and aborts when the pane vanishes before delivery" {
+  pane
+  tty="$BATS_TEST_TMPDIR/tty"
+  printf 'deploy this\n' > "$tty"
+  FAKE_TMUX_VANISH_AFTER_FIRST_PROBE=%5 PANE_DASH_TTY="$tty" run "$ACTION" send %5
+  [ "$status" -eq 0 ]
+  [ ! -s "$FAKE_TMUX_LOG" ]
 }
 
 @test "actions do nothing for a nonexistent pane" {

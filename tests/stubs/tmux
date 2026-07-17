@@ -29,7 +29,10 @@ case "$cmd" in
     if [ "${2:-}" = "-p" ]; then
       pane="$4"; fmt="$5"
       key="${fmt#\#\{}"; key="${key%\}}"
-      cat "$TMUX_STUB_DIR/panes.d/$pane/$key" 2>/dev/null || true
+      # Match tmux 3.7b: an unknown target can succeed with empty output.
+      if [ -f "$TMUX_STUB_DIR/panes.d/$pane/$key" ]; then
+        cat "$TMUX_STUB_DIR/panes.d/$pane/$key"
+      fi
     else
       log_args notifications.log "$@"
     fi ;;

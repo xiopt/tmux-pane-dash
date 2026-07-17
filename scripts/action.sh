@@ -6,6 +6,8 @@ set -euo pipefail
 cmd="${1:?usage: action.sh jump|zoom|send <pane_id> [client_tty]}"
 pane="${2:?pane id required}"
 client="${3:-}"
+# PANE_DASH_TTY is test-only; production uses the controlling terminal.
+tty="${PANE_DASH_TTY:-/dev/tty}"
 
 pane_exists() {
   local found
@@ -34,16 +36,16 @@ case "$cmd" in
     ;;
   send)
     if ! pane_exists; then
-      printf 'pane %s is gone\n' "$pane" > /dev/tty
+      printf 'pane %s is gone\n' "$pane" >> "$tty"
       sleep 1
       exit 0
     fi
     cur="$(tmux display-message -p -t "$pane" '#{pane_current_command}' 2>/dev/null || true)"
-    printf '\nsend to %s (running: %s) — empty cancels\n> ' "$pane" "$cur" > /dev/tty
-    IFS= read -r line < /dev/tty || exit 0
+    printf '\nsend to %s (running: %s) — empty cancels\n> ' "$pane" "$cur" >> "$tty"
+    IFS= read -r line < "$tty" || exit 0
     [ -n "$line" ] || exit 0
     pane_exists || {
-      printf 'pane %s vanished, aborted\n' "$pane" > /dev/tty
+      printf 'pane %s vanished, aborted\n' "$pane" >> "$tty"
       sleep 1
       exit 0
     }
