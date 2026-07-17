@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# tests/stubs/tmux — fake tmux for bats tests.
+# Data layout under $TMUX_STUB_DIR:
+#   panes                      one pane id per line (%0, %1, ...)
+#   global/<option-name>       value of a global option (show-option -gqv)
+#   panes.d/<pane>/<key>       value for format '#{key}' (display-message -p -t)
+# Mutations (set-option, send-keys, ...) are appended to calls.log verbatim.
+set -euo pipefail
+cmd="${1:-}"
+case "$cmd" in
+  list-panes)
+    cat "$TMUX_STUB_DIR/panes" ;;
+  show-option)              # show-option -gqv <name>  |  show-option -pqv -t <pane> <name>
+    if [ "$2" = "-gqv" ]; then
+      cat "$TMUX_STUB_DIR/global/$3" 2>/dev/null || true
+    else                     # -pqv -t <pane> <name>
+      cat "$TMUX_STUB_DIR/panes.d/$4/$5" 2>/dev/null || true
+    fi ;;
+  display-message)          # display-message -p -t <pane> '<fmt>'
+    if [ "${2:-}" = "-p" ]; then
+      pane="$4"; fmt="$5"
+      key="${fmt#\#\{}"; key="${key%\}}"
+      cat "$TMUX_STUB_DIR/panes.d/$pane/$key" 2>/dev/null || true
+    else
+      printf '%s\n' "$*" >> "$TMUX_STUB_DIR/calls.log"
+    fi ;;
+  *)
+    printf '%s\n' "$*" >> "$TMUX_STUB_DIR/calls.log" ;;
+esac
