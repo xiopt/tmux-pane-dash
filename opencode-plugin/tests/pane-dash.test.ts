@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { sanitize } from "../pane-dash"
+import { sanitize } from "../src/sanitize"
 
 test("sanitize strips control characters and caps option values at 120 characters", () => {
   expect(sanitize("title\twith\ncontrols\u001b[31m")).toBe("titlewithcontrols[31m")

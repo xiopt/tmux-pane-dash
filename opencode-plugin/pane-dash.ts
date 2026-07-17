@@ -1,6 +1,7 @@
 // OpenCode plugin: publishes agent status to tmux pane options.
 // Install: ln -sf <repo>/opencode-plugin/pane-dash.ts ~/.config/opencode/plugin/
 import { normalize } from "./src/normalize"
+import { sanitize } from "./src/sanitize"
 import { apply, createStore, derive } from "./src/state"
 
 const HEARTBEAT_MS = 20_000
@@ -11,10 +12,12 @@ const OPTIONS = [
   "@pane_dash_title",
   "@pane_dash_model",
 ] as const
-
-export function sanitize(value: string): string {
-  return value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 120)
-}
+const STARTUP_OPTIONS = [
+  "@pane_dash_status",
+  "@pane_dash_status_since",
+  "@pane_dash_title",
+  "@pane_dash_model",
+] as const
 
 export const PaneDash = async () => {
   const pane = process.env.TMUX_PANE
@@ -34,8 +37,8 @@ export const PaneDash = async () => {
     })
   }
 
-  const unsetOption = (name: string) => {
-    if (!written.has(name)) return
+  const unsetOption = (name: string, force = false) => {
+    if (!force && !written.has(name)) return
 
     written.delete(name)
     Bun.spawn(["tmux", "set-option", "-pu", "-t", pane, name], {
@@ -68,6 +71,7 @@ export const PaneDash = async () => {
     })
   }
 
+  for (const name of STARTUP_OPTIONS) unsetOption(name, true)
   heartbeat()
   const timer = setInterval(heartbeat, HEARTBEAT_MS)
   timer.unref?.()
