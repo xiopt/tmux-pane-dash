@@ -1,0 +1,6 @@
+{
+  "name": "pane-dash-opencode-plugin",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "bun test" }
+}
