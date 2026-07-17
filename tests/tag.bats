@@ -17,6 +17,15 @@ read_args() {
   fi
 }
 
+assert_call() {
+  local index="$1"
+  shift
+  local expected actual
+  expected="$(printf '%s\037' "$@")"
+  actual="$(sed -n "${index}p" "$TMUX_STUB_DIR/calls.log")"
+  [ "$actual" = "$expected" ]
+}
+
 @test "toggle tags an untagged pane with its current command" {
   printf 'nvim' > "$TMUX_STUB_DIR/panes.d/%5/pane_current_command"
   run "$SCRIPT" toggle %5
@@ -57,4 +66,14 @@ read_args() {
   [ "${args[5]}" = 'x#{pane_id}' ]
   read_args notifications.log
   [ "${args[*]}" = 'display-message pane-dash: tagged as x##{pane_id}' ]
+}
+
+@test "label-from-option consumes hostile input as a literal tag" {
+  printf '%s' 'it'"'"'s a #{pane_id} "x" ; echo pwned' > "$TMUX_STUB_DIR/panes.d/%5/@pane_dash_label_input"
+
+  run "$SCRIPT" label-from-option %5
+
+  [ "$status" -eq 0 ]
+  assert_call 1 set-option -pu -t %5 @pane_dash_label_input
+  assert_call 2 set-option -p -t %5 @pane_dash_tag 'it'"'"'s a #{pane_id} "x" ; echo pwned'
 }
