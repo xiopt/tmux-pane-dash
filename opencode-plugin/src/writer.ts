@@ -13,7 +13,7 @@ const SPAWN_OPTIONS = { stdout: "ignore", stderr: "ignore" } as const
 
 export class TmuxWriter {
   private pending = Promise.resolve()
-  private readonly written = new Map<string, string>()
+  private readonly written = new Map<string, string | undefined>()
 
   constructor(
     private readonly pane: string,
@@ -26,16 +26,16 @@ export class TmuxWriter {
 
   setOption(name: string, value: string, force = false): void {
     const sanitized = sanitize(value)
-    if (!force && this.written.get(name) === sanitized) return
+    if (!force && this.written.has(name) && this.written.get(name) === sanitized) return
 
     this.written.set(name, sanitized)
     this.enqueue(name, sanitized, ["tmux", "set-option", "-pt", this.pane, name, sanitized])
   }
 
   unsetOption(name: string, force = false): void {
-    if (!force && !this.written.has(name)) return
+    if (!force && this.written.has(name) && this.written.get(name) === undefined) return
 
-    this.written.delete(name)
+    this.written.set(name, undefined)
     this.enqueue(name, undefined, ["tmux", "set-option", "-pu", "-t", this.pane, name])
   }
 

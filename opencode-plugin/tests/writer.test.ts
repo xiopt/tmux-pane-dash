@@ -60,3 +60,20 @@ test("retries a value after its tmux write fails", async () => {
 
   expect(calls).toHaveLength(2)
 })
+
+test("retries an unset after its tmux write fails", async () => {
+  const calls: string[][] = []
+  const exits = [1, 0]
+  const spawn: Spawn = (command) => {
+    calls.push(command)
+    return { exited: Promise.resolve(exits.shift()!) }
+  }
+  const writer = new TmuxWriter("%1", spawn)
+
+  writer.unsetOption("@pane_dash_title", true)
+  await writer.flush()
+  writer.unsetOption("@pane_dash_title")
+  await writer.flush()
+
+  expect(calls).toHaveLength(2)
+})
