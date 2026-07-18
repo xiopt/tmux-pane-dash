@@ -57,12 +57,12 @@ These keys use the tmux prefix and are configurable.
 | --- | --- |
 | `j` / `k` (or arrow keys) | Move down / up in navigation mode |
 | `g` / `G` | First / last row in navigation mode |
-| `s` | Toggle status-priority and session-grouped sorting in navigation mode |
+| `s` | Toggle status-priority and hierarchical session grouping in navigation mode |
 | `/` | Enter filter mode |
 | `esc` | In filter mode, return to navigation mode and keep the query; in navigation mode, close the dashboard |
-| `enter` | Jump to the selected pane |
-| `ctrl-s` | Send a one-shot command to the selected pane |
-| `ctrl-z` | Zoom, then jump to the selected pane |
+| `enter` | Jump to the selected pane or session |
+| `ctrl-s` | Send a one-shot command to the selected pane (session rows are a no-op) |
+| `ctrl-z` | Zoom, then jump to the selected pane (session rows just jump) |
 | `q` | Close the dashboard in navigation mode |
 
 ## Configuration
@@ -97,7 +97,7 @@ mode persists across dashboard reloads and future opens.
 | `@pane-dash-preview-layout` | `right,55%,border-left` | Preview layout at or above the threshold |
 | `@pane-dash-preview-threshold` | `100` | Terminal columns below which the alternate layout is used |
 | `@pane-dash-preview-alt-layout` | `down,55%,border-top` | Preview layout below the threshold |
-| `@pane_dash_group` | `0` | Dashboard sort mode (`1` groups panes by session) |
+| `@pane_dash_group` | `0` | Dashboard sort mode (`1` renders session headers with indented panes) |
 
 ### Portrait monitors
 

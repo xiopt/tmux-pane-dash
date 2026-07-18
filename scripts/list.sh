@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/list.sh — emit dashboard rows: "<pane_id>\t<display>" per line.
+# scripts/list.sh — emit dashboard rows: "<key>\t<display>" per line.
 # Delimiter safety: one RS/US-framed list-panes stream is validated before
 # fields are sanitized and joined. Exactly one TAB is emitted per row.
 set -euo pipefail
@@ -120,7 +120,8 @@ while IFS= read -r record; do
     sort_pane="${pane_index:-9999999999}"
     case "$sort_window" in (*[!0-9]*) sort_window=9999999999 ;; esac
     case "$sort_pane" in (*[!0-9]*) sort_pane=9999999999 ;; esac
-    printf '%s\t%s\t%s\t%s\t%s\n' "$session" "$sort_window" "$sort_pane" "$pane" "$display"
+    rank "$status"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$session" "$sort_window" "$sort_pane" "$rank_value" "$pane" "$display"
   else
     rank "$status"
     printf '%s\t%s\t%s\t%s\n' "$rank_value" "$sort_since" "$pane" "$display"
@@ -154,7 +155,37 @@ done < <(
     '
 ) |
   if [ "$group_mode" = "1" ]; then
-    sort -t "$(printf '\t')" -k1,1 -k2,2n -k3,3n | cut -f4-
+    sort -t "$(printf '\t')" -k1,1 -k2,2n -k3,3n |
+      awk -F "$(printf '\t')" '
+        function rollup_glyph(rank) {
+          if (rank == 0) return "\033[31m●\033[0m"
+          if (rank == 1) return "\033[31m✖\033[0m"
+          if (rank == 2) return "\033[33m◐\033[0m"
+          if (rank == 3) return "\033[32m○\033[0m"
+          if (rank == 5) return "\033[90m~\033[0m"
+          return "\033[90m?\033[0m"
+        }
+        function flush_session(    label, i) {
+          if (!have_session) return
+          label = count == 1 ? "pane" : "panes"
+          printf "$%s\t\033[1;34m▸ %s\033[0m  %d %s  %s\n", session, session, count, label, rollup_glyph(worst_rank)
+          for (i = 1; i <= count; i++) print child[i]
+          delete child
+        }
+        !have_session || $1 != session {
+          flush_session()
+          session = $1
+          have_session = 1
+          count = 0
+          worst_rank = 6
+        }
+        {
+          count++
+          if ($4 < worst_rank) worst_rank = $4
+          child[count] = $5 "\t  " $6
+        }
+        END { flush_session() }
+      '
   else
     sort -t "$(printf '\t')" -k1,1n -k2,2n | cut -f3-
   fi

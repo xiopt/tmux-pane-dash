@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
-# scripts/preview.sh <pane_id> — render a live fzf preview for a pane.
+# scripts/preview.sh <pane_id|$session_name> — render a live fzf preview.
 set -uo pipefail
 
 pane="${1:-}"
 [ -n "$pane" ] || { echo "[no pane selected]"; exit 0; }
+
+if [[ "$pane" == \$* ]]; then
+  session="${pane#\$}"
+  target="=$session"
+  if ! tmux has-session -t "$target" 2>/dev/null; then
+    echo "[session gone]"
+    exit 0
+  fi
+  printf '\033[1;34m▸ %s\033[0m\n' "$session"
+  tmux list-windows -t "$target" -F '#{window_index}: #{window_name} #{?window_active,*, } #{window_panes} panes' \
+    2>/dev/null || echo "[session gone]"
+  exit 0
+fi
 
 pane_id="$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || true)"
 if [ "$pane_id" != "$pane" ]; then

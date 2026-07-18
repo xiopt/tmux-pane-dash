@@ -35,6 +35,14 @@ case "${1:-}" in
     log "$*"
     cat "${FAKE_TMUX_CAPTURE:-/dev/null}"
     ;;
+  has-session)
+    log "$*"
+    [ "${FAKE_TMUX_SESSION_GONE:-}" != "${3:-}" ]
+    ;;
+  list-windows)
+    log "$*"
+    cat "${FAKE_TMUX_WINDOWS:-/dev/null}"
+    ;;
   *)
     log "$*"
     ;;
@@ -91,6 +99,20 @@ EOF
   [[ "$output" == *'─────'* ]]
 }
 
+@test "preview shows a session overview instead of capturing a pane" {
+  export FAKE_TMUX_WINDOWS="$BATS_TEST_TMPDIR/windows"
+  printf '0: editor * 2 panes\n1: logs   1 pane\n' > "$FAKE_TMUX_WINDOWS"
+
+  run "$PREVIEW" '$alpha'
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'▸ alpha'* ]]
+  [[ "$output" == *'0: editor * 2 panes'* ]]
+  grep -Fx 'has-session -t =alpha' "$FAKE_TMUX_LOG"
+  grep -F 'list-windows -t =alpha -F' "$FAKE_TMUX_LOG"
+  ! grep -F 'capture-pane' "$FAKE_TMUX_LOG"
+}
+
 @test "jump switches the requested client in one zoom-preserving command" {
   pane
   run "$ACTION" jump %5 /dev/ttys001
@@ -105,6 +127,41 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(sed -n '1p' "$FAKE_TMUX_LOG")" = 'resize-pane -Z -t %5' ]
   [ "$(sed -n '2p' "$FAKE_TMUX_LOG")" = 'switch-client -Z -c /dev/ttys001 -t %5' ]
+}
+
+@test "session jump uses an exact session target" {
+  run "$ACTION" jump '$alpha' /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  grep -Fx 'has-session -t =alpha' "$FAKE_TMUX_LOG"
+  grep -Fx 'switch-client -c /dev/ttys001 -t =alpha' "$FAKE_TMUX_LOG"
+}
+
+@test "session jump does nothing when the session is gone" {
+  FAKE_TMUX_SESSION_GONE==alpha run "$ACTION" jump '$alpha' /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  grep -Fx 'has-session -t =alpha' "$FAKE_TMUX_LOG"
+  ! grep -F 'switch-client' "$FAKE_TMUX_LOG"
+}
+
+@test "session zoom is a plain jump" {
+  run "$ACTION" zoom '$alpha' /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  grep -Fx 'switch-client -c /dev/ttys001 -t =alpha' "$FAKE_TMUX_LOG"
+  ! grep -F 'resize-pane' "$FAKE_TMUX_LOG"
+}
+
+@test "session send tells the user to select a pane" {
+  tty="$BATS_TEST_TMPDIR/tty"
+  : > "$tty"
+
+  PANE_DASH_TTY="$tty" run "$ACTION" send '$alpha'
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$tty")" = 'select a pane, not a session' ]
+  [ ! -s "$FAKE_TMUX_LOG" ]
 }
 
 @test "send injects a literal line then a separate Enter" {

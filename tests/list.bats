@@ -77,7 +77,7 @@ basepane() { # basepane <id> — native fields every pane has
   [[ "${lines[0]}" == "%2"$'\t'* ]]
 }
 
-@test "grouped mode sorts sessions and window and pane indexes numerically" {
+@test "grouped mode emits session headers before numerically sorted pane children" {
   printf '1' > "$TMUX_STUB_DIR/global/@pane_dash_group"
   basepane %1; basepane %2; basepane %3; basepane %4
   mkpane %1 session_name beta  window_index 1  pane_index 0  pane_current_command opencode
@@ -88,10 +88,27 @@ basepane() { # basepane <id> — native fields every pane has
   run "$SCRIPT"
 
   [ "$status" -eq 0 ]
-  [[ "${lines[0]}" == "%4"$'\t'* ]]
-  [[ "${lines[1]}" == "%3"$'\t'* ]]
-  [[ "${lines[2]}" == "%2"$'\t'* ]]
-  [[ "${lines[3]}" == "%1"$'\t'* ]]
+  [[ "${lines[0]}" == '$alpha'$'\t'* ]]
+  [[ "${lines[0]}" == *'3 panes'* ]]
+  [[ "${lines[1]}" == "%4"$'\t  '* ]]
+  [[ "${lines[2]}" == "%3"$'\t  '* ]]
+  [[ "${lines[3]}" == "%2"$'\t  '* ]]
+  [[ "${lines[4]}" == '$beta'$'\t'* ]]
+  [[ "${lines[5]}" == "%1"$'\t  '* ]]
+}
+
+@test "grouped session header uses the worst child status glyph" {
+  printf '1' > "$TMUX_STUB_DIR/global/@pane_dash_group"
+  basepane %1; basepane %2
+  mkpane %1 session_name alpha pane_current_command opencode
+  mkpane %2 session_name alpha @pane_dash_status needs_input @pane_dash_heartbeat 999990
+
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+  [[ "${lines[0]}" == '$alpha'$'\t'* ]]
+  [[ "${lines[0]}" == *'2 panes'* ]]
+  [[ "${lines[0]}" == *'●'* ]]
 }
 
 @test "toggle-group enables session grouping when disabled" {
