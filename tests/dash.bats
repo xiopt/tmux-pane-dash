@@ -29,6 +29,39 @@
   grep -F 'display-popup -c /dev/fallback-client -t %fallback-pane -E' "$FAKE_TMUX_LOG"
 }
 
+@test "outer cold path records successful dependency versions" {
+  install_outer_stubs
+
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" TMUX=stub \
+    "$BATS_TEST_DIRNAME/../scripts/dash.sh" /dev/ttys042 %42
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$FAKE_TMUX_GLOBAL/@pane_dash_version_ok")" = '3.7:0.73.1' ]
+}
+
+@test "outer warm path skips tmux and fzf version commands" {
+  install_outer_stubs
+  printf '%s' '3.7:0.73.1' > "$FAKE_TMUX_GLOBAL/@pane_dash_version_ok"
+
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" TMUX=stub \
+    "$BATS_TEST_DIRNAME/../scripts/dash.sh" /dev/ttys042 %42
+
+  [ "$status" -eq 0 ]
+  if grep -Fx -- '-V' "$FAKE_TMUX_LOG"; then false; fi
+  if grep -Fx -- '--version' "$FAKE_FZF_LOG"; then false; fi
+}
+
+@test "--recheck clears the cached version check" {
+  install_outer_stubs
+  printf '%s' '3.7:0.73.1' > "$FAKE_TMUX_GLOBAL/@pane_dash_version_ok"
+
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" \
+    "$BATS_TEST_DIRNAME/../scripts/dash.sh" --recheck
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$FAKE_TMUX_GLOBAL/@pane_dash_version_ok" ]
+}
+
 @test "inner mode reloads list.sh when scripts live in a path with spaces" {
   copy_root="$BATS_TEST_TMPDIR/with space"
   mkdir -p "$copy_root" "$BATS_TEST_TMPDIR/bin"
@@ -62,6 +95,66 @@ EOF
 
   [ "$status" -eq 0 ]
   grep -Fx 'reload succeeded' "$FZF_LOG"
+}
+
+@test "inner mode paints cached rows before atomically refreshing a private cache" {
+  export FZF_LOG="$BATS_TEST_TMPDIR/fzf.log"
+  export FZF_STDIN="$BATS_TEST_TMPDIR/fzf.stdin"
+  export TMUX_TMPDIR="$BATS_TEST_TMPDIR/tmux tmp"
+  cache="$TMUX_TMPDIR/pane-dash-cache-$(id -u)"
+  mkdir -p "$BATS_TEST_TMPDIR/bin" "$TMUX_TMPDIR"
+  printf 'stale-row\n' > "$cache"
+  chmod 600 "$cache"
+
+  cat > "$BATS_TEST_TMPDIR/bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-panes) exit 0 ;;
+  show-option | display-message) exit 0 ;;
+esac
+EOF
+  cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat > "$FZF_STDIN"
+printf '%s\n' "$@" > "$FZF_LOG"
+for arg; do
+  case "$arg" in
+    start:reload-sync\(*)
+      command="${arg#start:reload-sync(}"
+      command="${command%%)+refresh-preview}"
+      bash -c "$command"
+      ;;
+  esac
+done
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/tmux" "$BATS_TEST_TMPDIR/bin/fzf"
+
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" \
+    "$BATS_TEST_DIRNAME/../scripts/dash.sh" --inner /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$FZF_STDIN")" = 'stale-row' ]
+  grep -F 'start:reload-sync(' "$FZF_LOG"
+  grep -F 'every(1):reload-sync(' "$FZF_LOG"
+  [ ! -s "$cache" ]
+  [ "$(stat -f '%Lp' "$cache")" = '600' ]
+}
+
+@test "inner fzf startup failure clears the version-check cache" {
+  install_outer_stubs
+  printf '%s' '3.7:0.73.1' > "$FAKE_TMUX_GLOBAL/@pane_dash_version_ok"
+  cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'EOF'
+#!/usr/bin/env bash
+exit 2
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/fzf"
+
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" \
+    "$BATS_TEST_DIRNAME/../scripts/dash.sh" --inner /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$FAKE_TMUX_GLOBAL/@pane_dash_version_ok" ]
 }
 
 @test "inner mode uses the default adaptive preview layout" {
@@ -157,7 +250,11 @@ EOF
 install_outer_stubs() {
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   export FAKE_TMUX_LOG="$BATS_TEST_TMPDIR/tmux.log"
+  export FAKE_TMUX_GLOBAL="$BATS_TEST_TMPDIR/tmux-global"
+  export FAKE_FZF_LOG="$BATS_TEST_TMPDIR/fzf.log"
+  mkdir -p "$FAKE_TMUX_GLOBAL"
   : > "$FAKE_TMUX_LOG"
+  : > "$FAKE_FZF_LOG"
 
   cat > "$BATS_TEST_TMPDIR/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
@@ -165,8 +262,18 @@ set -euo pipefail
 log() { printf '%s\n' "$*" >> "$FAKE_TMUX_LOG"; }
 
 case "${1:-}" in
-  -V) printf 'tmux 3.7b\n' ;;
-  show-option) exit 0 ;;
+  -V) log "$*"; printf 'tmux 3.7b\n' ;;
+  show-option)
+    log "$*"
+    [ "${2:-}" = '-gqv' ] && cat "$FAKE_TMUX_GLOBAL/$3" 2>/dev/null || true
+    ;;
+  set | set-option)
+    log "$*"
+    case "${2:-}" in
+      -g) printf '%s' "$4" > "$FAKE_TMUX_GLOBAL/$3" ;;
+      -gu) rm -f "$FAKE_TMUX_GLOBAL/$3" ;;
+    esac
+    ;;
   display-message)
     log "$*"
     if [ "${2:-}" = '-p' ]; then
@@ -179,8 +286,9 @@ case "${1:-}" in
   display-popup) log "$*" ;;
 esac
 EOF
-  cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'EOF'
+cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_FZF_LOG"
 [ "${1:-}" = '--version' ] && printf '0.73.1\n'
 EOF
   chmod +x "$BATS_TEST_TMPDIR/bin/tmux" "$BATS_TEST_TMPDIR/bin/fzf"

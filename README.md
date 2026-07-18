@@ -107,6 +107,19 @@ The preview automatically moves below the list when the popup is narrower than
 100 columns, keeping list columns readable on tall, narrow monitors. Adjust the
 three preview options above to suit a different popup size or preferred split.
 
+### Troubleshooting
+
+The dashboard caches a successful tmux/fzf version check to make later opens
+faster. After upgrading either dependency, if the dashboard behaves strangely
+or reports an unexpected compatibility problem, clear that cache once from a
+tmux shell:
+
+```bash
+path/to/tmux-pane-dash/scripts/dash.sh --recheck
+```
+
+The next dashboard open performs the full version check again.
+
 ## Status legend
 
 | Status | Glyph and color | Meaning |
