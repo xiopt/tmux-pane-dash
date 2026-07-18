@@ -51,7 +51,7 @@ pane() {
   printf 'opencode' > "$FAKE_TMUX_VALUES/%5/pane_current_command"
 }
 
-@test "preview captures alternate-screen content after a path and title header" {
+@test "preview captures the visible screen after a path and title header when alternate mode is active" {
   pane 1
   export FAKE_TMUX_CAPTURE="$BATS_TEST_TMPDIR/capture"
   printf 'alternate content\n' > "$FAKE_TMUX_CAPTURE"
@@ -60,7 +60,16 @@ pane() {
   [[ "$output" == *'/work/project'* ]]
   [[ "$output" == *'Fix preview'* ]]
   [[ "$output" == *'alternate content'* ]]
-  grep -Fx 'capture-pane -aep -t %5' "$FAKE_TMUX_LOG"
+  grep -Fx 'capture-pane -ep -t %5' "$FAKE_TMUX_LOG"
+  ! grep -F -- '-a' "$FAKE_TMUX_LOG"
+}
+
+@test "preview captures the visible screen when alternate mode is inactive" {
+  pane 0
+  run "$PREVIEW" %5
+  [ "$status" -eq 0 ]
+  grep -Fx 'capture-pane -ep -t %5' "$FAKE_TMUX_LOG"
+  ! grep -F -- '-a' "$FAKE_TMUX_LOG"
 }
 
 @test "preview reports a disappeared pane without leaking tmux errors" {
