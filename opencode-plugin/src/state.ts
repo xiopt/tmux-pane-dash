@@ -52,11 +52,30 @@ function session(store: Store, id: string): SessionState {
 
 function topLevelSessionID(store: Store, sessionID: string): string {
   let id = sessionID
+  const visited = new Set<string>()
   while (true) {
+    if (visited.has(id)) return id
+    visited.add(id)
     const parentID = store.sessions.get(id)?.parentID
     if (!parentID) return id
     id = parentID
   }
+}
+
+function clearErrorLatchesForRoot(store: Store, sessionID: string): void {
+  const rootID = topLevelSessionID(store, sessionID)
+  const descendants = new Set([rootID])
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const [id, s] of store.sessions) {
+      if (!descendants.has(id) && s.parentID && descendants.has(s.parentID)) {
+        descendants.add(id)
+        grew = true
+      }
+    }
+  }
+  for (const id of descendants) session(store, id).errorLatched = false
 }
 
 export function apply(store: Store, ev: NormEvent): void {
@@ -64,7 +83,7 @@ export function apply(store: Store, ev: NormEvent): void {
     case "status": {
       const s = session(store, ev.sessionID)
       s.runtime = ev.status
-      if (ev.status === "busy") s.errorLatched = false
+      if (ev.status === "busy") clearErrorLatchesForRoot(store, ev.sessionID)
       break
     }
     case "request.open":
@@ -79,12 +98,17 @@ export function apply(store: Store, ev: NormEvent): void {
       break
     }
     case "user-message":
-      session(store, ev.sessionID).errorLatched = false
+      clearErrorLatchesForRoot(store, ev.sessionID)
       store.activeSessionID = topLevelSessionID(store, ev.sessionID)
       break
     case "session.meta": {
       const s = session(store, ev.sessionID)
-      if (ev.parentID !== undefined) s.parentID = ev.parentID
+      if (ev.parentID !== undefined) {
+        s.parentID = ev.parentID
+        if (store.activeSessionID === ev.sessionID) {
+          store.activeSessionID = topLevelSessionID(store, ev.sessionID)
+        }
+      }
       if (ev.title !== undefined) s.title = ev.title
       break
     }

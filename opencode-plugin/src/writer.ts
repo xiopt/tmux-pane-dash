@@ -56,10 +56,8 @@ export class TmuxWriter {
   private async drain(): Promise<void> {
     while (this.completedGeneration < this.generation) {
       const generation = this.generation
-      for (const [name, value] of this.desired) {
-        if (this.matches(name, value)) continue
-        await this.write(name, value)
-      }
+      const changes = [...this.desired].filter(([name, value]) => !this.matches(name, value))
+      if (changes.length > 0) await this.write(changes)
       this.completedGeneration = generation
     }
     this.draining = false
@@ -69,12 +67,17 @@ export class TmuxWriter {
     return this.confirmed.has(name) && this.confirmed.get(name) === value
   }
 
-  private async write(name: string, value: string | undefined): Promise<void> {
-    const command = value === undefined
-      ? ["tmux", "set-option", "-pu", "-t", this.pane, name]
-      : ["tmux", "set-option", "-pt", this.pane, name, value]
+  private async write(changes: [string, string | undefined][]): Promise<void> {
+    const command = ["tmux"]
+    for (const [index, [name, value]] of changes.entries()) {
+      if (index > 0) command.push(";")
+      if (value === undefined) command.push("set-option", "-pu", "-t", this.pane, name)
+      else command.push("set-option", "-pt", this.pane, name, value)
+    }
     try {
-      if ((await this.spawn(command, SPAWN_OPTIONS).exited) === 0) this.confirmed.set(name, value)
+      if ((await this.spawn(command, SPAWN_OPTIONS).exited) === 0) {
+        for (const [name, value] of changes) this.confirmed.set(name, value)
+      }
     } catch {
       // Keep the desired value so the next kick retries it.
     }

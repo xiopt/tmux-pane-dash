@@ -29,6 +29,45 @@ test("converges directly to the final startup status", async () => {
   expect(options.get("@pane_dash_status")).toBe("idle")
 })
 
+test("batches multiple pending options into one tmux invocation", async () => {
+  const calls: string[][] = []
+  const spawn: Spawn = (command) => {
+    calls.push(command)
+    return { exited: Promise.resolve(0) }
+  }
+  const writer = new TmuxWriter("%1", spawn)
+
+  writer.setOption("@pane_dash_status", "idle")
+  writer.setOption("@pane_dash_title", "Fix auth")
+  writer.unsetOption("@pane_dash_model")
+  await writer.flush()
+
+  expect(calls).toEqual([[
+    "tmux", "set-option", "-pt", "%1", "@pane_dash_status", "idle",
+    ";", "set-option", "-pt", "%1", "@pane_dash_title", "Fix auth",
+    ";", "set-option", "-pu", "-t", "%1", "@pane_dash_model",
+  ]])
+})
+
+test("retries every key from a failed batch on the next kick", async () => {
+  const calls: string[][] = []
+  const exits = [1, 0]
+  const spawn: Spawn = (command) => {
+    calls.push(command)
+    return { exited: Promise.resolve(exits.shift()!) }
+  }
+  const writer = new TmuxWriter("%1", spawn)
+
+  writer.setOption("@pane_dash_status", "idle")
+  writer.setOption("@pane_dash_title", "Fix auth")
+  await writer.flush()
+  writer.setOption("@pane_dash_status", "idle")
+  await writer.flush()
+
+  expect(calls).toHaveLength(2)
+  expect(calls[1]).toEqual(calls[0])
+})
+
 test("retries a value after its tmux write fails", async () => {
   const calls: string[][] = []
   const exits = [1, 0]

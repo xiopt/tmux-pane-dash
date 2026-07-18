@@ -82,6 +82,41 @@ describe("derive precedence", () => {
     expect(r.status).toBe("idle")
   })
 
+  test("parent busy clears an error latched by a child", () => {
+    expect(
+      run([
+        { type: "session.meta", sessionID: "child", parentID: "parent" },
+        { type: "active", sessionID: "parent" },
+        { type: "error", sessionID: "child" },
+        { type: "status", sessionID: "parent", status: "busy" },
+      ]).status,
+    ).toBe("working")
+  })
+
+  test("parent user message clears an error latched by a child without setting working", () => {
+    expect(
+      run([
+        { type: "session.meta", sessionID: "child", parentID: "parent" },
+        { type: "active", sessionID: "parent" },
+        { type: "status", sessionID: "parent", status: "idle" },
+        { type: "error", sessionID: "child" },
+        { type: "user-message", sessionID: "parent" },
+      ]).status,
+    ).toBe("idle")
+  })
+
+  test("a child error latches again after a root-scoped clear", () => {
+    expect(
+      run([
+        { type: "session.meta", sessionID: "child", parentID: "parent" },
+        { type: "active", sessionID: "parent" },
+        { type: "error", sessionID: "child" },
+        { type: "status", sessionID: "parent", status: "busy" },
+        { type: "error", sessionID: "child" },
+      ]).status,
+    ).toBe("error")
+  })
+
   test("error without sessionID latches on active session", () => {
     expect(
       run([
@@ -123,6 +158,30 @@ describe("active-session attribution", () => {
       apply(store, event)
     }
     expect(store.activeSessionID).toBe("parent")
+  })
+
+  test("cyclic parent metadata does not prevent deriving status", () => {
+    const store = createStore()
+    apply(store, { type: "session.meta", sessionID: "a", parentID: "b" })
+    apply(store, { type: "session.meta", sessionID: "b", parentID: "a" })
+    apply(store, { type: "user-message", sessionID: "a" })
+
+    expect(derive(store).status).toBe("unknown")
+  })
+
+  test("parent metadata re-roots an active child session", () => {
+    const store = createStore()
+    for (const event of [
+      { type: "status", sessionID: "parent", status: "idle" },
+      { type: "user-message", sessionID: "child" },
+      { type: "status", sessionID: "child", status: "busy" },
+      { type: "session.meta", sessionID: "child", parentID: "parent" },
+    ] satisfies NormEvent[]) {
+      apply(store, event)
+    }
+
+    expect(store.activeSessionID).toBe("parent")
+    expect(derive(store).status).toBe("working")
   })
 
   test("active subtree includes children when the active parent has no state entry", () => {
