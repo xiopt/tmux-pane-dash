@@ -18,18 +18,25 @@ case "${1:-}" in
     pane="$4"
     format="$5"
     key="${format#\#\{}"; key="${key%\}}"
-    value="$FAKE_TMUX_VALUES/$pane/$key"
     # tmux 3.7b returns success with no output for an unknown pane.
-    if [ "$key" = 'pane_id' ] && [ "${FAKE_TMUX_VANISH_AFTER_FIRST_PROBE:-}" = "$pane" ]; then
+    if [[ "$format" == *'#{pane_id}'* ]] && [ "${FAKE_TMUX_VANISH_AFTER_FIRST_PROBE:-}" = "$pane" ]; then
       probes_file="$FAKE_TMUX_VALUES/$pane.probes"
       probes="$(cat "$probes_file" 2>/dev/null || echo 0)"
       probes=$((probes + 1))
       printf '%s' "$probes" > "$probes_file"
       [ "$probes" -eq 1 ] || exit 0
     fi
-    if [ -f "$value" ]; then
-      cat "$value"
-    fi
+    rendered="$format"
+    while [[ "$rendered" == *'#{'* ]]; do
+      prefix="${rendered%%\#\{*}"
+      remainder="${rendered#*\#\{}"
+      field="${remainder%%\}*}"
+      rendered_rest="${remainder#*\}}"
+      value="$(cat "$FAKE_TMUX_VALUES/$pane/$field" 2>/dev/null || true)"
+      rendered="$prefix$value$rendered_rest"
+    done
+    printf '%s' "$rendered"
+    [ -z "${FAKE_TMUX_DISPLAY_LOG:-}" ] || log "$*"
     ;;
   capture-pane)
     log "$*"
@@ -45,6 +52,7 @@ case "${1:-}" in
     ;;
   *)
     log "$*"
+    [ "${FAKE_TMUX_FAIL_FINAL:-}" != "${1:-}" ] || exit 1
     ;;
 esac
 EOF
@@ -70,6 +78,19 @@ pane() {
   [[ "$output" == *'alternate content'* ]]
   grep -Fx 'capture-pane -ep -t %5' "$FAKE_TMUX_LOG"
   ! grep -F -- '-a' "$FAKE_TMUX_LOG"
+}
+
+@test "preview gets pane identity, path, and title in one probe" {
+  pane
+  export FAKE_TMUX_DISPLAY_LOG=1
+
+  run "$PREVIEW" %5
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^display-message ' "$FAKE_TMUX_LOG")" -eq 1 ]
+  grep -F '#{pane_id}' "$FAKE_TMUX_LOG"
+  grep -F '#{pane_current_path}' "$FAKE_TMUX_LOG"
+  grep -F '#{@pane_dash_title}' "$FAKE_TMUX_LOG"
 }
 
 @test "preview captures the visible screen when alternate mode is inactive" {
@@ -103,13 +124,13 @@ EOF
   export FAKE_TMUX_WINDOWS="$BATS_TEST_TMPDIR/windows"
   printf '0: editor * 2 panes\n1: logs   1 pane\n' > "$FAKE_TMUX_WINDOWS"
 
-  run "$PREVIEW" '$alpha'
+  run "$PREVIEW" '$1'
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *'▸ alpha'* ]]
+  [[ "$output" == *'▸ $1'* ]]
   [[ "$output" == *'0: editor * 2 panes'* ]]
-  grep -Fx 'has-session -t =alpha' "$FAKE_TMUX_LOG"
-  grep -F 'list-windows -t =alpha -F' "$FAKE_TMUX_LOG"
+  grep -Fx 'has-session -t $1' "$FAKE_TMUX_LOG"
+  grep -F 'list-windows -t $1 -F' "$FAKE_TMUX_LOG"
   ! grep -F 'capture-pane' "$FAKE_TMUX_LOG"
 }
 
@@ -129,27 +150,27 @@ EOF
   [ "$(sed -n '2p' "$FAKE_TMUX_LOG")" = 'switch-client -Z -c /dev/ttys001 -t %5' ]
 }
 
-@test "session jump uses an exact session target" {
-  run "$ACTION" jump '$alpha' /dev/ttys001
+@test "session jump uses its session id target" {
+  run "$ACTION" jump '$1' /dev/ttys001
 
   [ "$status" -eq 0 ]
-  grep -Fx 'has-session -t =alpha' "$FAKE_TMUX_LOG"
-  grep -Fx 'switch-client -c /dev/ttys001 -t =alpha' "$FAKE_TMUX_LOG"
+  grep -Fx 'has-session -t $1' "$FAKE_TMUX_LOG"
+  grep -Fx 'switch-client -c /dev/ttys001 -t $1' "$FAKE_TMUX_LOG"
 }
 
 @test "session jump does nothing when the session is gone" {
-  FAKE_TMUX_SESSION_GONE==alpha run "$ACTION" jump '$alpha' /dev/ttys001
+  FAKE_TMUX_SESSION_GONE='$1' run "$ACTION" jump '$1' /dev/ttys001
 
   [ "$status" -eq 0 ]
-  grep -Fx 'has-session -t =alpha' "$FAKE_TMUX_LOG"
+  grep -Fx 'has-session -t $1' "$FAKE_TMUX_LOG"
   ! grep -F 'switch-client' "$FAKE_TMUX_LOG"
 }
 
 @test "session zoom is a plain jump" {
-  run "$ACTION" zoom '$alpha' /dev/ttys001
+  run "$ACTION" zoom '$1' /dev/ttys001
 
   [ "$status" -eq 0 ]
-  grep -Fx 'switch-client -c /dev/ttys001 -t =alpha' "$FAKE_TMUX_LOG"
+  grep -Fx 'switch-client -c /dev/ttys001 -t $1' "$FAKE_TMUX_LOG"
   ! grep -F 'resize-pane' "$FAKE_TMUX_LOG"
 }
 
@@ -157,11 +178,29 @@ EOF
   tty="$BATS_TEST_TMPDIR/tty"
   : > "$tty"
 
-  PANE_DASH_TTY="$tty" run "$ACTION" send '$alpha'
+  PANE_DASH_TTY="$tty" run "$ACTION" send '$1'
 
   [ "$status" -eq 0 ]
   [ "$(<"$tty")" = 'select a pane, not a session' ]
   [ ! -s "$FAKE_TMUX_LOG" ]
+}
+
+@test "jump exits silently when its final switch target vanishes" {
+  FAKE_TMUX_FAIL_FINAL=switch-client run "$ACTION" jump %5 /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "send reports a vanished pane when its final delivery fails" {
+  pane
+  tty="$BATS_TEST_TMPDIR/tty"
+  printf 'deploy this\n' > "$tty"
+
+  FAKE_TMUX_FAIL_FINAL=send-keys PANE_DASH_TTY="$tty" run "$ACTION" send %5
+
+  [ "$status" -eq 0 ]
+  grep -F 'pane %5 vanished, aborted' "$tty"
 }
 
 @test "send injects a literal line then a separate Enter" {

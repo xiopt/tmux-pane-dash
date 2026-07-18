@@ -16,7 +16,7 @@ mkpane() { # mkpane <id> <key> <value>...
 
 basepane() { # basepane <id> — native fields every pane has
   mkpane "$1" pane_current_command zsh pane_current_path /tmp/proj \
-    session_name work window_index 1 pane_index 0
+    session_id '$1' session_name work window_index 1 pane_index 0
 }
 
 @test "plugin pane with fresh heartbeat is listed with its status" {
@@ -80,7 +80,7 @@ basepane() { # basepane <id> — native fields every pane has
 @test "grouped mode emits session headers before numerically sorted pane children" {
   printf '1' > "$TMUX_STUB_DIR/global/@pane_dash_group"
   basepane %1; basepane %2; basepane %3; basepane %4
-  mkpane %1 session_name beta  window_index 1  pane_index 0  pane_current_command opencode
+  mkpane %1 session_id '$2' session_name beta  window_index 1  pane_index 0  pane_current_command opencode
   mkpane %2 session_name alpha window_index 10 pane_index 0  pane_current_command opencode
   mkpane %3 session_name alpha window_index 2  pane_index 10 pane_current_command opencode
   mkpane %4 session_name alpha window_index 2  pane_index 2  pane_current_command opencode
@@ -88,12 +88,12 @@ basepane() { # basepane <id> — native fields every pane has
   run "$SCRIPT"
 
   [ "$status" -eq 0 ]
-  [[ "${lines[0]}" == '$alpha'$'\t'* ]]
+  [[ "${lines[0]}" == '$1'$'\t'* ]]
   [[ "${lines[0]}" == *'3 panes'* ]]
   [[ "${lines[1]}" == "%4"$'\t  '* ]]
   [[ "${lines[2]}" == "%3"$'\t  '* ]]
   [[ "${lines[3]}" == "%2"$'\t  '* ]]
-  [[ "${lines[4]}" == '$beta'$'\t'* ]]
+  [[ "${lines[4]}" == '$2'$'\t'* ]]
   [[ "${lines[5]}" == "%1"$'\t  '* ]]
 }
 
@@ -106,9 +106,37 @@ basepane() { # basepane <id> — native fields every pane has
   run "$SCRIPT"
 
   [ "$status" -eq 0 ]
-  [[ "${lines[0]}" == '$alpha'$'\t'* ]]
+  [[ "${lines[0]}" == '$1'$'\t'* ]]
   [[ "${lines[0]}" == *'2 panes'* ]]
   [[ "${lines[0]}" == *'●'* ]]
+}
+
+@test "grouped mode keeps long same-prefix sessions distinct by session id" {
+  printf '1' > "$TMUX_STUB_DIR/global/@pane_dash_group"
+  basepane %1; basepane %2
+  mkpane %1 session_id '$10' session_name 'abcdefghijklmnopqrst-one' pane_current_command opencode
+  mkpane %2 session_id '$11' session_name 'abcdefghijklmnopqrst-two' pane_current_command opencode
+
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 4 ]
+  [[ "${lines[0]}" == '$10'$'\t'* ]]
+  [[ "${lines[0]}" == *'abcdefghijklmnopqrst'* ]]
+  [[ "${lines[2]}" == '$11'$'\t'* ]]
+  [[ "${lines[2]}" == *'abcdefghijklmnopqrst'* ]]
+}
+
+@test "a long session name uses its session id as the grouped header key" {
+  printf '1' > "$TMUX_STUB_DIR/global/@pane_dash_group"
+  basepane %1
+  mkpane %1 session_id '$24' session_name 'abcdefghijklmnopqrstuvwx' pane_current_command opencode
+
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+  [[ "${lines[0]}" == '$24'$'\t'* ]]
+  [[ "${lines[0]}" != '$abcdefghijklmnopqrst'* ]]
 }
 
 @test "toggle-group enables session grouping when disabled" {

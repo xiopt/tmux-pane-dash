@@ -83,7 +83,8 @@ set -g @pane-dash-preview-alt-layout 'down,55%,border-top'
 ```
 
 Pressing `s` changes the global `@pane_dash_group` option; its selected sort
-mode persists across dashboard reloads and future opens.
+mode persists across dashboard reloads and future opens, intentionally shared
+across all clients.
 
 | Option | Default | Description |
 | --- | --- | --- |

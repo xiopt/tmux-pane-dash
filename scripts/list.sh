@@ -75,13 +75,13 @@ color_status() { # needs_input gets red text (spec: highlighted)
 
 rs="$(printf '\036')"
 us="$(printf '\037')"
-format="${rs}#{pane_id}${us}#{@pane_dash_status}${us}#{@pane_dash_tag}${us}#{@pane_dash_heartbeat}${us}#{@pane_dash_status_since}${us}#{@pane_dash_model}${us}#{@pane_dash_title}${us}#{session_name}${us}#{window_index}${us}#{pane_index}${us}#{pane_current_path}${us}#{pane_current_command}"
+format="${rs}#{pane_id}${us}#{@pane_dash_status}${us}#{@pane_dash_tag}${us}#{@pane_dash_heartbeat}${us}#{@pane_dash_status_since}${us}#{@pane_dash_model}${us}#{@pane_dash_title}${us}#{session_name}${us}#{session_id}${us}#{window_index}${us}#{pane_index}${us}#{pane_current_path}${us}#{pane_current_command}"
 
 # A newline in a hostile value yields a continuation line. Hold each record
 # until the next record (or EOF), so any continuation drops the whole record.
 while IFS= read -r record; do
   payload="${record#"$rs"}"
-  IFS="$us" read -r pane plug_status tag hb since model title session window pane_index path cmd <<< "$payload"
+  IFS="$us" read -r pane plug_status tag hb since model title session session_id window pane_index path cmd <<< "$payload"
 
   [ -n "$pane" ] || continue
 
@@ -121,7 +121,7 @@ while IFS= read -r record; do
     case "$sort_window" in (*[!0-9]*) sort_window=9999999999 ;; esac
     case "$sort_pane" in (*[!0-9]*) sort_pane=9999999999 ;; esac
     rank "$status"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$session" "$sort_window" "$sort_pane" "$rank_value" "$pane" "$display"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$session" "$session_id" "$sort_window" "$sort_pane" "$rank_value" "$pane" "$display"
   else
     rank "$status"
     printf '%s\t%s\t%s\t%s\n' "$rank_value" "$sort_since" "$pane" "$display"
@@ -137,8 +137,8 @@ done < <(
       function flush(    field, count, i, limits, output) {
         if (!have || bad) return
         count = split(substr(record, 2), field, us)
-        if (count != 12) return
-        split("120 20 80 20 20 24 60 20 6 6 200 40", limits, " ")
+        if (count != 13) return
+        split("120 20 80 20 20 24 60 20 20 6 6 200 40", limits, " ")
         output = rs
         for (i = 1; i <= count; i++) output = output clean(field[i], limits[i]) (i == count ? "" : us)
         print output
@@ -147,7 +147,7 @@ done < <(
         flush()
         record = $0
         have = 1
-        bad = (split(substr($0, 2), fields, us) != 12)
+        bad = (split(substr($0, 2), fields, us) != 13)
         next
       }
       { if (have) bad = 1 }
@@ -155,7 +155,7 @@ done < <(
     '
 ) |
   if [ "$group_mode" = "1" ]; then
-    sort -t "$(printf '\t')" -k1,1 -k2,2n -k3,3n |
+    sort -t "$(printf '\t')" -k1,1 -k2,2 -k3,3n -k4,4n |
       awk -F "$(printf '\t')" '
         function rollup_glyph(rank) {
           if (rank == 0) return "\033[31m●\033[0m"
@@ -168,21 +168,22 @@ done < <(
         function flush_session(    label, i) {
           if (!have_session) return
           label = count == 1 ? "pane" : "panes"
-          printf "$%s\t\033[1;34m▸ %s\033[0m  %d %s  %s\n", session, session, count, label, rollup_glyph(worst_rank)
+           printf "%s\t\033[1;34m▸ %s\033[0m  %d %s  %s\n", session_id, session, count, label, rollup_glyph(worst_rank)
           for (i = 1; i <= count; i++) print child[i]
           delete child
         }
-        !have_session || $1 != session {
+         !have_session || $2 != session_id {
           flush_session()
-          session = $1
+           session = $1
+           session_id = $2
           have_session = 1
           count = 0
           worst_rank = 6
         }
         {
           count++
-          if ($4 < worst_rank) worst_rank = $4
-          child[count] = $5 "\t  " $6
+           if ($5 < worst_rank) worst_rank = $5
+           child[count] = $6 "\t  " $7
         }
         END { flush_session() }
       '

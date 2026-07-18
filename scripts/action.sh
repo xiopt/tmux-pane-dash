@@ -19,30 +19,24 @@ session_key() {
   [[ "$pane" == \$* ]] && [ -n "${pane#\$}" ]
 }
 
-session_target() {
-  printf '=%s' "${pane#\$}"
-}
-
 session_exists() {
-  tmux has-session -t "$(session_target)" 2>/dev/null
+  tmux has-session -t "$pane" 2>/dev/null
 }
 
 session_jump() {
-  local target
-  target="$(session_target)"
   if [ -n "$client" ]; then
-    tmux switch-client -c "$client" -t "$target"
+    tmux switch-client -c "$client" -t "$pane" >/dev/null 2>&1
   else
-    tmux switch-client -t "$target"
+    tmux switch-client -t "$pane" >/dev/null 2>&1
   fi
 }
 
 jump() {
   # -c pins the originating client; -Z preserves its zoom state.
   if [ -n "$client" ]; then
-    tmux switch-client -Z -c "$client" -t "$pane"
+    tmux switch-client -Z -c "$client" -t "$pane" >/dev/null 2>&1
   else
-    tmux switch-client -Z -t "$pane"
+    tmux switch-client -Z -t "$pane" >/dev/null 2>&1
   fi
 }
 
@@ -50,20 +44,20 @@ case "$cmd" in
   jump)
     if session_key; then
       session_exists || exit 0
-      session_jump
+      session_jump || exit 0
     else
       pane_exists || exit 0
-      jump
+      jump || exit 0
     fi
     ;;
   zoom)
     if session_key; then
       session_exists || exit 0
-      session_jump
+      session_jump || exit 0
     else
       pane_exists || exit 0
-      tmux resize-pane -Z -t "$pane"
-      jump
+      tmux resize-pane -Z -t "$pane" >/dev/null 2>&1 || exit 0
+      jump || exit 0
     fi
     ;;
   send)
@@ -86,8 +80,12 @@ case "$cmd" in
       sleep 1
       exit 0
     }
-    tmux send-keys -l -t "$pane" -- "$line"
-    tmux send-keys -t "$pane" Enter
+    if ! tmux send-keys -l -t "$pane" -- "$line" >/dev/null 2>&1 ||
+       ! tmux send-keys -t "$pane" Enter >/dev/null 2>&1; then
+      printf 'pane %s vanished, aborted\n' "$pane" >> "$tty"
+      sleep 1
+      exit 0
+    fi
     ;;
   *)
     echo "unknown action: $cmd" >&2
