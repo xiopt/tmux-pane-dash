@@ -6,6 +6,10 @@ set -euo pipefail
 
 now="${PANE_DASH_NOW:-$(date +%s)}"
 group_mode="$(tmux show-option -gqv @pane_dash_group || true)"
+case "$group_mode" in
+  0) group_mode=0 ;;
+  *) group_mode=1 ;;
+esac
 
 case "${1:-}" in
   toggle-group)

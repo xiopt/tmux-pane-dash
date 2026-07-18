@@ -82,9 +82,10 @@ set -g @pane-dash-preview-threshold  '100'
 set -g @pane-dash-preview-alt-layout 'down,55%,border-top'
 ```
 
-Pressing `s` changes the global `@pane_dash_group` option; its selected sort
-mode persists across dashboard reloads and future opens, intentionally shared
-across all clients.
+The dashboard opens with hierarchical session grouping by default. Pressing
+`s` switches between that grouping and flat status sorting; the global
+`@pane_dash_group` selection persists across dashboard reloads and future
+opens, intentionally shared across all clients.
 
 | Option | Default | Description |
 | --- | --- | --- |
@@ -98,7 +99,7 @@ across all clients.
 | `@pane-dash-preview-layout` | `right,55%,border-left` | Preview layout at or above the threshold |
 | `@pane-dash-preview-threshold` | `100` | Terminal columns below which the alternate layout is used |
 | `@pane-dash-preview-alt-layout` | `down,55%,border-top` | Preview layout below the threshold |
-| `@pane_dash_group` | `0` | Dashboard sort mode (`1` renders session headers with indented panes) |
+| `@pane_dash_group` | `1` | Dashboard sort mode (`1` renders session headers with indented panes; `0` uses flat status sorting) |
 
 ### Portrait monitors
 

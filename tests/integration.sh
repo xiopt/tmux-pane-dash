@@ -23,11 +23,12 @@ T set-option -pu -t "$pane" @pane_dash_status
   || fail "pane option unset"
 pass "pane user options"
 
-# 2. list.sh against the real server: tag the pane, expect exactly one framed row
+# 2. list.sh against the real server: default grouping emits a session header and child row
 T set-option -p -t "$pane" @pane_dash_tag itest
 row="$(TMUX='' PATH="$PATH" bash -c "cd '$ROOT' && tmux() { command tmux -L '$SOCK' \"\$@\"; }; export -f tmux; scripts/list.sh")"
-[ "$(printf '%s\n' "$row" | wc -l | tr -d ' ')" = "1" ] || fail "list.sh row count"
-printf '%s' "$row" | grep -q "^$pane	" || fail "list.sh pane id field"
+[ "$(printf '%s\n' "$row" | wc -l | tr -d ' ')" = "2" ] || fail "list.sh grouped row count"
+printf '%s\n' "$row" | sed -n '1p' | grep -Eq '^\$[0-9]+\t' || fail "list.sh session header key"
+printf '%s\n' "$row" | sed -n '2p' | grep -q "^$pane	" || fail "list.sh pane id field"
 pass "list.sh against real server"
 
 # 3. capture: normal vs alternate screen

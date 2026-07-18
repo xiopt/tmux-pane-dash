@@ -4,6 +4,7 @@ setup() {
   : > "$TMUX_STUB_DIR/calls.log"
   export PATH="$BATS_TEST_DIRNAME/stubs:$PATH"
   export PANE_DASH_NOW=1000000
+  printf '0' > "$TMUX_STUB_DIR/global/@pane_dash_group"
   SCRIPT="$BATS_TEST_DIRNAME/../scripts/list.sh"
 }
 
@@ -77,8 +78,8 @@ basepane() { # basepane <id> — native fields every pane has
   [[ "${lines[0]}" == "%2"$'\t'* ]]
 }
 
-@test "grouped mode emits session headers before numerically sorted pane children" {
-  printf '1' > "$TMUX_STUB_DIR/global/@pane_dash_group"
+@test "unset group mode emits session headers before numerically sorted pane children" {
+  rm "$TMUX_STUB_DIR/global/@pane_dash_group"
   basepane %1; basepane %2; basepane %3; basepane %4
   mkpane %1 session_id '$2' session_name beta  window_index 1  pane_index 0  pane_current_command opencode
   mkpane %2 session_name alpha window_index 10 pane_index 0  pane_current_command opencode
@@ -98,7 +99,7 @@ basepane() { # basepane <id> — native fields every pane has
 }
 
 @test "grouped session header uses the worst child status glyph" {
-  printf '1' > "$TMUX_STUB_DIR/global/@pane_dash_group"
+  rm "$TMUX_STUB_DIR/global/@pane_dash_group"
   basepane %1; basepane %2
   mkpane %1 session_name alpha pane_current_command opencode
   mkpane %2 session_name alpha @pane_dash_status needs_input @pane_dash_heartbeat 999990
@@ -112,7 +113,7 @@ basepane() { # basepane <id> — native fields every pane has
 }
 
 @test "grouped mode keeps long same-prefix sessions distinct by session id" {
-  printf '1' > "$TMUX_STUB_DIR/global/@pane_dash_group"
+  rm "$TMUX_STUB_DIR/global/@pane_dash_group"
   basepane %1; basepane %2
   mkpane %1 session_id '$10' session_name 'abcdefghijklmnopqrst-one' pane_current_command opencode
   mkpane %2 session_id '$11' session_name 'abcdefghijklmnopqrst-two' pane_current_command opencode
@@ -128,7 +129,7 @@ basepane() { # basepane <id> — native fields every pane has
 }
 
 @test "a long session name uses its session id as the grouped header key" {
-  printf '1' > "$TMUX_STUB_DIR/global/@pane_dash_group"
+  rm "$TMUX_STUB_DIR/global/@pane_dash_group"
   basepane %1
   mkpane %1 session_id '$24' session_name 'abcdefghijklmnopqrstuvwx' pane_current_command opencode
 
@@ -144,6 +145,15 @@ basepane() { # basepane <id> — native fields every pane has
 
   [ "$status" -eq 0 ]
   grep -F $'set-option\037-g\037@pane_dash_group\0371\037' "$TMUX_STUB_DIR/calls.log"
+}
+
+@test "toggle-group switches an unset group mode to flat sorting" {
+  rm "$TMUX_STUB_DIR/global/@pane_dash_group"
+
+  run "$SCRIPT" toggle-group
+
+  [ "$status" -eq 0 ]
+  grep -F $'set-option\037-g\037@pane_dash_group\0370\037' "$TMUX_STUB_DIR/calls.log"
 }
 
 @test "toggle-group disables session grouping when enabled" {
