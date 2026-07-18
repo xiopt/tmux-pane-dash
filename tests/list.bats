@@ -77,6 +77,39 @@ basepane() { # basepane <id> — native fields every pane has
   [[ "${lines[0]}" == "%2"$'\t'* ]]
 }
 
+@test "grouped mode sorts sessions and window and pane indexes numerically" {
+  printf '1' > "$TMUX_STUB_DIR/global/@pane_dash_group"
+  basepane %1; basepane %2; basepane %3; basepane %4
+  mkpane %1 session_name beta  window_index 1  pane_index 0  pane_current_command opencode
+  mkpane %2 session_name alpha window_index 10 pane_index 0  pane_current_command opencode
+  mkpane %3 session_name alpha window_index 2  pane_index 10 pane_current_command opencode
+  mkpane %4 session_name alpha window_index 2  pane_index 2  pane_current_command opencode
+
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+  [[ "${lines[0]}" == "%4"$'\t'* ]]
+  [[ "${lines[1]}" == "%3"$'\t'* ]]
+  [[ "${lines[2]}" == "%2"$'\t'* ]]
+  [[ "${lines[3]}" == "%1"$'\t'* ]]
+}
+
+@test "toggle-group enables session grouping when disabled" {
+  run "$SCRIPT" toggle-group
+
+  [ "$status" -eq 0 ]
+  grep -F $'set-option\037-g\037@pane_dash_group\0371\037' "$TMUX_STUB_DIR/calls.log"
+}
+
+@test "toggle-group disables session grouping when enabled" {
+  printf '1' > "$TMUX_STUB_DIR/global/@pane_dash_group"
+
+  run "$SCRIPT" toggle-group
+
+  [ "$status" -eq 0 ]
+  grep -F $'set-option\037-g\037@pane_dash_group\0370\037' "$TMUX_STUB_DIR/calls.log"
+}
+
 @test "hostile path controls drop only malformed records without misattributing pane ids" {
   basepane %1; basepane %2; basepane %3
   for pane in %1 %2 %3; do mkpane "$pane" pane_current_command opencode; done
@@ -91,14 +124,14 @@ basepane() { # basepane <id> — native fields every pane has
   [ "$ntabs" -eq 1 ]
 }
 
-@test "list generation uses at most three tmux invocations regardless of pane count" {
+@test "list generation uses at most four tmux invocations regardless of pane count" {
   for n in $(seq 1 50); do
     basepane "%$n"
     mkpane "%$n" pane_current_command opencode
   done
   run "$SCRIPT"
   [ "$status" -eq 0 ]
-  [ "$(wc -l < "$TMUX_STUB_DIR/invocations.log" | tr -d ' ')" -le 3 ]
+  [ "$(wc -l < "$TMUX_STUB_DIR/invocations.log" | tr -d ' ')" -le 4 ]
 }
 
 @test "custom stale threshold via @pane-dash-stale-secs" {

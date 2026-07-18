@@ -5,6 +5,23 @@
 set -euo pipefail
 
 now="${PANE_DASH_NOW:-$(date +%s)}"
+group_mode="$(tmux show-option -gqv @pane_dash_group || true)"
+
+case "${1:-}" in
+  toggle-group)
+    if [ "$group_mode" = "1" ]; then
+      tmux set-option -g @pane_dash_group 0
+    else
+      tmux set-option -g @pane_dash_group 1
+    fi
+    exit 0
+    ;;
+  '') ;;
+  *)
+    echo "usage: $0 [toggle-group]" >&2
+    exit 2
+    ;;
+esac
 
 stale_secs="$(tmux show-option -gqv @pane-dash-stale-secs || true)"
 case "$stale_secs" in ('' | *[!0-9]*) stale_secs=60 ;; esac
@@ -98,8 +115,16 @@ while IFS= read -r record; do
 
   sort_since="${since:-9999999999}"
   case "$sort_since" in (*[!0-9]*) sort_since=9999999999 ;; esac
-  rank "$status"
-  printf '%s\t%s\t%s\t%s\n' "$rank_value" "$sort_since" "$pane" "$display"
+  if [ "$group_mode" = "1" ]; then
+    sort_window="${window:-9999999999}"
+    sort_pane="${pane_index:-9999999999}"
+    case "$sort_window" in (*[!0-9]*) sort_window=9999999999 ;; esac
+    case "$sort_pane" in (*[!0-9]*) sort_pane=9999999999 ;; esac
+    printf '%s\t%s\t%s\t%s\t%s\n' "$session" "$sort_window" "$sort_pane" "$pane" "$display"
+  else
+    rank "$status"
+    printf '%s\t%s\t%s\t%s\n' "$rank_value" "$sort_since" "$pane" "$display"
+  fi
 done < <(
   tmux list-panes -a -F "$format" |
     awk -v rs="$rs" -v us="$us" '
@@ -128,5 +153,8 @@ done < <(
       END { flush() }
     '
 ) |
-  sort -t "$(printf '\t')" -k1,1n -k2,2n |
-  cut -f3-
+  if [ "$group_mode" = "1" ]; then
+    sort -t "$(printf '\t')" -k1,1 -k2,2n -k3,3n | cut -f4-
+  else
+    sort -t "$(printf '\t')" -k1,1n -k2,2n | cut -f3-
+  fi

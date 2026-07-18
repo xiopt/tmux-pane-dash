@@ -96,15 +96,15 @@ export PANE_DASH_CLIENT="$client_tty"
   --layout reverse-list \
   --no-sort \
   --pointer '▶' \
-  --header 'enter:jump  /:filter  ctrl-s:send  ctrl-z:zoom  q:quit' \
+  --header 'enter:jump  /:filter  s:group  ctrl-s:send  ctrl-z:zoom  q:quit' \
   --preview '"$PANE_DASH_DIR/preview.sh" {1}' \
   --preview-window "$preview_window" \
   --bind 'every(1):reload-sync("$PANE_DASH_DIR/list.sh")+refresh-preview' \
-  --bind 'j:down,k:up,g:first,G:last,q:abort' \
-  --bind '/:show-input+unbind(j,k,g,G,q,/)' \
+  --bind 'j:down,k:up,g:first,G:last,s:execute-silent("$PANE_DASH_DIR/list.sh" toggle-group)+reload-sync("$PANE_DASH_DIR/list.sh"),q:abort' \
+  --bind '/:show-input+unbind(j,k,g,G,q,s,/)' \
   --bind "esc:transform:
     if [ \"\$FZF_INPUT_STATE\" = enabled ]; then
-      echo \"hide-input+rebind(j,k,g,G,q,/)\"
+      echo \"hide-input+rebind(j,k,g,G,q,s,/)\"
     else
       echo abort
     fi" \

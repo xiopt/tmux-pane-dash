@@ -73,6 +73,28 @@ EOF
   [ "$(<"$FZF_LOG")" = 'right,55%,border-left,<100(down,55%,border-top)' ]
 }
 
+@test "inner mode binds s only in navigation mode and advertises grouping" {
+  export TMUX_STUB_DIR="$BATS_TEST_TMPDIR/stub"
+  export FZF_LOG="$BATS_TEST_TMPDIR/fzf.log"
+  mkdir -p "$TMUX_STUB_DIR/global" "$BATS_TEST_TMPDIR/bin"
+  export PATH="$BATS_TEST_DIRNAME/stubs:$BATS_TEST_TMPDIR/bin:$PATH"
+  SCRIPT="$BATS_TEST_DIRNAME/../scripts/dash.sh"
+
+  cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FZF_LOG"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/fzf"
+
+  run "$SCRIPT" --inner /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  grep -Fx 'enter:jump  /:filter  s:group  ctrl-s:send  ctrl-z:zoom  q:quit' "$FZF_LOG"
+  grep -F 'j:down,k:up,g:first,G:last,s:execute-silent(' "$FZF_LOG"
+  grep -Fx '/:show-input+unbind(j,k,g,G,q,s,/)' "$FZF_LOG"
+  grep -F 'hide-input+rebind(j,k,g,G,q,s,/)' "$FZF_LOG"
+}
+
 @test "inner mode uses custom adaptive preview options" {
   install_inner_option_stubs
   printf '%s' 'right,40%,border-left' > "$TMUX_STUB_DIR/global/@pane-dash-preview-layout"
@@ -130,7 +152,7 @@ EOF
     FZF_DEFAULT_OPTS_FILE="$defaults_file" "$BATS_TEST_DIRNAME/../scripts/dash.sh" --inner /dev/ttys001
 
   [ "$status" -eq 0 ]
-  grep -Fx 'hide-input+rebind(j,k,g,G,q,/)' "$FZF_LOG"
+  grep -Fx 'hide-input+rebind(j,k,g,G,q,s,/)' "$FZF_LOG"
 }
 install_outer_stubs() {
   mkdir -p "$BATS_TEST_TMPDIR/bin"

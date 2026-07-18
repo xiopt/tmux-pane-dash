@@ -57,6 +57,7 @@ These keys use the tmux prefix and are configurable.
 | --- | --- |
 | `j` / `k` (or arrow keys) | Move down / up in navigation mode |
 | `g` / `G` | First / last row in navigation mode |
+| `s` | Toggle status-priority and session-grouped sorting in navigation mode |
 | `/` | Enter filter mode |
 | `esc` | In filter mode, return to navigation mode and keep the query; in navigation mode, close the dashboard |
 | `enter` | Jump to the selected pane |
@@ -81,6 +82,9 @@ set -g @pane-dash-preview-threshold  '100'
 set -g @pane-dash-preview-alt-layout 'down,55%,border-top'
 ```
 
+Pressing `s` changes the global `@pane_dash_group` option; its selected sort
+mode persists across dashboard reloads and future opens.
+
 | Option | Default | Description |
 | --- | --- | --- |
 | `@pane-dash-key` | `D` | Dashboard key, used with the tmux prefix |
@@ -93,6 +97,7 @@ set -g @pane-dash-preview-alt-layout 'down,55%,border-top'
 | `@pane-dash-preview-layout` | `right,55%,border-left` | Preview layout at or above the threshold |
 | `@pane-dash-preview-threshold` | `100` | Terminal columns below which the alternate layout is used |
 | `@pane-dash-preview-alt-layout` | `down,55%,border-top` | Preview layout below the threshold |
+| `@pane_dash_group` | `0` | Dashboard sort mode (`1` groups panes by session) |
 
 ### Portrait monitors
 
