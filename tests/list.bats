@@ -77,14 +77,28 @@ basepane() { # basepane <id> — native fields every pane has
   [[ "${lines[0]}" == "%2"$'\t'* ]]
 }
 
-@test "hostile path with tabs/newlines cannot break row framing" {
-  basepane %1
-  mkpane %1 pane_current_command opencode
-  printf 'evil\tpath\nline2' > "$TMUX_STUB_DIR/panes.d/%1/pane_current_path"
+@test "hostile path controls drop only malformed records without misattributing pane ids" {
+  basepane %1; basepane %2; basepane %3
+  for pane in %1 %2 %3; do mkpane "$pane" pane_current_command opencode; done
+  printf 'safe\tpath' > "$TMUX_STUB_DIR/panes.d/%1/pane_current_path"
+  printf 'evil\tpath\nline2' > "$TMUX_STUB_DIR/panes.d/%2/pane_current_path"
+  printf 'separator\037path' > "$TMUX_STUB_DIR/panes.d/%3/pane_current_path"
   run "$SCRIPT"
+  [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 1 ]
+  [[ "${lines[0]}" == "%1"$'\t'* ]]
   ntabs="$(printf '%s' "${lines[0]}" | awk -F'\t' '{print NF-1}')"
   [ "$ntabs" -eq 1 ]
+}
+
+@test "list generation uses at most three tmux invocations regardless of pane count" {
+  for n in $(seq 1 50); do
+    basepane "%$n"
+    mkpane "%$n" pane_current_command opencode
+  done
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$TMUX_STUB_DIR/invocations.log" | tr -d ' ')" -le 3 ]
 }
 
 @test "custom stale threshold via @pane-dash-stale-secs" {

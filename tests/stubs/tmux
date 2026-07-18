@@ -4,8 +4,8 @@
 #   panes                      one pane id per line (%0, %1, ...)
 #   global/<option-name>       value of a global option (show-option -gqv)
 #   panes.d/<pane>/<key>       value for format '#{key}' (display-message -p -t)
-# Mutations (set-option, send-keys, ...) are appended to calls.log as
-# unit-separator-delimited argv records. Notifications are kept separately.
+# Mutations are appended to calls.log as unit-separator-delimited argv records.
+# Query invocations are kept in invocations.log; notifications are separate.
 set -euo pipefail
 
 log_args() {
@@ -18,8 +18,34 @@ log_args() {
 cmd="${1:-}"
 case "$cmd" in
   list-panes)
-    cat "$TMUX_STUB_DIR/panes" ;;
+    log_args invocations.log "$@"
+    format=""
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "-F" ]; then format="$2"; break; fi
+      shift
+    done
+    if [ -z "$format" ]; then
+      cat "$TMUX_STUB_DIR/panes"
+      exit 0
+    fi
+    while IFS= read -r pane; do
+      rest="$format"
+      rendered=""
+      while [[ "$rest" == *'#{'* ]]; do
+        prefix="${rest%%\#\{*}"
+        rest="${rest#*\#\{}"
+        key="${rest%%\}*}"
+        rest="${rest#*\}}"
+        case "$key" in
+          pane_id) value="$pane" ;;
+          *) value="$(cat "$TMUX_STUB_DIR/panes.d/$pane/$key" 2>/dev/null || true)" ;;
+        esac
+        rendered+="$prefix$value"
+      done
+      printf '%s%s\n' "$rendered" "$rest"
+    done < "$TMUX_STUB_DIR/panes" ;;
   show-option)              # show-option -gqv <name>  |  show-option -pqv -t <pane> <name>
+    log_args invocations.log "$@"
     if [ "$2" = "-gqv" ]; then
       cat "$TMUX_STUB_DIR/global/$3" 2>/dev/null || true
     else                     # -pqv -t <pane> <name>
@@ -27,6 +53,7 @@ case "$cmd" in
     fi ;;
   display-message)          # display-message -p -t <pane> '<fmt>'
     if [ "${2:-}" = "-p" ]; then
+      log_args invocations.log "$@"
       pane="$4"; fmt="$5"
       key="${fmt#\#\{}"; key="${key%\}}"
       # Match tmux 3.7b: an unknown target can succeed with empty output.
