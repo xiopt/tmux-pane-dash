@@ -67,6 +67,14 @@ fi
 
 # ---- inner: runs inside the popup ----
 client_tty="${2:-}"
+preview_layout="$(get_opt @pane-dash-preview-layout 'right,55%,border-left')"
+preview_threshold="$(get_opt @pane-dash-preview-threshold 100)"
+preview_alt_layout="$(get_opt @pane-dash-preview-alt-layout 'down,55%,border-top')"
+case "$preview_threshold" in
+  '' | *[!0-9]*) preview_threshold=100 ;;
+  *) [ -z "${preview_threshold//0/}" ] && preview_threshold=100 ;;
+esac
+preview_window="${preview_layout},<${preview_threshold}(${preview_alt_layout})"
 
 # Neutralize user defaults so they cannot break our bindings (spec M8)
 export FZF_DEFAULT_OPTS=""
@@ -90,7 +98,7 @@ export PANE_DASH_CLIENT="$client_tty"
   --pointer '▶' \
   --header 'enter:jump  /:filter  ctrl-s:send  ctrl-z:zoom  q:quit' \
   --preview '"$PANE_DASH_DIR/preview.sh" {1}' \
-  --preview-window 'right,60%,border-left' \
+  --preview-window "$preview_window" \
   --bind 'every(1):reload-sync("$PANE_DASH_DIR/list.sh")+refresh-preview' \
   --bind 'j:down,k:up,g:first,G:last,q:abort' \
   --bind '/:show-input+unbind(j,k,g,G,q,/)' \

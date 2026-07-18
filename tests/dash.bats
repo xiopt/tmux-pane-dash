@@ -64,6 +64,37 @@ EOF
   grep -Fx 'reload succeeded' "$FZF_LOG"
 }
 
+@test "inner mode uses the default adaptive preview layout" {
+  install_inner_option_stubs
+
+  run "$SCRIPT" --inner /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$FZF_LOG")" = 'right,55%,border-left,<100(down,55%,border-top)' ]
+}
+
+@test "inner mode uses custom adaptive preview options" {
+  install_inner_option_stubs
+  printf '%s' 'right,40%,border-left' > "$TMUX_STUB_DIR/global/@pane-dash-preview-layout"
+  printf '%s' '120' > "$TMUX_STUB_DIR/global/@pane-dash-preview-threshold"
+  printf '%s' 'down,65%,border-top' > "$TMUX_STUB_DIR/global/@pane-dash-preview-alt-layout"
+
+  run "$SCRIPT" --inner /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$FZF_LOG")" = 'right,40%,border-left,<120(down,65%,border-top)' ]
+}
+
+@test "inner mode falls back to the default preview threshold when invalid" {
+  install_inner_option_stubs
+  printf '%s' '000' > "$TMUX_STUB_DIR/global/@pane-dash-preview-threshold"
+
+  run "$SCRIPT" --inner /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$FZF_LOG")" = 'right,55%,border-left,<100(down,55%,border-top)' ]
+}
+
 @test "inner mode pins fzf to bash and ignores a hostile defaults file" {
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   defaults_file="$BATS_TEST_TMPDIR/fzf-defaults"
@@ -131,4 +162,27 @@ EOF
 [ "${1:-}" = '--version' ] && printf '0.73.1\n'
 EOF
   chmod +x "$BATS_TEST_TMPDIR/bin/tmux" "$BATS_TEST_TMPDIR/bin/fzf"
+}
+
+install_inner_option_stubs() {
+  export TMUX_STUB_DIR="$BATS_TEST_TMPDIR/stub"
+  export FZF_LOG="$BATS_TEST_TMPDIR/fzf.log"
+  mkdir -p "$TMUX_STUB_DIR/global" "$BATS_TEST_TMPDIR/bin"
+  export PATH="$BATS_TEST_DIRNAME/stubs:$BATS_TEST_TMPDIR/bin:$PATH"
+  SCRIPT="$BATS_TEST_DIRNAME/../scripts/dash.sh"
+
+  cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --preview-window)
+      printf '%s' "$2" > "$FZF_LOG"
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/fzf"
 }

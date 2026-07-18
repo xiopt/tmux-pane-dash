@@ -76,7 +76,29 @@ set -g @pane-dash-width      '80%'
 set -g @pane-dash-height     '70%'
 set -g @pane-dash-match      'opencode' # process name for auto-discovery
 set -g @pane-dash-stale-secs '60'       # heartbeat staleness threshold, in seconds
+set -g @pane-dash-preview-layout     'right,55%,border-left'
+set -g @pane-dash-preview-threshold  '100'
+set -g @pane-dash-preview-alt-layout 'down,55%,border-top'
 ```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `@pane-dash-key` | `D` | Dashboard key, used with the tmux prefix |
+| `@pane-dash-tag-key` | `T` | Tag/untag key, used with the tmux prefix |
+| `@pane-dash-label-key` | `M` | Key to tag the current pane with a typed label |
+| `@pane-dash-width` | `80%` | Popup width |
+| `@pane-dash-height` | `70%` | Popup height |
+| `@pane-dash-match` | `opencode` | Process name for auto-discovery |
+| `@pane-dash-stale-secs` | `60` | Heartbeat staleness threshold, in seconds |
+| `@pane-dash-preview-layout` | `right,55%,border-left` | Preview layout at or above the threshold |
+| `@pane-dash-preview-threshold` | `100` | Terminal columns below which the alternate layout is used |
+| `@pane-dash-preview-alt-layout` | `down,55%,border-top` | Preview layout below the threshold |
+
+### Portrait monitors
+
+The preview automatically moves below the list when the popup is narrower than
+100 columns, keeping list columns readable on tall, narrow monitors. Adjust the
+three preview options above to suit a different popup size or preferred split.
 
 ## Status legend
 
