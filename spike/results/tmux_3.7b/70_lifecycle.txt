@@ -1,41 +1,41 @@
-# probe: 70_lifecycle.txt  tmux: tmux 3.7b  date: 2026-07-19T23:41:35Z
+# probe: 70_lifecycle.txt  tmux: tmux 3.7b  date: 2026-07-19T23:46:44Z
 FINDING: detach-on-destroy default=on
-FINDING: detach-on-destroy default attached control client pid=93128 tty= session=base
+FINDING: detach-on-destroy default attached control client pid=4251 tty= session=base
 FINDING: detach-on-destroy default destroy outcome=CLIENT_EXITED_WITHIN_2S
 --- tail after detach-on-destroy default destroy ---
-%begin 1784504495 293 0
-%end 1784504495 293 0
+%begin 1784504804 293 0
+%end 1784504804 293 0
 %session-changed $0 base
 %sessions-changed
 %exit
 FINDING: detach-on-destroy default natural-termination form=percent-exit
 FINDING: detach-on-destroy off=off
-FINDING: detach-on-destroy off attached control client pid=93157 tty= session=base-off
-FINDING: detach-on-destroy off destroy outcome=CLIENT_STILL_ALIVE_AFTER_2S pid=93157 tty= session=survivor
+FINDING: detach-on-destroy off attached control client pid=4282 tty= session=base-off
+FINDING: detach-on-destroy off destroy outcome=CLIENT_STILL_ALIVE_AFTER_2S retargeted pid=4282 tty= session=survivor
 --- tail after detach-on-destroy off destroy ---
-%begin 1784504495 316 0
-%end 1784504495 316 0
+%begin 1784504804 316 0
+%end 1784504804 316 0
 %session-changed $2 base-off
 %session-changed $1 survivor
 %sessions-changed
 %unlinked-window-close @2
 %window-renamed @1 fish
 FINDING: detach-on-destroy off natural-termination=no-termination-observed (client alive, retargeted)
-FINDING: detach-on-destroy off forced-input-EOF termination form: percent-exit
+FINDING: detach-on-destroy off forced-termination mechanism=input-EOF form=percent-exit
 FINDING: kill-server outcome=CLIENT_EXITED_WITHIN_2S
 --- tail after kill-server ---
-%begin 1784504497 337 0
-%end 1784504497 337 0
+%begin 1784504806 337 0
+%end 1784504806 337 0
 %session-changed $1 survivor
 %sessions-changed
 %exit
 FINDING: kill-server stream-form=percent-exit
 --- raw switch-client response ---
-%begin 1784504498 304 0
-%end 1784504498 304 0
+%begin 1784504807 304 0
+%end 1784504807 304 0
 %session-changed $0 base
-%begin 1784504498 310 1
-%end 1784504498 310 1
+%begin 1784504807 310 1
+%end 1784504807 310 1
 %session-window-changed $0 @1
 %client-session-changed /dev/ttys042 $0 base
 %layout-change @1 ae5e,80x23,0,0,1 ae5e,80x23,0,0,1 *

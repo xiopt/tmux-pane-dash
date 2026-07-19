@@ -13,6 +13,7 @@ outer_pid=""
 input_open=false
 control_snapshot=""
 input_fifo="$RESULTS_DIR/70_control_input.fifo"
+stop_mechanism=""
 
 cleanup() {
   if [[ "$input_open" == true ]]; then
@@ -84,11 +85,13 @@ start_control() { # $1=socket $2=session id/name $3=raw transcript
 }
 
 stop_control() {
+  stop_mechanism="input-EOF"
   if [[ "$input_open" == true ]]; then
     exec 3>&-
     input_open=false
   fi
   if ! wait_for_exit "$ctl_pid"; then
+    stop_mechanism="SIGTERM-fallback"
     kill "$ctl_pid" 2>/dev/null || true
     wait "$ctl_pid" 2>/dev/null || true
   fi
@@ -96,7 +99,8 @@ stop_control() {
 }
 
 record_destroy_case() { # $1=label $2=session target $3=raw transcript
-  local label="$1" session_target="$2" raw="$3" before after client_alive=false
+  local label="$1" session_target="$2" raw="$3" before after
+  local client_alive=false retarget_confirmed=false
 
   if ! start_control "$sock" "$session_target" "$raw"; then
     pd_record "$A" "FINDING: $label could not attach control client"
@@ -111,22 +115,27 @@ record_destroy_case() { # $1=label $2=session target $3=raw transcript
   else
     client_alive=true
     after="$(client_snapshot "$sock" "$ctl_pid")"
-    if [[ -n "$after" ]]; then
-      pd_record "$A" "FINDING: $label destroy outcome=CLIENT_STILL_ALIVE_AFTER_2S $after"
+    if [[ -n "$after" && "${after##*session=}" != "" ]]; then
+      retarget_confirmed=true
+      pd_record "$A" "FINDING: $label destroy outcome=CLIENT_STILL_ALIVE_AFTER_2S retargeted $after"
     else
-      pd_record "$A" "FINDING: $label destroy outcome=CLIENT_STILL_ALIVE_AFTER_2S no-list-clients-entry"
+      pd_record "$A" "FINDING: $label destroy outcome=CLIENT_STILL_ALIVE_AFTER_2S alive-but-unconfirmed (no list-clients entry)"
     fi
   fi
   pd_record "$A" "--- tail after $label destroy ---"
   tail -n 8 "$raw" >> "$(pd_artifact "$A")" || true
   if [[ "$client_alive" == true ]]; then
-    pd_record "$A" "FINDING: $label natural-termination=no-termination-observed (client alive, retargeted)"
+    if [[ "$retarget_confirmed" == true ]]; then
+      pd_record "$A" "FINDING: $label natural-termination=no-termination-observed (client alive, retargeted)"
+    else
+      pd_record "$A" "FINDING: $label natural-termination=no-termination-observed (client alive, alive-but-unconfirmed (no list-clients entry))"
+    fi
   else
     pd_record "$A" "FINDING: $label natural-termination form=$(termination_form "$raw")"
   fi
   stop_control
   if [[ "$client_alive" == true ]]; then
-    pd_record "$A" "FINDING: $label forced-input-EOF termination form: $(termination_form "$raw")"
+    pd_record "$A" "FINDING: $label forced-termination mechanism=$stop_mechanism form=$(termination_form "$raw")"
   fi
 }
 
