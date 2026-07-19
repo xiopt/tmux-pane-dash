@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Verify that a display-popup child can attach as a tmux control client.
+# shellcheck disable=SC1091 # The shared harness is resolved relative to this probe.
+source "$(dirname "$0")/../lib.sh"
+
+A="10_popup_attach.txt"
+pd_reset_artifact "$A"
+
+sock="$(pd_server popup)"
+outer_pid=""
+inner="$RESULTS_DIR/10_inner.sh"
+out="$RESULTS_DIR/10_inner_out.txt"
+
+cleanup() {
+  TMUX='' pd_kill_server "$sock"
+  if [[ -n "$outer_pid" ]]; then
+    kill "$outer_pid" 2>/dev/null || true
+    wait "$outer_pid" 2>/dev/null || true
+  fi
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+TMUX='' pd_new_server "$sock"
+: > "$out"
+sid="$(TMUX='' "$TMUX_BIN" -L "$sock" display-message -p -t base '#{session_id}')"
+
+# This script is launched by display-popup, not by the outer attached client.
+# It attaches as a separate control client and records that client's transcript.
+cat > "$inner" <<EOF
+#!/usr/bin/env bash
+{
+  printf 'list-panes -a -F "PROBE:#{pane_id}"\n'
+} | TMUX='' "$TMUX_BIN" -L "$sock" -C attach-session -f no-output,ignore-size -t '$sid' > "$out" 2>&1
+EOF
+chmod +x "$inner"
+
+# display-popup must target a real attached client. BSD script supplies its PTY.
+{ sleep 8; } | TMUX='' script -q /dev/null "$TMUX_BIN" -L "$sock" attach-session -t base \
+  >/dev/null 2>&1 &
+outer_pid=$!
+
+client_tty=""
+for _ in {1..20}; do
+  client_tty="$(TMUX='' "$TMUX_BIN" -L "$sock" list-clients -F '#{client_tty}' 2>/dev/null || true)"
+  [[ -n "$client_tty" ]] && break
+  sleep 0.1
+done
+
+if [[ -z "$client_tty" ]]; then
+  pd_record "$A" "VERDICT: FAILED — fallback addendum required (control client outside popup)"
+  pd_record "$A" "ERROR: timed out waiting for the outer attached client"
+  exit 1
+fi
+
+# The popup shell only receives an absolute executable path. All tmux values
+# are baked into the bash child above, so fish cannot reinterpret them.
+TMUX='' "$TMUX_BIN" -L "$sock" display-popup -c "$client_tty" -E "$inner" || true
+
+# The inner control client closes cleanly when its command feed reaches EOF.
+for _ in {1..60}; do
+  if grep -q '%end' "$out" 2>/dev/null && grep -q '%exit' "$out" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+
+if grep -q '%begin' "$out" && grep -q 'PROBE:%' "$out" && grep -q '%end' "$out" && grep -q '%exit' "$out"; then
+  pd_record "$A" "VERDICT: popup-interior control attach WORKS"
+  pd_record "$A" "FINDING: control client emitted %exit on clean stdin EOF (tmux 3.7b)"
+else
+  pd_record "$A" "VERDICT: FAILED — fallback addendum required (control client outside popup)"
+fi
+pd_record "$A" "--- raw inner output ---"
+cat "$out" >> "$(pd_artifact "$A")"
+
+grep -q 'VERDICT: popup-interior control attach WORKS' "$(pd_artifact "$A")"

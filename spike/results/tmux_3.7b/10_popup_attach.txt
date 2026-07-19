@@ -1,0 +1,11 @@
+# probe: 10_popup_attach.txt  tmux: tmux 3.7b  date: 2026-07-19T21:51:39Z
+VERDICT: popup-interior control attach WORKS
+FINDING: control client emitted %exit on clean stdin EOF (tmux 3.7b)
+--- raw inner output ---
+%begin 1784497899 302 0
+%end 1784497899 302 0
+%session-changed $0 base
+%begin 1784497899 307 1
+PROBE:%0
+%end 1784497899 307 1
+%exit
