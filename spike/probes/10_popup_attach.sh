@@ -25,12 +25,37 @@ trap 'exit 130' INT TERM
 
 has_framed_probe() {
   awk '
-    /^%begin / { began = 1; next }
-    began && /^PROBE:%/ { probed = 1; next }
-    probed && /^%end / { found = 1; exit }
+    /^%begin / {
+      open_ts = $2
+      open_num = $3
+      in_frame = 1
+      probed = 0
+      next
+    }
+    in_frame && /^PROBE:%/ { probed = 1; next }
+    /^%end / {
+      if (in_frame && $2 == open_ts && $3 == open_num && probed) found = 1
+      in_frame = 0
+      probed = 0
+      next
+    }
+    /^%error / {
+      in_frame = 0
+      probed = 0
+      next
+    }
     END { exit !found }
-  ' "$out"
+  ' "$1"
 }
+
+parser_self_test() {
+  has_framed_probe <(printf '%%begin 1 2 0\nPROBE:%%0\n%%end 1 2 0\n') &&
+    ! has_framed_probe <(printf '%%begin 1 2 0\n%%end 1 2 0\nPROBE:%%0\n%%end 1 2 0\n') &&
+    ! has_framed_probe <(printf '%%begin 1 2 0\nPROBE:%%0\n%%error 1 2 0\n') &&
+    ! has_framed_probe <(printf '%%begin 1 2 0\nPROBE:%%0\n%%end 1 3 0\n')
+}
+
+parser_self_test || { echo "popup control-frame parser self-test failed" >&2; exit 1; }
 
 TMUX='' pd_new_server "$sock"
 : > "$out"
@@ -70,13 +95,13 @@ TMUX='' "$TMUX_BIN" -L "$sock" display-popup -c "$client_tty" -E "$inner" || tru
 
 # Wait only for the ordered framed response; %exit is recorded independently.
 for _ in {1..60}; do
-  if has_framed_probe 2>/dev/null; then
+  if has_framed_probe "$out" 2>/dev/null; then
     break
   fi
   sleep 0.1
 done
 
-if has_framed_probe; then
+if has_framed_probe "$out"; then
   pd_record "$A" "VERDICT: popup-interior control attach WORKS"
   if grep -q '^%exit$' "$out"; then
     pd_record "$A" "FINDING: control client emitted %exit on clean stdin EOF ($tmux_version)"
