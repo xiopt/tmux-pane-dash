@@ -10,11 +10,12 @@ A="60_cwd_hatch.txt"
 pd_reset_artifact "$A"
 
 sock="$(pd_server cwd)"
-d='/tmp/pd spike #[weird] \back dir'
+temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/pd_spike_cwd_hatch.XXXXXX")"
+d="$temp_dir/pd spike #[weird] \back dir"
 operational_failures=0
 
 cleanup() {
-  rm -rf "$d"
+  rm -rf "$temp_dir"
   TMUX='' pd_kill_server "$sock"
 }
 
@@ -32,7 +33,7 @@ read_pane_cwd() { # $1=pane id
   TMUX='' "$TMUX_BIN" -L "$sock" display-message -p -t "$1" '#{pane_current_path}'
 }
 
-mkdir -p "$d"
+mkdir "$d"
 # tmux reports the physical cwd on macOS (/private/tmp rather than /tmp), so
 # normalize the expected value without changing the hostile path components.
 d="$(cd "$d" && pwd -P)"
