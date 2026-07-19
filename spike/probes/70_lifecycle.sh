@@ -12,6 +12,7 @@ ctl_pid=""
 outer_pid=""
 input_open=false
 control_snapshot=""
+input_fifo="$RESULTS_DIR/70_control_input.fifo"
 
 cleanup() {
   if [[ "$input_open" == true ]]; then
@@ -25,6 +26,7 @@ cleanup() {
     kill "$outer_pid" 2>/dev/null || true
     wait "$outer_pid" 2>/dev/null || true
   fi
+  rm -f "$input_fifo"
   TMUX='' pd_kill_server "$sock"
   TMUX='' pd_kill_server "$sock2"
 }
@@ -62,7 +64,7 @@ wait_for_exit() { # $1=PID; bounded, returns 0 only after it exits
 termination_form() { # $1=control transcript
   if grep -q '^%exit$' "$1"; then
     printf 'percent-exit'
-  elif grep -q '\[detached\|\[exited' "$1"; then
+  elif grep -q '\[detached\|\[exited\|\[server exited' "$1"; then
     printf 'bracketed-status'
   else
     printf 'bare-eof-or-other'
@@ -70,8 +72,6 @@ termination_form() { # $1=control transcript
 }
 
 start_control() { # $1=socket $2=session id/name $3=raw transcript
-  local input_fifo="$RESULTS_DIR/70_control_input.fifo"
-
   rm -f "$input_fifo"
   mkfifo "$input_fifo"
   : > "$3"
