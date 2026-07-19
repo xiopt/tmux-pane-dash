@@ -91,11 +91,6 @@ capture_segment() { # $1=destination, $2=sync number, remaining args=sender func
   dd if="$raw" bs=1 skip="$offset" 2>/dev/null > "$destination"
 }
 
-has_rs_us_data_line() {
-  local file="$1"
-  LC_ALL=C grep -a -q $'^\036.*\037' "$file"
-}
-
 record_wire_verdict() { # $1=label $2=stream
   local label="$1"
   local stream="$2"
@@ -117,6 +112,8 @@ guard_mimic_is_distinguishable() {
       open_ts = $2
       open_id = $3
       open = 1
+      fake_seen = 0
+      fake_mismatches = 0
       next
     }
     open && $0 == "%end 1 1 1" {
@@ -129,12 +126,25 @@ guard_mimic_is_distinguishable() {
         real_pair_matches = 1
         exit
       }
-      open = 0
+      if (open && $2 == open_ts && $3 == open_id) {
+        open = 0
+        fake_seen = 0
+        fake_mismatches = 0
+      }
       next
     }
-    /^%error / { open = 0 }
+    /^%error / {
+      open = 0
+      fake_seen = 0
+      fake_mismatches = 0
+    }
     END { exit !real_pair_matches }
   ' "$1"
+}
+
+guard_parser_self_test() {
+  guard_mimic_is_distinguishable <(printf '%%begin 10 20 1\nevil\n%%end 1 1 1\nafter\n%%end 10 20 1\n') &&
+    ! guard_mimic_is_distinguishable <(printf '%%begin 10 20 1\n%%end 1 1 1\n%%error 10 20 1\n%%begin 30 40 1\n%%end 30 40 1\n')
 }
 
 send_octal_command() {
@@ -155,6 +165,7 @@ send_guard_command() {
 
 TMUX='' pd_new_server "$sock"
 sid="$(tmux_cmd display-message -p -t base '#{session_id}')"
+guard_parser_self_test || { echo "guard-mimic frame parser self-test failed" >&2; exit 1; }
 
 : > "$raw"
 rm -f "$input_fifo"
@@ -215,15 +226,15 @@ if record_wire_verdict "one-shot argv raw bytes" "$argv_raw"; then
 fi
 
 guard_pass=false
-if guard_mimic_is_distinguishable "$guard_segment"; then
-  if [[ "$guard_required" == true ]]; then
+if [[ "$guard_required" == true ]]; then
+  if guard_mimic_is_distinguishable "$guard_segment"; then
     pd_record "$A" "FINDING: guard-mimicking frame: PASS (real %begin/%end ids match; fake ids differ)"
+    guard_pass=true
   else
-    pd_record "$A" "FINDING: guard-mimicking frame: PASS (synthetic fixture; real %begin/%end ids match; fake ids differ)"
+    pd_record "$A" "FINDING: guard-mimicking frame: FAIL (missing matching real pair or distinguishable fake %end)"
   fi
-  guard_pass=true
 else
-  pd_record "$A" "FINDING: guard-mimicking frame: FAIL (missing matching real pair or distinguishable fake %end)"
+  pd_record "$A" "FINDING: guard-mimicking frame: SKIP (synthetic fixture only — no live newline vector on $tmux_version)"
 fi
 
 pd_record "$A" "--- guard-mimicking raw block (od -c) ---"
@@ -236,7 +247,7 @@ input_fd_open=false
 wait "$ctl_pid" 2>/dev/null || true
 ctl_pid=""
 
-(( channel_passes > 0 ))
+(( channel_passes == 2 ))
 [[ "$argv_pass" == true ]]
 if [[ "$guard_required" == true ]]; then
   [[ "$guard_pass" == true ]]
