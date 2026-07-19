@@ -60,6 +60,8 @@ These keys use the tmux prefix and are configurable.
 | `s` | Toggle status-priority and hierarchical session grouping in navigation mode |
 | `/` | Enter filter mode |
 | `esc` | In filter mode, return to navigation mode and keep the query; in navigation mode, close the dashboard |
+| `ctrl-u` / `ctrl-d` | Scroll the preview up / down by half a page and pause its live refresh (inspect mode) |
+| `ctrl-r` | Return the preview to its bottom and resume its live refresh |
 | `enter` | Jump to the selected pane or session |
 | `ctrl-s` | Send a one-shot command to the selected pane (session rows are a no-op) |
 | `ctrl-z` | Zoom, then jump to the selected pane (session rows just jump) |
@@ -86,6 +88,14 @@ The dashboard opens with hierarchical session grouping by default. Pressing
 `s` switches between that grouping and flat status sorting; the global
 `@pane_dash_group` selection persists across dashboard reloads and future
 opens, intentionally shared across all clients.
+
+### Preview scrolling
+
+Previews initially follow the bottom of the captured pane, where terminal
+prompts and status lines normally appear. `ctrl-u` or `ctrl-d` enters inspect
+mode: the list continues to reload every second, but preview refresh pauses so
+your scroll position remains stable. Press `ctrl-r` to return to the bottom and
+resume live preview updates.
 
 | Option | Default | Description |
 | --- | --- | --- |

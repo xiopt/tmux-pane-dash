@@ -80,8 +80,8 @@ EOF
 set -euo pipefail
 for arg; do
   case "$arg" in
-    every\(1\):reload-sync\(*)
-      command="${arg#every(1):reload-sync(}"
+    start:reload-sync\(*)
+      command="${arg#start:reload-sync(}"
       command="${command%%)+refresh-preview}"
       bash -c "$command"
       printf 'reload succeeded\n' >> "$FZF_LOG"
@@ -163,7 +163,31 @@ EOF
   run "$SCRIPT" --inner /dev/ttys001
 
   [ "$status" -eq 0 ]
-  [ "$(<"$FZF_LOG")" = 'right,55%,border-left,<100(down,55%,border-top)' ]
+  [ "$(<"$FZF_LOG")" = 'right,55%,border-left,follow,<100(down,55%,border-top,follow)' ]
+}
+
+@test "inner mode refreshes previews separately and pauses them while inspecting" {
+  export TMUX_STUB_DIR="$BATS_TEST_TMPDIR/stub"
+  export FZF_LOG="$BATS_TEST_TMPDIR/fzf.log"
+  mkdir -p "$TMUX_STUB_DIR/global" "$BATS_TEST_TMPDIR/bin"
+  export PATH="$BATS_TEST_DIRNAME/stubs:$BATS_TEST_TMPDIR/bin:$PATH"
+  SCRIPT="$BATS_TEST_DIRNAME/../scripts/dash.sh"
+
+  cat > "$BATS_TEST_TMPDIR/bin/fzf" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FZF_LOG"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/fzf"
+
+  run "$SCRIPT" --inner /dev/ttys001
+
+  [ "$status" -eq 0 ]
+  grep -F 'every(1):reload-sync(' "$FZF_LOG"
+  if grep -F 'every(1):reload-sync(' "$FZF_LOG" | grep -F 'refresh-preview'; then false; fi
+  grep -Fx 'every(1.01):refresh-preview' "$FZF_LOG"
+  grep -Fx 'ctrl-u:preview-half-page-up+unbind(every(1.01))' "$FZF_LOG"
+  grep -Fx 'ctrl-d:preview-half-page-down+unbind(every(1.01))' "$FZF_LOG"
+  grep -Fx 'ctrl-r:preview-bottom+rebind(every(1.01))+refresh-preview' "$FZF_LOG"
 }
 
 @test "inner mode binds s only in navigation mode and advertises grouping" {
@@ -182,7 +206,7 @@ EOF
   run "$SCRIPT" --inner /dev/ttys001
 
   [ "$status" -eq 0 ]
-  grep -Fx 'enter:jump  /:filter  s:group  ctrl-s:send  ctrl-z:zoom  q:quit' "$FZF_LOG"
+  grep -Fx 'enter:jump  /:filter  s:group  ctrl-u/d:preview  ctrl-r:follow  ctrl-s:send  ctrl-z:zoom  q:quit' "$FZF_LOG"
   grep -F 'j:down,k:up,g:first,G:last,s:execute-silent(' "$FZF_LOG"
   grep -Fx '/:show-input+unbind(j,k,g,G,q,s,/)' "$FZF_LOG"
   grep -F 'hide-input+rebind(j,k,g,G,q,s,/)' "$FZF_LOG"
@@ -197,7 +221,7 @@ EOF
   run "$SCRIPT" --inner /dev/ttys001
 
   [ "$status" -eq 0 ]
-  [ "$(<"$FZF_LOG")" = 'right,40%,border-left,<120(down,65%,border-top)' ]
+  [ "$(<"$FZF_LOG")" = 'right,40%,border-left,follow,<120(down,65%,border-top,follow)' ]
 }
 
 @test "inner mode falls back to the default preview threshold when invalid" {
@@ -207,7 +231,7 @@ EOF
   run "$SCRIPT" --inner /dev/ttys001
 
   [ "$status" -eq 0 ]
-  [ "$(<"$FZF_LOG")" = 'right,55%,border-left,<100(down,55%,border-top)' ]
+  [ "$(<"$FZF_LOG")" = 'right,55%,border-left,follow,<100(down,55%,border-top,follow)' ]
 }
 
 @test "inner mode pins fzf to bash and ignores a hostile defaults file" {

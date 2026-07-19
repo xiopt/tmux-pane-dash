@@ -82,7 +82,10 @@ case "$preview_threshold" in
   '' | *[!0-9]*) preview_threshold=100 ;;
   *) [ -z "${preview_threshold//0/}" ] && preview_threshold=100 ;;
 esac
-preview_window="${preview_layout},<${preview_threshold}(${preview_alt_layout})"
+# `follow` starts every preview at the live pane's bottom. The distinct preview
+# timer lets preview scrolling pause without interrupting the required one-second
+# list reload timer (see the ctrl-u/ctrl-d and ctrl-r bindings below).
+preview_window="${preview_layout},follow,<${preview_threshold}(${preview_alt_layout},follow)"
 
 # Neutralize user defaults so they cannot break our bindings (spec M8)
 export FZF_DEFAULT_OPTS=""
@@ -126,11 +129,15 @@ fzf < <(cat "$PANE_DASH_CACHE" 2>/dev/null || true) \
   --layout reverse-list \
   --no-sort \
   --pointer '▶' \
-  --header 'enter:jump  /:filter  s:group  ctrl-s:send  ctrl-z:zoom  q:quit' \
+  --header 'enter:jump  /:filter  s:group  ctrl-u/d:preview  ctrl-r:follow  ctrl-s:send  ctrl-z:zoom  q:quit' \
   --preview '"$PANE_DASH_DIR/preview.sh" {1}' \
   --preview-window "$preview_window" \
   --bind "start:reload-sync($cache_reload_command)+refresh-preview" \
-  --bind "every(1):reload-sync($cache_reload_command)+refresh-preview" \
+  --bind "every(1):reload-sync($cache_reload_command)" \
+  --bind 'every(1.01):refresh-preview' \
+  --bind 'ctrl-u:preview-half-page-up+unbind(every(1.01))' \
+  --bind 'ctrl-d:preview-half-page-down+unbind(every(1.01))' \
+  --bind 'ctrl-r:preview-bottom+rebind(every(1.01))+refresh-preview' \
   --bind "j:down,k:up,g:first,G:last,s:execute-silent(\"\$PANE_DASH_DIR/list.sh\" toggle-group)+reload-sync($cache_reload_command),q:abort" \
   --bind '/:show-input+unbind(j,k,g,G,q,s,/)' \
   --bind "esc:transform:
