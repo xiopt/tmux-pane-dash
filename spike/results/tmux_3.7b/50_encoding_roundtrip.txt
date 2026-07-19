@@ -1,0 +1,44 @@
+# probe: 50_encoding_roundtrip.txt  tmux: tmux 3.7b  date: 2026-07-19T22:56:23Z
+FINDING: new-session -- unsupported or not an argv separator: []
+expanded/plain: ROUNDTRIP_OK
+plain/plain: ROUNDTRIP_OK
+expanded/interior-semi: ROUNDTRIP_OK
+plain/interior-semi: ROUNDTRIP_OK
+expanded/trailing-semi: ROUNDTRIP_OK
+plain/trailing-semi: ROUNDTRIP_OK
+expanded/double-trailing: ROUNDTRIP_OK
+plain/double-trailing: ROUNDTRIP_OK
+expanded/hash: ROUNDTRIP_OK
+plain/hash: ROUNDTRIP_OK
+expanded/hash-brace: ROUNDTRIP_OK
+plain/hash-brace: ROUNDTRIP_OK
+expanded/unmatched-open: ROUNDTRIP_OK
+plain/unmatched-open: ROUNDTRIP_OK
+expanded/raw-close: ROUNDTRIP_OK
+plain/raw-close: ROUNDTRIP_OK
+expanded/hash-close: ROUNDTRIP_OK
+plain/hash-close: ROUNDTRIP_OK
+expanded/hash-paren: ROUNDTRIP_OK
+plain/hash-paren: ROUNDTRIP_OK
+expanded/cross-product: ROUNDTRIP_OK
+plain/cross-product: ROUNDTRIP_OK
+expanded/unicode: ROUNDTRIP_OK
+plain/unicode: ROUNDTRIP_OK
+expanded/leading-dash: FIELD_CONSTRAINT: leading-dash requires unsupported --
+plain/leading-dash: ROUNDTRIP_OK
+expanded/spaces: ROUNDTRIP_OK
+plain/spaces: ROUNDTRIP_OK
+expanded/quotes: ROUNDTRIP_OK
+plain/quotes: ROUNDTRIP_OK
+FINDING: backslash mangled in expanded name field on tmux_3.7b: raw=[a\;] got=[a\\;]
+plain/pre-backslashed: ROUNDTRIP_OK
+FINDING: backslash mangled in expanded name field on tmux_3.7b: raw=[a\] got=[a\\]
+plain/lone-backslash: ROUNDTRIP_OK
+FINDING: backslash mangled in expanded name field on tmux_3.7b: raw=[a\\;] got=[a\\\\;]
+plain/double-backslash-semi: ROUNDTRIP_OK
+FINDING: backslash mangled in expanded name field on tmux_3.7b: raw=[a\b;] got=[a\\b;]
+plain/interior-backslash: ROUNDTRIP_OK
+style-marker: encoded=[##[fg=red]x] got=[##[fg=red]x|base] expected NOT_TO_ROUNDTRIP
+sentinel/expanded: NO_INJECTION
+sentinel/plain: NO_INJECTION
+FINDINGS: encoder rules validated = trailing-; escape + ## doubling + reject #[ + reject \ (expanded fields only)
