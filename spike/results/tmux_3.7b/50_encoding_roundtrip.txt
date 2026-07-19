@@ -1,4 +1,4 @@
-# probe: 50_encoding_roundtrip.txt  tmux: tmux 3.7b  date: 2026-07-19T23:02:14Z
+# probe: 50_encoding_roundtrip.txt  tmux: tmux 3.7b  date: 2026-07-19T23:05:31Z
 FINDING: new-session -- unsupported or not an argv separator: []
 expanded/plain: ROUNDTRIP_OK
 plain/plain: ROUNDTRIP_OK
@@ -38,7 +38,7 @@ FINDING: backslash mangled in expanded name field on tmux_3.7b: double-backslash
 plain/double-backslash-semi: ROUNDTRIP_OK
 FINDING: backslash mangled in expanded name field on tmux_3.7b: interior-backslash: MANGLED raw=[a\b;] got=[a\\b;]
 plain/interior-backslash: ROUNDTRIP_OK
-style-marker: MANGLED raw=[#[fg=red]x] encoded=[##[fg=red]x] got=[##[fg=red]x|base]
+style-marker: MANGLED raw=[#[fg=red]x] encoded=[##[fg=red]x] got=[##[fg=red]x]
 FINDING: sentinel/expanded counts before=(windows=1 sessions=1) created=(windows=2 sessions=2) after=(windows=1 sessions=1) name=[x; new-window] expected=[x; new-window]
 sentinel/expanded: NO_INJECTION
 FINDING: sentinel/plain counts before=(windows=1 sessions=1) after=(windows=1 sessions=1)

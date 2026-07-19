@@ -158,8 +158,10 @@ style_marker() {
     pd_record "$A" "style-marker: REJECTED raw=[$raw] encoded=[$encoded] got=[$error]"
     return
   fi
-  got="$(t list-sessions -F '#{session_name}')"
-  got="${got//$'\n'/|}"
+  if ! got="$(t list-sessions -F '#{session_name}' | grep -Fvx base)"; then
+    record_error 'style-marker readback failed' "$got"
+    return
+  fi
   if [[ "$got" == "$raw" ]]; then
     outcome=ROUNDTRIP
     contract_failures=$((contract_failures + 1))
