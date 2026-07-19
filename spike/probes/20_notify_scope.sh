@@ -43,11 +43,51 @@ summarize_tokens() {
       tokens = ""
       next
     }
-    /^%[[:alnum:]-]+/ {
+    /^%[[:alnum:]-]+/ && $1 !~ /^%(begin|end|error)$/ {
       token = $1
       tokens = tokens == "" ? token : tokens " " token
     }
   ' "$1"
+}
+
+sync_completed() {
+  local number="$1"
+  awk -v number="$number" '
+    /^%begin / {
+      begin_ts = $2
+      begin_id = $3
+      in_frame = 1
+      synced = 0
+      next
+    }
+    in_frame && $0 == "SYNC:" number { synced = 1; next }
+    /^%end / {
+      if (in_frame && $2 == begin_ts && $3 == begin_id && synced) found = 1
+      in_frame = 0
+      synced = 0
+      next
+    }
+    /^%error / {
+      in_frame = 0
+      synced = 0
+      next
+    }
+    END { exit !found }
+  ' "$raw"
+}
+
+sync_barrier() {
+  local number="$1"
+
+  printf "display-message -p 'SYNC:%s'\n" "$number" >&3
+  for _ in {1..40}; do
+    if sync_completed "$number"; then
+      return
+    fi
+    sleep 0.05
+  done
+  echo "timed out waiting for SYNC:$number control response" >&2
+  return 1
 }
 
 tokens_for() {
@@ -80,7 +120,7 @@ TMUX='' "$TMUX_BIN" -L "$sock" -C attach-session \
 ctl_pid=$!
 exec 3> "$input_fifo"
 input_fd_open=true
-sleep 1
+sync_barrier 0
 printf 'MARKER:0:control-client-attached\n' >> "$raw"
 
 step_number=0
@@ -88,8 +128,8 @@ step() {
   local action="$1"
   shift
   "$@"
-  sleep 0.3
   step_number=$((step_number + 1))
+  sync_barrier "$step_number"
   printf 'MARKER:%s:%s\n' "$step_number" "$action" >> "$raw"
 }
 
@@ -109,7 +149,6 @@ step "kill OTHER session" tmux_cmd kill-session -t other2
 step "set a pane option in ATTACHED session (status write)" \
   tmux_cmd set-option -p -t base:0.0 @pane_dash_status working
 
-sleep 0.3
 exec 3>&-
 input_fd_open=false
 wait "$ctl_pid" 2>/dev/null || true
