@@ -19,18 +19,22 @@ artifact="$SPIKE_DIR/results/$tmux_version/50_encoding_roundtrip.txt"
 for label in \
   plain interior-semi trailing-semi double-trailing hash \
   hash-brace unmatched-open raw-close hash-close hash-paren cross-product \
-  unicode leading-dash spaces quotes; do
-  grep -Eq "^expanded/$label: (ROUNDTRIP_OK|FIELD_CONSTRAINT:)" "$artifact"
+  unicode spaces quotes; do
+  grep -q "^expanded/$label: ROUNDTRIP_OK$" "$artifact"
   grep -q "^plain/$label: ROUNDTRIP_OK$" "$artifact"
 done
+
+grep -Eq '^expanded/leading-dash: (ROUNDTRIP_OK|FIELD_CONSTRAINT:)' "$artifact"
+grep -q '^plain/leading-dash: ROUNDTRIP_OK$' "$artifact"
 
 for label in pre-backslashed lone-backslash double-backslash-semi interior-backslash; do
   grep -q "^plain/$label: ROUNDTRIP_OK$" "$artifact"
+  grep -Eq "^FINDING: backslash mangled in expanded name field on $tmux_version: $label: (MANGLED|REJECTED|ROUNDTRIP) " "$artifact"
 done
 
-grep -Fq "FINDING: backslash mangled in expanded name field on $tmux_version:" "$artifact"
-
-grep -q '^style-marker: .*expected NOT_TO_ROUNDTRIP' "$artifact"
+grep -Eq '^style-marker: (MANGLED|REJECTED|ROUNDTRIP) ' "$artifact"
+grep -q '^FINDING: sentinel/expanded counts .*name=\[x; new-window\] expected=\[x; new-window\]$' "$artifact"
+grep -q '^FINDING: sentinel/plain counts ' "$artifact"
 grep -q '^sentinel/expanded: NO_INJECTION$' "$artifact"
 grep -q '^sentinel/plain: NO_INJECTION$' "$artifact"
 grep -Fqx 'FINDINGS: encoder rules validated = trailing-; escape + ## doubling + reject #[ + reject \ (expanded fields only)' "$artifact"

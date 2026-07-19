@@ -11,6 +11,7 @@ pd_reset_artifact "$A"
 
 sock="$(pd_server enc)"
 operational_failures=0
+contract_failures=0
 separator_supported=false
 
 cleanup() {
@@ -85,7 +86,12 @@ expanded_roundtrip() { # $1=label $2=raw value
   fi
 
   if ! error="$(new_session "$encoded" 2>&1)"; then
-    pd_record "$A" "expanded/$label: FIELD_CONSTRAINT: rejected raw=[$raw] error=[$error]"
+    if [[ "$label" == leading-dash ]]; then
+      pd_record "$A" "expanded/$label: FIELD_CONSTRAINT: rejected raw=[$raw] error=[$error]"
+    else
+      pd_record "$A" "expanded/$label: REJECTED raw=[$raw] error=[$error]"
+      contract_failures=$((contract_failures + 1))
+    fi
     return
   fi
 
@@ -122,68 +128,106 @@ plain_roundtrip() { # $1=label $2=raw value
   fi
 }
 
-record_expanded_backslash_finding() { # $1=raw value
-  local raw="$1"
+record_expanded_backslash_finding() { # $1=label $2=raw value
+  local label="$1"
+  local raw="$2"
   local encoded error got
 
   fresh_server
   encoded="$(encode_expanded "$raw")"
   if ! error="$(new_session "$encoded" 2>&1)"; then
-    pd_record "$A" "FINDING: backslash mangled in expanded name field on $TMUX_VERSION: raw=[$raw] got=[REJECTED: $error]"
+    pd_record "$A" "FINDING: backslash mangled in expanded name field on $TMUX_VERSION: $label: REJECTED raw=[$raw] got=[$error]"
     return
   fi
   got="$(t list-sessions -F '#{session_name}' | grep -Fvx base)"
-  pd_record "$A" "FINDING: backslash mangled in expanded name field on $TMUX_VERSION: raw=[$raw] got=[$got]"
+  if [[ "$got" == "$raw" ]]; then
+    pd_record "$A" "FINDING: backslash mangled in expanded name field on $TMUX_VERSION: $label: ROUNDTRIP raw=[$raw] got=[$got]"
+    contract_failures=$((contract_failures + 1))
+  else
+    pd_record "$A" "FINDING: backslash mangled in expanded name field on $TMUX_VERSION: $label: MANGLED raw=[$raw] got=[$got]"
+  fi
 }
 
 style_marker() {
   local raw='#[fg=red]x'
-  local encoded got error
+  local encoded got error outcome
 
   fresh_server
   encoded="$(encode_expanded "$raw")"
   if ! error="$(new_session "$encoded" 2>&1)"; then
-    pd_record "$A" "style-marker: rejected encoded=[$encoded] error=[$error] expected NOT_TO_ROUNDTRIP"
+    pd_record "$A" "style-marker: REJECTED raw=[$raw] encoded=[$encoded] got=[$error]"
     return
   fi
   got="$(t list-sessions -F '#{session_name}')"
   got="${got//$'\n'/|}"
-  pd_record "$A" "style-marker: encoded=[$encoded] got=[$got] expected NOT_TO_ROUNDTRIP"
+  if [[ "$got" == "$raw" ]]; then
+    outcome=ROUNDTRIP
+    contract_failures=$((contract_failures + 1))
+  else
+    outcome=MANGLED
+  fi
+  pd_record "$A" "style-marker: $outcome raw=[$raw] encoded=[$encoded] got=[$got]"
 }
 
 sentinel_expanded() {
   local raw='x; new-window'
-  local encoded before after error
+  local encoded before_windows before_sessions created_windows created_sessions after_windows after_sessions candidate error
 
   fresh_server
   encoded="$(encode_expanded "$raw")"
-  before="$(t list-windows -t base | wc -l | tr -d ' ')"
+  before_windows="$(t list-windows -a | wc -l | tr -d ' ')"
+  before_sessions="$(t list-sessions | wc -l | tr -d ' ')"
   if ! error="$(new_session "$encoded" 2>&1)"; then
     record_error 'sentinel/expanded action failed' "$error"
+    return
   fi
-  after="$(t list-windows -t base | wc -l | tr -d ' ')"
-  if [[ "$before" == "$after" ]]; then
+  candidate="$(t list-sessions -F '#{session_name}' | grep -Fvx base)"
+  created_windows="$(t list-windows -a | wc -l | tr -d ' ')"
+  created_sessions="$(t list-sessions | wc -l | tr -d ' ')"
+  if [[ "$candidate" != "$encoded" ]] ||
+    (( created_windows != before_windows + 1 )) ||
+    (( created_sessions != before_sessions + 1 )); then
+    pd_record "$A" 'sentinel/expanded: INJECTION_DETECTED'
+    pd_record "$A" "FINDING: sentinel/expanded before=(windows=$before_windows sessions=$before_sessions) created=(windows=$created_windows sessions=$created_sessions) name=[$candidate] expected=[$encoded]"
+    contract_failures=$((contract_failures + 1))
+    return
+  fi
+  if ! error="$(t kill-session -t "$candidate" 2>&1)"; then
+    record_error 'sentinel/expanded cleanup failed' "$error"
+    return
+  fi
+  after_windows="$(t list-windows -a | wc -l | tr -d ' ')"
+  after_sessions="$(t list-sessions | wc -l | tr -d ' ')"
+  if (( after_windows == before_windows && after_sessions == before_sessions )); then
+    pd_record "$A" "FINDING: sentinel/expanded counts before=(windows=$before_windows sessions=$before_sessions) created=(windows=$created_windows sessions=$created_sessions) after=(windows=$after_windows sessions=$after_sessions) name=[$candidate] expected=[$encoded]"
     pd_record "$A" 'sentinel/expanded: NO_INJECTION'
   else
     pd_record "$A" 'sentinel/expanded: INJECTION_DETECTED'
+    pd_record "$A" "FINDING: sentinel/expanded before=(windows=$before_windows sessions=$before_sessions) after=(windows=$after_windows sessions=$after_sessions)"
+    contract_failures=$((contract_failures + 1))
   fi
 }
 
 sentinel_plain() {
   local raw='x; new-window'
-  local encoded before after error
+  local encoded before_windows before_sessions after_windows after_sessions error
 
   fresh_server
   encoded="$(encode_plain "$raw")"
-  before="$(t list-windows -t base | wc -l | tr -d ' ')"
+  before_windows="$(t list-windows -a | wc -l | tr -d ' ')"
+  before_sessions="$(t list-sessions | wc -l | tr -d ' ')"
   if ! error="$(t set-option -p -t base:0.0 @pd_rt "$encoded" 2>&1)"; then
     record_error 'sentinel/plain action failed' "$error"
   fi
-  after="$(t list-windows -t base | wc -l | tr -d ' ')"
-  if [[ "$before" == "$after" ]]; then
+  after_windows="$(t list-windows -a | wc -l | tr -d ' ')"
+  after_sessions="$(t list-sessions | wc -l | tr -d ' ')"
+  if (( after_windows == before_windows && after_sessions == before_sessions )); then
+    pd_record "$A" "FINDING: sentinel/plain counts before=(windows=$before_windows sessions=$before_sessions) after=(windows=$after_windows sessions=$after_sessions)"
     pd_record "$A" 'sentinel/plain: NO_INJECTION'
   else
     pd_record "$A" 'sentinel/plain: INJECTION_DETECTED'
+    pd_record "$A" "FINDING: sentinel/plain before=(windows=$before_windows sessions=$before_sessions) after=(windows=$after_windows sessions=$after_sessions)"
+    contract_failures=$((contract_failures + 1))
   fi
 }
 
@@ -207,7 +251,7 @@ done
 backslash_labels=(pre-backslashed lone-backslash double-backslash-semi interior-backslash)
 backslash_values=('a\;' "a\\" 'a\\;' 'a\b;')
 for index in "${!backslash_labels[@]}"; do
-  record_expanded_backslash_finding "${backslash_values[$index]}"
+  record_expanded_backslash_finding "${backslash_labels[$index]}" "${backslash_values[$index]}"
   plain_roundtrip "${backslash_labels[$index]}" "${backslash_values[$index]}"
 done
 
@@ -221,3 +265,4 @@ if grep -qE 'MISMATCH|INJECTION_DETECTED|ERROR:' "$(pd_artifact "$A")"; then
   exit 1
 fi
 (( operational_failures == 0 ))
+(( contract_failures == 0 ))
