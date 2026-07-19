@@ -1,5 +1,5 @@
-# probe: 50_encoding_roundtrip.txt  tmux: tmux 3.7b  date: 2026-07-19T23:05:31Z
-FINDING: new-session -- unsupported or not an argv separator: []
+# probe: 50_encoding_roundtrip.txt  tmux: tmux 3.7b  date: 2026-07-19T23:11:22Z
+FINDING: new-session -s leading-dash probe: ROUNDTRIP_OK
 expanded/plain: ROUNDTRIP_OK
 plain/plain: ROUNDTRIP_OK
 expanded/interior-semi: ROUNDTRIP_OK
@@ -24,7 +24,7 @@ expanded/cross-product: ROUNDTRIP_OK
 plain/cross-product: ROUNDTRIP_OK
 expanded/unicode: ROUNDTRIP_OK
 plain/unicode: ROUNDTRIP_OK
-expanded/leading-dash: FIELD_CONSTRAINT: leading-dash requires unsupported --
+expanded/leading-dash: ROUNDTRIP_OK
 plain/leading-dash: ROUNDTRIP_OK
 expanded/spaces: ROUNDTRIP_OK
 plain/spaces: ROUNDTRIP_OK

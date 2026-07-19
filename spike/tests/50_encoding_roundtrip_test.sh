@@ -9,6 +9,7 @@ probe="$SPIKE_DIR/probes/50_encoding_roundtrip.sh"
 grep -q '^encode_expanded()' "$probe"
 grep -q '^encode_plain()' "$probe"
 grep -q 'new-session -d -s' "$probe"
+grep -q "new-session -d -s '-pd_separator_probe'" "$probe"
 grep -q 'set-option -p' "$probe"
 awk '/^style_marker\(\)/,/^sentinel_expanded\(\)/' "$probe" | grep -q 'grep -Fvx base'
 awk '/^style_marker\(\)/,/^sentinel_expanded\(\)/' "$probe" | grep -q "record_error 'style-marker readback failed'"

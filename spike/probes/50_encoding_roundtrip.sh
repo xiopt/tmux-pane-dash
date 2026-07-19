@@ -12,7 +12,6 @@ pd_reset_artifact "$A"
 sock="$(pd_server enc)"
 operational_failures=0
 contract_failures=0
-separator_supported=false
 
 cleanup() {
   TMUX='' pd_kill_server "$sock"
@@ -48,29 +47,26 @@ record_error() { # $1=label, remaining args=error text
   operational_failures=$((operational_failures + 1))
 }
 
-check_separator_support() {
+check_leading_dash_support() {
   local error names
 
   fresh_server
-  if error="$(t new-session -d -s -- pd_separator_probe 2>&1)" &&
-    names="$(t list-sessions -F '#{session_name}')" &&
-    grep -Fqx -- pd_separator_probe <<<"$names"; then
-    separator_supported=true
-    if ! error="$(t kill-session -t pd_separator_probe 2>&1)"; then
-      record_error 'argv separator cleanup failed' "$error"
+  if ! error="$(t new-session -d -s '-pd_separator_probe' 2>&1)"; then
+    pd_record "$A" "FINDING: new-session -s leading-dash probe: REJECTED error=[$error]"
+  elif ! names="$(t list-sessions -F '#{session_name}' 2>&1)"; then
+    record_error 'leading-dash capability readback failed' "$names"
+  elif grep -Fqx -- '-pd_separator_probe' <<<"$names"; then
+    pd_record "$A" 'FINDING: new-session -s leading-dash probe: ROUNDTRIP_OK'
+    if ! error="$(t kill-session -t '-pd_separator_probe' 2>&1)"; then
+      record_error 'leading-dash capability cleanup failed' "$error"
     fi
-    pd_record "$A" 'FINDING: new-session -- supports leading-dash session names'
   else
-    pd_record "$A" "FINDING: new-session -- unsupported or not an argv separator: [$error]"
+    pd_record "$A" "FINDING: new-session -s leading-dash probe: MANGLED got=[$names]"
   fi
 }
 
-new_session() { # $1=encoded name; uses -- only when it is a verified separator.
-  if [[ "$separator_supported" == true ]]; then
-    t new-session -d -s -- "$1"
-  else
-    t new-session -d -s "$1"
-  fi
+new_session() { # $1=encoded name
+  t new-session -d -s "$1"
 }
 
 expanded_roundtrip() { # $1=label $2=raw value
@@ -80,11 +76,6 @@ expanded_roundtrip() { # $1=label $2=raw value
 
   fresh_server
   encoded="$(encode_expanded "$raw")"
-  if [[ "$raw" == -* && "$separator_supported" != true ]]; then
-    pd_record "$A" "expanded/$label: FIELD_CONSTRAINT: leading-dash requires unsupported --"
-    return
-  fi
-
   if ! error="$(new_session "$encoded" 2>&1)"; then
     if [[ "$label" == leading-dash ]]; then
       pd_record "$A" "expanded/$label: FIELD_CONSTRAINT: rejected raw=[$raw] error=[$error]"
@@ -233,7 +224,7 @@ sentinel_plain() {
   fi
 }
 
-check_separator_support
+check_leading_dash_support
 
 expanded_labels=(
   plain interior-semi trailing-semi double-trailing hash
