@@ -5,6 +5,29 @@ set -euo pipefail
 SPIKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 probe="$SPIKE_DIR/probes/50_encoding_roundtrip.sh"
 
+assert_leading_dash_consistency() { # $1=artifact
+  local artifact="$1"
+
+  if grep -q '^FINDING: new-session -s leading-dash probe: ROUNDTRIP_OK$' "$artifact"; then
+    grep -q '^expanded/leading-dash: ROUNDTRIP_OK$' "$artifact"
+  elif grep -q '^FINDING: new-session -s leading-dash probe: REJECTED ' "$artifact"; then
+    grep -q '^expanded/leading-dash: FIELD_CONSTRAINT:' "$artifact"
+  else
+    echo "leading-dash capability probe has no supported/rejected verdict" >&2
+    return 1
+  fi
+}
+
+inconsistent_fixture="$(mktemp)"
+trap 'rm -f "$inconsistent_fixture"' EXIT
+printf '%s\n' \
+  'FINDING: new-session -s leading-dash probe: ROUNDTRIP_OK' \
+  'expanded/leading-dash: FIELD_CONSTRAINT: rejected' > "$inconsistent_fixture"
+if assert_leading_dash_consistency "$inconsistent_fixture"; then
+  echo 'leading-dash consistency assertion accepted an inconsistent fixture' >&2
+  exit 1
+fi
+
 [[ -x "$probe" ]]
 grep -q '^encode_expanded()' "$probe"
 grep -q '^encode_plain()' "$probe"
@@ -27,7 +50,7 @@ for label in \
   grep -q "^plain/$label: ROUNDTRIP_OK$" "$artifact"
 done
 
-grep -Eq '^expanded/leading-dash: (ROUNDTRIP_OK|FIELD_CONSTRAINT:)' "$artifact"
+assert_leading_dash_consistency "$artifact"
 grep -q '^plain/leading-dash: ROUNDTRIP_OK$' "$artifact"
 
 for label in pre-backslashed lone-backslash double-backslash-semi interior-backslash; do
