@@ -5,6 +5,7 @@ source "$(dirname "$0")/../lib.sh"
 
 A="10_popup_attach.txt"
 pd_reset_artifact "$A"
+tmux_version="$(TMUX='' "$TMUX_BIN" -V)"
 
 sock="$(pd_server popup)"
 outer_pid=""
@@ -21,6 +22,15 @@ cleanup() {
 
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+
+has_framed_probe() {
+  awk '
+    /^%begin / { began = 1; next }
+    began && /^PROBE:%/ { probed = 1; next }
+    probed && /^%end / { found = 1; exit }
+    END { exit !found }
+  ' "$out"
+}
 
 TMUX='' pd_new_server "$sock"
 : > "$out"
@@ -58,17 +68,21 @@ fi
 # are baked into the bash child above, so fish cannot reinterpret them.
 TMUX='' "$TMUX_BIN" -L "$sock" display-popup -c "$client_tty" -E "$inner" || true
 
-# The inner control client closes cleanly when its command feed reaches EOF.
+# Wait only for the ordered framed response; %exit is recorded independently.
 for _ in {1..60}; do
-  if grep -q '%end' "$out" 2>/dev/null && grep -q '%exit' "$out" 2>/dev/null; then
+  if has_framed_probe 2>/dev/null; then
     break
   fi
   sleep 0.1
 done
 
-if grep -q '%begin' "$out" && grep -q 'PROBE:%' "$out" && grep -q '%end' "$out" && grep -q '%exit' "$out"; then
+if has_framed_probe; then
   pd_record "$A" "VERDICT: popup-interior control attach WORKS"
-  pd_record "$A" "FINDING: control client emitted %exit on clean stdin EOF (tmux 3.7b)"
+  if grep -q '^%exit$' "$out"; then
+    pd_record "$A" "FINDING: control client emitted %exit on clean stdin EOF ($tmux_version)"
+  else
+    pd_record "$A" "FINDING: no %exit observed on stdin EOF ($tmux_version)"
+  fi
 else
   pd_record "$A" "VERDICT: FAILED — fallback addendum required (control client outside popup)"
 fi
