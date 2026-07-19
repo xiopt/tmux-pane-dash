@@ -96,7 +96,7 @@ stop_control() {
 }
 
 record_destroy_case() { # $1=label $2=session target $3=raw transcript
-  local label="$1" session_target="$2" raw="$3" before after
+  local label="$1" session_target="$2" raw="$3" before after client_alive=false
 
   if ! start_control "$sock" "$session_target" "$raw"; then
     pd_record "$A" "FINDING: $label could not attach control client"
@@ -109,6 +109,7 @@ record_destroy_case() { # $1=label $2=session target $3=raw transcript
   if wait_for_exit "$ctl_pid"; then
     pd_record "$A" "FINDING: $label destroy outcome=CLIENT_EXITED_WITHIN_2S"
   else
+    client_alive=true
     after="$(client_snapshot "$sock" "$ctl_pid")"
     if [[ -n "$after" ]]; then
       pd_record "$A" "FINDING: $label destroy outcome=CLIENT_STILL_ALIVE_AFTER_2S $after"
@@ -118,8 +119,15 @@ record_destroy_case() { # $1=label $2=session target $3=raw transcript
   fi
   pd_record "$A" "--- tail after $label destroy ---"
   tail -n 8 "$raw" >> "$(pd_artifact "$A")" || true
-  pd_record "$A" "FINDING: $label stream-form=$(termination_form "$raw")"
+  if [[ "$client_alive" == true ]]; then
+    pd_record "$A" "FINDING: $label natural-termination=no-termination-observed (client alive, retargeted)"
+  else
+    pd_record "$A" "FINDING: $label natural-termination form=$(termination_form "$raw")"
+  fi
   stop_control
+  if [[ "$client_alive" == true ]]; then
+    pd_record "$A" "FINDING: $label forced-input-EOF termination form: $(termination_form "$raw")"
+  fi
 }
 
 TMUX='' pd_new_server "$sock"
