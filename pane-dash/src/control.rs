@@ -163,34 +163,13 @@ async fn control_actor(
     events: mpsc::UnboundedSender<ControlEvent>,
 ) {
     let mut parser = ProtocolParser::default();
-    let mut queued: VecDeque<Request> = VecDeque::new();
-    let mut active = None;
+    let mut active: Option<Request> = None;
     let mut line = Vec::new();
     let mut terminated = None;
 
     loop {
-        if active.is_none() && !queued.is_empty() {
-            let request = queued.pop_front().expect("queue was nonempty");
-            if let Err(error) = stdin.write_all(request.command().as_bytes()).await {
-                request.fail(&format!("tmux control write failed: {error}"));
-                terminated = Some(format!("tmux control write failed: {error}"));
-                break;
-            }
-            if let Err(error) = stdin.flush().await {
-                request.fail(&format!("tmux control write failed: {error}"));
-                terminated = Some(format!("tmux control write failed: {error}"));
-                break;
-            }
-            active = Some(request);
-            continue;
-        }
-
         tokio::select! {
             biased;
-            request = requests.recv() => match request {
-                Some(request) => queued.push_back(request),
-                None => break,
-            },
             read = stdout.read_until(b'\n', &mut line) => match read {
                 Ok(0) => {
                     let malformed = parser
@@ -243,27 +222,42 @@ async fn control_actor(
                 });
                 break;
             },
+            request = requests.recv(), if active.is_none() => match request {
+                Some(request) => {
+                    if let Err(error) = stdin.write_all(request.command().as_bytes()).await {
+                        request.fail(&format!("tmux control write failed: {error}"));
+                        terminated = Some(format!("tmux control write failed: {error}"));
+                        break;
+                    }
+                    if let Err(error) = stdin.flush().await {
+                        request.fail(&format!("tmux control write failed: {error}"));
+                        terminated = Some(format!("tmux control write failed: {error}"));
+                        break;
+                    }
+                    active = Some(request);
+                }
+                None => break,
+            },
         }
     }
 
-    drop(stdin);
     if let Some(reason) = terminated {
-        fail_requests(active, &mut queued, &mut requests, &reason);
+        requests.close();
+        fail_requests(active, &mut requests, &reason);
+        drop(requests);
+        drop(stdin);
         let _ = events.send(ControlEvent::Terminated(reason));
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.start_kill();
+        }
+    } else {
+        drop(stdin);
     }
     let _ = child.wait().await;
 }
 
-fn fail_requests(
-    active: Option<Request>,
-    queued: &mut VecDeque<Request>,
-    requests: &mut mpsc::Receiver<Request>,
-    reason: &str,
-) {
+fn fail_requests(active: Option<Request>, requests: &mut mpsc::Receiver<Request>, reason: &str) {
     if let Some(request) = active {
-        request.fail(reason);
-    }
-    while let Some(request) = queued.pop_front() {
         request.fail(reason);
     }
     while let Ok(request) = requests.try_recv() {
@@ -427,7 +421,7 @@ fn is_safe_control_argument(value: &str) -> bool {
 fn is_machine_session_id(value: &str) -> bool {
     value.starts_with('$') && value.len() > 1 && is_safe_control_argument(value)
 }
-use std::{collections::VecDeque, path::PathBuf, process::Stdio};
+use std::{path::PathBuf, process::Stdio};
 
 use anyhow::{Result, anyhow, bail};
 use tokio::{
