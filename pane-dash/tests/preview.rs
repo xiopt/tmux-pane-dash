@@ -100,8 +100,10 @@ fn malformed_or_unsupported_ansi_never_panics_or_leaks_terminal_state() {
     );
 }
 
+/// Captured from OpenCode 1.17.20 in a 120x36 isolated tmux pane attached through
+/// a headless WezTerm terminal emulator; machine-specific paths are width-preserving ASCII.
 #[test]
-fn parses_committed_opencode_fixture_with_geometry_and_styles() {
+fn parses_real_interactive_opencode_fixture_with_geometry_and_styles() {
     let bytes = include_bytes!("fixtures/opencode-alt-screen.ansi").to_vec();
     assert!(
         bytes.contains(&0x1b),
@@ -111,13 +113,26 @@ fn parses_committed_opencode_fixture_with_geometry_and_styles() {
     let frame = parse_preview(PaneId("%fixture".into()), bytes);
     let lines = frame.lines.iter().map(line_text).collect::<Vec<_>>();
     let display = lines.join("\n");
-    assert!(display.contains("opencode"));
-    assert!(display.contains("Commands:"));
+    assert!(display.contains("Ask anything..."));
+    assert!(display.contains("/connect to add an AI provider"));
+    assert!(display.contains("fixture-project:master"));
+    assert!(
+        !display.contains("Commands:"),
+        "fixture must not be CLI help"
+    );
+    assert!(!display.contains("Usage:"), "fixture must not be CLI help");
     assert_eq!(
         lines.len(),
-        61,
-        "fixed 100x60 tmux capture geometry plus trailing LF"
+        37,
+        "fixed 120x36 tmux capture geometry plus trailing LF"
     );
+    let prompt = frame
+        .lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.contains("Ask anything..."))
+        .expect("interactive prompt span");
+    assert_eq!(prompt.style.fg, Some(Color::Rgb(128, 128, 128)));
     assert!(
         frame
             .lines
