@@ -87,8 +87,8 @@ printf '%s\n' "\$@" > "$argv_out"
 EOF
 chmod +x "$argv_inner"
 
-# display-popup must target a real attached client. BSD script supplies its PTY.
-{ sleep 8; } | TMUX='' script -q /dev/null "$TMUX_BIN" -L "$sock" attach-session -t base \
+# display-popup must target a real attached client.
+{ sleep 8; } | TMUX='' pd_run_in_pty "$TMUX_BIN" -L "$sock" attach-session -t base \
   >/dev/null 2>&1 &
 outer_pid=$!
 

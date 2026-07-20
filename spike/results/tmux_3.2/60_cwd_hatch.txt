@@ -1,5 +1,5 @@
-# probe: 60_cwd_hatch.txt  tmux: tmux 3.2  date: 2026-07-20T15:48:57Z
+# probe: 60_cwd_hatch.txt  tmux: tmux 3.2  date: 2026-07-20T16:15:12Z
 new-window: HATCH_WORKS
 split-window: HATCH_WORKS
 new-session: HATCH_WORKS
-CONTROL new-window -c: UNEXPECTED_ROUNDTRIP got=[/private/var/folders/wj/762h1x9j1kg4kz4rpz28h42w0000gn/T/pd_spike_cwd_hatch.XIgFWW/pd spike #[weird] \back dir]
+CONTROL new-window -c: UNEXPECTED_ROUNDTRIP got=[/private/var/folders/wj/762h1x9j1kg4kz4rpz28h42w0000gn/T/pd_spike_cwd_hatch.JpnyEB/pd spike #[weird] \back dir]

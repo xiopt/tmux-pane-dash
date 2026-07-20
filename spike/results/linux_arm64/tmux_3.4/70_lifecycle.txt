@@ -1,20 +1,20 @@
-# probe: 70_lifecycle.txt  tmux: tmux 3.4  date: 2026-07-20T15:58:52Z
+# probe: 70_lifecycle.txt  tmux: tmux 3.4  date: 2026-07-20T16:18:45Z
 FINDING: detach-on-destroy default=on
-FINDING: detach-on-destroy default attached control client pid=5834 tty= session=base
+FINDING: detach-on-destroy default attached control client pid=6062 tty= session=base
 FINDING: detach-on-destroy default destroy outcome=CLIENT_EXITED_WITHIN_2S
 --- tail after detach-on-destroy default destroy ---
-%begin 1784563132 279 0
-%end 1784563132 279 0
+%begin 1784564325 279 0
+%end 1784564325 279 0
 %session-changed $0 base
 %sessions-changed
 %exit
 FINDING: detach-on-destroy default natural-termination form=percent-exit
 FINDING: detach-on-destroy off=off
-FINDING: detach-on-destroy off attached control client pid=5854 tty= session=base-off
-FINDING: detach-on-destroy off destroy outcome=CLIENT_STILL_ALIVE_AFTER_2S retargeted pid=5854 tty= session=survivor
+FINDING: detach-on-destroy off attached control client pid=6083 tty= session=base-off
+FINDING: detach-on-destroy off destroy outcome=CLIENT_STILL_ALIVE_AFTER_2S retargeted pid=6083 tty= session=survivor
 --- tail after detach-on-destroy off destroy ---
-%begin 1784563132 301 0
-%end 1784563132 301 0
+%begin 1784564325 301 0
+%end 1784564325 301 0
 %session-changed $2 base-off
 %session-changed $1 survivor
 %sessions-changed
@@ -24,18 +24,18 @@ FINDING: detach-on-destroy off natural-termination=no-termination-observed (clie
 FINDING: detach-on-destroy off forced-termination mechanism=input-EOF form=percent-exit
 FINDING: kill-server outcome=CLIENT_EXITED_WITHIN_2S
 --- tail after kill-server ---
-%begin 1784563135 320 0
-%end 1784563135 320 0
+%begin 1784564327 320 0
+%end 1784564327 320 0
 %session-changed $1 survivor
 %sessions-changed
 %exit
 FINDING: kill-server stream-form=percent-exit
 --- raw switch-client response ---
-%begin 1784563135 288 0
-%end 1784563135 288 0
+%begin 1784564327 289 0
+%end 1784564327 289 0
 %session-changed $0 base
-%begin 1784563135 294 1
-%end 1784563135 294 1
+%begin 1784564327 295 1
+%end 1784564327 295 1
 %session-window-changed $0 @1
 %client-session-changed /dev/pts/2 $0 base
 %layout-change @1 ae5e,80x23,0,0,1 ae5e,80x23,0,0,1 *

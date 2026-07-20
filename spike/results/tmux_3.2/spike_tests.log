@@ -1,6 +1,8 @@
 platform: Darwin arm64
 binary: /tmp/tmux-pane-dash-compat-macos-arm64/build/tmux-3.2/install/bin/tmux
 tmux 3.2
+== spike/tests/00_pty_helper_test.sh
+   ok
 == spike/tests/10_popup_attach_test.sh
    ok
 == spike/tests/20_notify_scope_test.sh

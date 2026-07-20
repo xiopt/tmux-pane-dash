@@ -1,4 +1,4 @@
-# probe: 30_wire_framing.txt  tmux: tmux 3.4  date: 2026-07-20T16:00:05Z
+# probe: 30_wire_framing.txt  tmux: tmux 3.4  date: 2026-07-20T16:16:19Z
 FINDING: select-pane -T rejects embedded newlines on tmux 3.4 (title unchanged)
 FINDING: pane option @pd_evil preserves embedded newlines on tmux 3.4
 FINDING: channel double-quoted octal: FAIL (RS-prefixed data lines=0)
@@ -6,44 +6,44 @@ FINDING: channel raw control bytes: FAIL (RS-prefixed data lines=0)
 FINDING: one-shot argv raw bytes: FAIL (RS-prefixed data lines=0)
 FINDING: guard-mimicking frame: PASS (real %begin/%end ids match; fake ids differ)
 --- guard-mimicking raw block (od -c) ---
-0000000    %   b   e   g   i   n       1   7   8   4   5   6   3   2   0
-0000020    5       2   9   1       1  \n   e   v   i   l  \n   %   e   n
+0000000    %   b   e   g   i   n       1   7   8   4   5   6   4   1   7
+0000020    9       2   9   1       1  \n   e   v   i   l  \n   %   e   n
 0000040    d       1       1       1  \n   a   f   t   e   r  \n   %   e
-0000060    n   d       1   7   8   4   5   6   3   2   0   5       2   9
+0000060    n   d       1   7   8   4   5   6   4   1   7   9       2   9
 0000100    1       1  \n   %   b   e   g   i   n       1   7   8   4   5
-0000120    6   3   2   0   5       2   9   2       1  \n   S   Y   N   C
-0000140    :   3  \n   %   e   n   d       1   7   8   4   5   6   3   2
-0000160    0   5       2   9   2       1  \n
+0000120    6   4   1   7   9       2   9   2       1  \n   S   Y   N   C
+0000140    :   3  \n   %   e   n   d       1   7   8   4   5   6   4   1
+0000160    7   9       2   9   2       1  \n
 0000171
 --- wire stream excerpt (od -c) ---
-0000000    %   b   e   g   i   n       1   7   8   4   5   6   3   2   0
-0000020    5       2   7   1       0  \n   %   e   n   d       1   7   8
-0000040    4   5   6   3   2   0   5       2   7   1       0  \n   %   s
+0000000    %   b   e   g   i   n       1   7   8   4   5   6   4   1   7
+0000020    9       2   7   1       0  \n   %   e   n   d       1   7   8
+0000040    4   5   6   4   1   7   9       2   7   1       0  \n   %   s
 0000060    e   s   s   i   o   n   -   c   h   a   n   g   e   d       $
 0000100    0       b   a   s   e  \n   %   b   e   g   i   n       1   7
-0000120    8   4   5   6   3   2   0   5       2   7   6       1  \n   S
+0000120    8   4   5   6   4   1   7   9       2   7   6       1  \n   S
 0000140    Y   N   C   :   0  \n   %   e   n   d       1   7   8   4   5
-0000160    6   3   2   0   5       2   7   6       1  \n   %   b   e   g
-0000200    i   n       1   7   8   4   5   6   3   2   0   5       2   8
+0000160    6   4   1   7   9       2   7   6       1  \n   %   b   e   g
+0000200    i   n       1   7   8   4   5   6   4   1   7   9       2   8
 0000220    7       1  \n   \   0   3   6   $   0   \   0   3   7   %   0
-0000240   \n   %   e   n   d       1   7   8   4   5   6   3   2   0   5
+0000240   \n   %   e   n   d       1   7   8   4   5   6   4   1   7   9
 0000260        2   8   7       1  \n   %   b   e   g   i   n       1   7
-0000300    8   4   5   6   3   2   0   5       2   8   8       1  \n   S
+0000300    8   4   5   6   4   1   7   9       2   8   8       1  \n   S
 0000320    Y   N   C   :   1  \n   %   e   n   d       1   7   8   4   5
-0000340    6   3   2   0   5       2   8   8       1  \n   %   b   e   g
-0000360    i   n       1   7   8   4   5   6   3   2   0   5       2   8
+0000340    6   4   1   7   9       2   8   8       1  \n   %   b   e   g
+0000360    i   n       1   7   8   4   5   6   4   1   7   9       2   8
 0000400    9       1  \n   \   0   3   6   $   0   \   0   3   7   %   0
-0000420   \n   %   e   n   d       1   7   8   4   5   6   3   2   0   5
+0000420   \n   %   e   n   d       1   7   8   4   5   6   4   1   7   9
 0000440        2   8   9       1  \n   %   b   e   g   i   n       1   7
-0000460    8   4   5   6   3   2   0   5       2   9   0       1  \n   S
+0000460    8   4   5   6   4   1   7   9       2   9   0       1  \n   S
 0000500    Y   N   C   :   2  \n   %   e   n   d       1   7   8   4   5
-0000520    6   3   2   0   5       2   9   0       1  \n   %   b   e   g
-0000540    i   n       1   7   8   4   5   6   3   2   0   5       2   9
+0000520    6   4   1   7   9       2   9   0       1  \n   %   b   e   g
+0000540    i   n       1   7   8   4   5   6   4   1   7   9       2   9
 0000560    1       1  \n   e   v   i   l  \n   %   e   n   d       1
 0000600    1       1  \n   a   f   t   e   r  \n   %   e   n   d       1
-0000620    7   8   4   5   6   3   2   0   5       2   9   1       1  \n
-0000640    %   b   e   g   i   n       1   7   8   4   5   6   3   2   0
-0000660    5       2   9   2       1  \n   S   Y   N   C   :   3  \n   %
-0000700    e   n   d       1   7   8   4   5   6   3   2   0   5       2
+0000620    7   8   4   5   6   4   1   7   9       2   9   1       1  \n
+0000640    %   b   e   g   i   n       1   7   8   4   5   6   4   1   7
+0000660    9       2   9   2       1  \n   S   Y   N   C   :   3  \n   %
+0000700    e   n   d       1   7   8   4   5   6   4   1   7   9       2
 0000720    9   2       1  \n
 0000725

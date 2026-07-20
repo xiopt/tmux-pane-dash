@@ -1,6 +1,8 @@
 platform: Linux aarch64
 binary: /opt/tmux/3.4/bin/tmux
 tmux 3.4
+== spike/tests/00_pty_helper_test.sh
+   ok
 == spike/tests/10_popup_attach_test.sh
    ok
 == spike/tests/20_notify_scope_test.sh

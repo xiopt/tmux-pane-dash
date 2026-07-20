@@ -1,77 +1,77 @@
-# probe: 20_notify_scope.txt  tmux: tmux 3.6  date: 2026-07-20T15:50:46Z
+# probe: 20_notify_scope.txt  tmux: tmux 3.6  date: 2026-07-20T16:17:05Z
 --- raw control stream ---
-%begin 1784562646 294 0
-%end 1784562646 294 0
+%begin 1784564225 294 0
+%end 1784564225 294 0
 %session-changed $0 base
-%begin 1784562646 299 1
+%begin 1784564225 299 1
 SYNC:0
-%end 1784562646 299 1
+%end 1784564225 299 1
 MARKER:0:control-client-attached
 %layout-change @0 6554,200x50,0,0[200x25,0,0,0,200x24,0,26,2] 6554,200x50,0,0[200x25,0,0,0,200x24,0,26,2] *
-%begin 1784562647 303 1
+%begin 1784564225 303 1
 SYNC:1
-%end 1784562647 303 1
+%end 1784564225 303 1
 MARKER:1:split-window in ATTACHED session
 %layout-change @0 ac9d,200x50,0,0,0 ac9d,200x50,0,0,0 *
-%begin 1784562647 307 1
+%begin 1784564225 307 1
 SYNC:2
-%end 1784562647 307 1
+%end 1784564225 307 1
 MARKER:2:kill that pane
 %window-add @2
-%begin 1784562647 311 1
+%begin 1784564225 311 1
 SYNC:3
-%end 1784562647 311 1
+%end 1784564225 311 1
 MARKER:3:new-window in ATTACHED
 %window-renamed @2 renamed
-%begin 1784562647 315 1
+%begin 1784564225 315 1
 SYNC:4
-%end 1784562647 315 1
+%end 1784564225 315 1
 MARKER:4:rename window in ATTACHED
-%begin 1784562647 319 1
+%begin 1784564225 319 1
 SYNC:5
-%end 1784562647 319 1
+%end 1784564225 319 1
 MARKER:5:split-window in OTHER session
 %unlinked-window-add @3
-%begin 1784562647 323 1
+%begin 1784564225 323 1
 SYNC:6
-%end 1784562647 323 1
+%end 1784564225 323 1
 MARKER:6:new-window in OTHER
 %session-renamed $1 other2
-%begin 1784562647 327 1
+%begin 1784564225 327 1
 SYNC:7
-%end 1784562647 327 1
+%end 1784564225 327 1
 MARKER:7:rename OTHER session
-%begin 1784562647 330 1
+%begin 1784564225 330 1
 SYNC:8
-%end 1784562647 330 1
+%end 1784564225 330 1
 MARKER:8:set a pane option in OTHER (status write)
 %window-add @3
 %session-window-changed $0 @3
-%begin 1784562647 335 1
+%begin 1784564225 335 1
 SYNC:9
-%end 1784562647 335 1
+%end 1784564225 335 1
 MARKER:9:link OTHER window into base
 %layout-change @3 41ac,80x24,0,0[80x12,0,0,5,80x11,0,13,6] 41ac,80x24,0,0[80x12,0,0,5,80x11,0,13,6] *
-%begin 1784562647 341 1
+%begin 1784564225 341 1
 SYNC:10
-%end 1784562647 341 1
+%end 1784564225 341 1
 MARKER:10:split the LINKED window from other side
 %unlinked-window-add @4
 %sessions-changed
-%begin 1784562647 348 1
+%begin 1784564225 348 1
 SYNC:11
-%end 1784562647 348 1
+%end 1784564225 348 1
 MARKER:11:new detached session (server-wide)
 %sessions-changed
 %unlinked-window-close @1
 %window-close @3
-%begin 1784562647 354 1
+%begin 1784564225 354 1
 SYNC:12
-%end 1784562647 354 1
+%end 1784564225 354 1
 MARKER:12:kill OTHER session
-%begin 1784562647 357 1
+%begin 1784564225 357 1
 SYNC:13
-%end 1784562647 357 1
+%end 1784564225 357 1
 MARKER:13:set a pane option in ATTACHED session (status write)
 %exit
 --- token summary ---

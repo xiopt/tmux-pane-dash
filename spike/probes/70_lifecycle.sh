@@ -186,7 +186,7 @@ pd_record "$A" "FINDING: kill-server stream-form=$(termination_form "$raw_server
 TMUX='' pd_new_server "$sock2"
 tmux_cmd "$sock2" new-window -d -t base
 target="$(tmux_cmd "$sock2" display-message -p -t base:1 '#{pane_id}')"
-{ sleep 8; } | TMUX='' script -q /dev/null "$TMUX_BIN" -L "$sock2" attach-session -t base \
+{ sleep 8; } | TMUX='' pd_run_in_pty "$TMUX_BIN" -L "$sock2" attach-session -t base \
   >/dev/null 2>&1 &
 outer_pid=$!
 

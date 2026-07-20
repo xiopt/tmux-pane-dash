@@ -1,4 +1,4 @@
-# probe: 40_expansion_matrix.txt  tmux: tmux 3.4  date: 2026-07-20T15:58:51Z
+# probe: 40_expansion_matrix.txt  tmux: tmux 3.4  date: 2026-07-20T16:18:44Z
 new-session -s: EXPANDED_OR_MANGLED got=[base
 session-]
 new-session -s: DOUBLING_OK
@@ -6,12 +6,12 @@ new-session -n: EXPANDED_OR_MANGLED got=[window-named-window]
 new-session -n: DOUBLING_OK
 new-window -n: EXPANDED_OR_MANGLED got=[window-base]
 new-window -n: DOUBLING_OK
-CONTROL cwd readback normalization: raw=[/tmp/pd_spike_cwd.KoK0Ly/pd_spike_cwd_#{session_name}] physical=[/tmp/pd_spike_cwd.KoK0Ly/pd_spike_cwd_#{session_name}]
-new-window -c: EXPANDED_OR_MANGLED got=[/tmp/pd_spike_cwd.KoK0Ly/pd_spike_cwd_base]
+CONTROL cwd readback normalization: raw=[/tmp/pd_spike_cwd.bbxemf/pd_spike_cwd_#{session_name}] physical=[/tmp/pd_spike_cwd.bbxemf/pd_spike_cwd_#{session_name}]
+new-window -c: EXPANDED_OR_MANGLED got=[/tmp/pd_spike_cwd.bbxemf/pd_spike_cwd_base]
 new-window -c: DOUBLING_OK
-split-window -c: EXPANDED_OR_MANGLED got=[/tmp/pd_spike_cwd.KoK0Ly/pd_spike_cwd_base]
+split-window -c: EXPANDED_OR_MANGLED got=[/tmp/pd_spike_cwd.bbxemf/pd_spike_cwd_base]
 split-window -c: DOUBLING_OK
-new-session -c: EXPANDED_OR_MANGLED got=[/tmp/pd_spike_cwd.KoK0Ly/pd_spike_cwd_base]
+new-session -c: EXPANDED_OR_MANGLED got=[/tmp/pd_spike_cwd.bbxemf/pd_spike_cwd_base]
 new-session -c: DOUBLING_OK
 CONTROL set-option -p plain readback: EXACT
 set-option -p: NOT_EXPANDED

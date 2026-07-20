@@ -1,4 +1,4 @@
-# probe: 50_encoding_roundtrip.txt  tmux: tmux 3.6  date: 2026-07-20T15:50:48Z
+# probe: 50_encoding_roundtrip.txt  tmux: tmux 3.6  date: 2026-07-20T16:17:07Z
 FINDING: new-session -s leading-dash probe: ROUNDTRIP_OK
 expanded/plain: ROUNDTRIP_OK
 plain/plain: ROUNDTRIP_OK
