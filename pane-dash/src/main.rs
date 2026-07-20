@@ -572,18 +572,163 @@ mod tests {
     use super::{
         ConnectionMessageKind, ConnectionRoute, SnapshotGeneration, SnapshotInFlight,
         SnapshotSource, bench_first_frame_message, classify_connection_message,
-        classify_snapshot_payload, clear_terminated_connection_state,
+        classify_snapshot_payload, clear_terminated_connection_state, dispatch_directives,
+        sync_transport_degraded,
     };
-    use pane_dash::tmux_exec::TmuxExec;
+    use pane_dash::app::{AppState, Event, reduce};
+    use pane_dash::model::{Model, ModelConfig};
+    use pane_dash::options::DashConfig;
+    use pane_dash::tmux_exec::{SNAPSHOT_FORMAT, TmuxExec};
     use pane_dash::transport::{
-        SnapshotCompletion, TransportCoordinator, TransportDirective, TransportInput,
+        SnapshotCompletion, TransportCoordinator, TransportDirective, TransportInput, TransportMode,
     };
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
+    use tempfile::TempDir;
     use tokio::sync::mpsc;
 
     fn valid_record() -> Vec<u8> {
         b"\x1e$1\x1fs\x1f@1\x1f0\x1fw\x1f%1\x1f0\x1f1\x1fc\x1f/\x1f0\x1fa\x1f\x1f\x1f\x1f\x1f\x1f"
             .to_vec()
+    }
+
+    fn fake_snapshot_tmux(dir: &TempDir) -> (TmuxExec, std::path::PathBuf) {
+        let log = dir.path().join("argv.log");
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\0' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nif [ \"$1\" = list-panes ]; then\n    printf '%b' '\\036$1\\037s\\037@1\\0370\\037w\\037%1\\0370\\0371\\037c\\037/\\0370\\037a\\037\\037\\037\\037\\037\\037\\n'\nfi\n",
+                log.display(),
+                log.display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        (TmuxExec::new(executable), log)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn degraded_fallback_ticks_poll_without_show_options_and_keep_the_alert() {
+        let dir = TempDir::new().unwrap();
+        let (tmux, log) = fake_snapshot_tmux(&dir);
+        let (mut coordinator, _) = TransportCoordinator::new();
+        coordinator.input(TransportInput::ConnectionFailed);
+        coordinator.input(TransportInput::ConnectionFailed);
+        assert_eq!(coordinator.mode(), TransportMode::Degraded);
+
+        let mut app = AppState::new(
+            Model::build(&[], &ModelConfig::default(), 0),
+            DashConfig::default(),
+        );
+        assert!(sync_transport_degraded(&mut app, &coordinator));
+        assert!(app.transport_degraded);
+
+        let (connection_tx, _) = mpsc::unbounded_channel();
+        let (snapshot_tx, mut snapshots) = mpsc::unbounded_channel();
+        let mut control = None;
+        let mut pending_connection_generation = None;
+        let mut active_connection_generation = None;
+        let mut next_connection_generation = 0;
+        let mut debounce_deadline = None;
+        let mut next_snapshot_seq = 0;
+        let snapshot_generation = SnapshotGeneration::default();
+        let mut in_flight_snapshot = SnapshotInFlight::default();
+
+        for _ in 0..3 {
+            let directives = coordinator.input(TransportInput::FallbackTick);
+            assert_eq!(directives, vec![TransportDirective::OneShotSnapshot]);
+            dispatch_directives(
+                directives,
+                &mut coordinator,
+                &tmux,
+                "session",
+                &connection_tx,
+                &mut control,
+                &mut pending_connection_generation,
+                &mut active_connection_generation,
+                &mut next_connection_generation,
+                &mut debounce_deadline,
+                &snapshot_tx,
+                &mut next_snapshot_seq,
+                &snapshot_generation,
+                &mut in_flight_snapshot,
+            );
+
+            let response = snapshots.recv().await.expect("one-shot snapshot response");
+            assert!(in_flight_snapshot.accepts(response.seq));
+            let (completion, outcome) = classify_snapshot_payload(response.source, response.result);
+            let follow_up = coordinator.snapshot_completed(completion);
+            assert!(follow_up.is_empty());
+            dispatch_directives(
+                follow_up,
+                &mut coordinator,
+                &tmux,
+                "session",
+                &connection_tx,
+                &mut control,
+                &mut pending_connection_generation,
+                &mut active_connection_generation,
+                &mut next_connection_generation,
+                &mut debounce_deadline,
+                &snapshot_tx,
+                &mut next_snapshot_seq,
+                &snapshot_generation,
+                &mut in_flight_snapshot,
+            );
+            reduce(
+                &mut app,
+                Event::Snapshot {
+                    outcome: outcome.expect("valid one-shot snapshot"),
+                    observed_at: response.observed_at,
+                },
+            );
+            assert!(app.transport_degraded);
+        }
+
+        let log_bytes = fs::read(log).unwrap();
+        let invocations: Vec<Vec<&[u8]>> = log_bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry
+                    .split(|byte| *byte == b'\0')
+                    .filter(|argument| !argument.is_empty())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            invocations,
+            vec![
+                vec![
+                    b"list-panes".as_slice(),
+                    b"-a",
+                    b"-F",
+                    SNAPSHOT_FORMAT.as_bytes()
+                ],
+                vec![
+                    b"list-panes".as_slice(),
+                    b"-a",
+                    b"-F",
+                    SNAPSHOT_FORMAT.as_bytes()
+                ],
+                vec![
+                    b"list-panes".as_slice(),
+                    b"-a",
+                    b"-F",
+                    SNAPSHOT_FORMAT.as_bytes()
+                ],
+            ]
+        );
+        assert!(
+            !fs::read(dir.path().join("argv.log"))
+                .unwrap()
+                .windows(b"show-options".len())
+                .any(|window| window == b"show-options")
+        );
     }
 
     #[test]

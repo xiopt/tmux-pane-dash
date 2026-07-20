@@ -635,6 +635,21 @@ mod tests {
     }
 
     #[test]
+    fn successful_snapshot_clears_regular_failure_without_clearing_transport_degraded() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        app.transport_degraded = true;
+        reduce(&mut app, Event::SnapshotFailed("temporary failure".into()));
+        assert!(app.banner.is_some());
+
+        reduce(&mut app, snapshot(vec![record("$b", "@b", "%b", 0)], 20));
+
+        assert_eq!(app.banner, None);
+        assert!(app.transport_degraded);
+        assert!(app.model.panes().contains_key(&PaneId("%b".into())));
+        assert!(!app.model.panes().contains_key(&PaneId("%a".into())));
+    }
+
+    #[test]
     fn moves_across_grouped_rows_and_skips_collapsed_panes() {
         let mut app = state(vec![
             record("$a", "@a", "%a", 0),
