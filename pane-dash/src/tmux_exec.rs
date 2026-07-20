@@ -79,6 +79,18 @@ mod tests {
 
     use super::TmuxExec;
 
+    struct ScratchServer<'a> {
+        socket: &'a str,
+    }
+
+    impl Drop for ScratchServer<'_> {
+        fn drop(&mut self) {
+            let _ = Command::new("tmux")
+                .args(["-L", self.socket, "kill-server"])
+                .status();
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires tmux"]
     async fn scratch_server_snapshot_builds_status_memberships() {
@@ -94,6 +106,7 @@ mod tests {
         let _ = Command::new("tmux")
             .args(["-L", socket, "kill-server"])
             .status();
+        let _server = ScratchServer { socket };
         tmux(&[
             "-f",
             "/dev/null",
@@ -142,7 +155,8 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-        let bytes = TmuxExec::new(&wrapper).snapshot().await.unwrap();
+        let exec = TmuxExec::new(&wrapper);
+        let bytes = exec.snapshot().await.unwrap();
         let outcome = parse(&bytes);
         let model = Model::build(&outcome.records, &ModelConfig::default(), 1);
         assert_eq!(model.memberships().len(), 2);
@@ -153,6 +167,16 @@ mod tests {
                 .any(|pane| matches!(pane.status, crate::model::Status::Working))
         );
 
-        tmux(&["kill-server"]);
+        exec.set_group(false).await.unwrap();
+        let bytes = exec.snapshot().await.unwrap();
+        let outcome = parse(&bytes);
+        let model = Model::build(&outcome.records, &ModelConfig::default(), 1);
+        assert!(!model.grouped());
+
+        exec.set_group(true).await.unwrap();
+        let bytes = exec.snapshot().await.unwrap();
+        let outcome = parse(&bytes);
+        let model = Model::build(&outcome.records, &ModelConfig::default(), 1);
+        assert!(model.grouped());
     }
 }
