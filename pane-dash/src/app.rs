@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::cell::{RefCell, RefMut};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -48,10 +49,25 @@ pub struct ReduceResult {
     pub changed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Focus {
     Header(SessionId),
     Pane(Selection),
+}
+
+#[derive(Default)]
+pub(crate) struct RenderCache {
+    key: Option<RenderCacheKey>,
+    pub visible_rows: Vec<usize>,
+    pub focus_indices: HashMap<Focus, usize>,
+    pub status_counts: [usize; 6],
+}
+
+#[derive(PartialEq, Eq)]
+struct RenderCacheKey {
+    content_hash: u64,
+    mode: Mode,
+    collapsed: HashSet<SessionId>,
 }
 
 pub struct AppState {
@@ -68,6 +84,7 @@ pub struct AppState {
     focus: Option<Focus>,
     pending_key: Option<KeyCode>,
     last_age_hash: Option<u64>,
+    render_cache: RefCell<RenderCache>,
 }
 
 impl AppState {
@@ -90,6 +107,7 @@ impl AppState {
             focus: None,
             pending_key: None,
             last_age_hash: None,
+            render_cache: RefCell::new(RenderCache::default()),
         }
     }
 
@@ -106,6 +124,49 @@ impl AppState {
 
     pub(crate) fn focus(&self) -> Option<&Focus> {
         self.focus.as_ref()
+    }
+
+    pub(crate) fn render_cache(&self) -> RefMut<'_, RenderCache> {
+        let key = RenderCacheKey {
+            content_hash: self.model.content_hash(),
+            mode: self.mode,
+            collapsed: self.collapsed.clone(),
+        };
+        let mut cache = self.render_cache.borrow_mut();
+        if cache.key.as_ref() != Some(&key) {
+            cache.key = Some(key);
+            cache.visible_rows.clear();
+            cache.focus_indices.clear();
+            cache.status_counts = [0; 6];
+
+            let grouped = self.grouped();
+            for (index, row) in self.model.rows(grouped).iter().enumerate() {
+                let focus =
+                    match row {
+                        Row::SessionHeader { session_id, .. } => {
+                            Some(Focus::Header(session_id.clone()))
+                        }
+                        Row::Pane {
+                            session_id,
+                            window_id,
+                            pane_id,
+                            ..
+                        } if !grouped || !self.collapsed.contains(session_id) => Some(Focus::Pane(
+                            (session_id.clone(), window_id.clone(), pane_id.clone()),
+                        )),
+                        Row::Pane { .. } => None,
+                    };
+                if let Some(focus) = focus {
+                    let visible_index = cache.visible_rows.len();
+                    cache.visible_rows.push(index);
+                    cache.focus_indices.insert(focus, visible_index);
+                }
+            }
+            for pane in self.model.panes().values() {
+                cache.status_counts[status_index(pane.status)] += 1;
+            }
+        }
+        cache
     }
 
     pub fn mark_rendered(&mut self, now: u64) {
@@ -192,6 +253,17 @@ pub fn format_age(status_since: Option<u64>, now: u64) -> String {
         format!("{}m", age / 60)
     } else {
         format!("{age}s")
+    }
+}
+
+pub(crate) fn status_index(status: crate::model::Status) -> usize {
+    match status {
+        crate::model::Status::NeedsInput => 0,
+        crate::model::Status::Working => 1,
+        crate::model::Status::Idle => 2,
+        crate::model::Status::Error => 3,
+        crate::model::Status::Unknown => 4,
+        crate::model::Status::Stale => 5,
     }
 }
 
@@ -675,5 +747,22 @@ mod tests {
         app.mark_rendered(1_000);
 
         assert!(!reduce(&mut app, Event::Tick { now: 1_001 }).changed);
+    }
+
+    #[test]
+    fn render_cache_reuses_visible_rows_and_counts_until_its_key_changes() {
+        let mut linked = record("$b", "@b", "%a", 0);
+        linked.status = "needs_input".into();
+        let mut app = state(vec![record("$a", "@a", "%a", 0), linked]);
+
+        let cache = app.render_cache();
+        assert_eq!(cache.visible_rows.len(), 4);
+        assert_eq!(cache.status_counts[0], 1);
+        drop(cache);
+
+        app.collapsed.insert(SessionId::from("$a"));
+        let cache = app.render_cache();
+        assert_eq!(cache.visible_rows.len(), 3);
+        assert_eq!(cache.status_counts[0], 1);
     }
 }

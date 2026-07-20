@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{AppState, Focus, Mode};
+use crate::app::{AppState, Mode, status_index};
 use crate::model::{Row, Status};
 
 pub use crate::app::format_age;
@@ -35,8 +35,10 @@ pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    let rows = visible_rows(app);
-    if rows.is_empty() {
+    let grouped = matches!(app.mode, Mode::Grouped);
+    let rows = app.model.rows(grouped);
+    let cache = app.render_cache();
+    if cache.visible_rows.is_empty() {
         let hint_area = Rect::new(
             list_area.x,
             list_area.y.saturating_add(list_area.height / 2),
@@ -50,16 +52,23 @@ pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
             hint_area,
         );
     } else {
-        let focused_index = rows.iter().position(|row| row_is_focused(row, app.focus()));
-        let offset = scroll_offset(focused_index, rows.len(), list_area.height as usize);
-        let lines = rows
+        let focused_index = app
+            .focus()
+            .and_then(|focus| cache.focus_indices.get(focus).copied());
+        let offset = scroll_offset(
+            focused_index,
+            cache.visible_rows.len(),
+            list_area.height as usize,
+        );
+        let lines = cache
+            .visible_rows
             .iter()
             .enumerate()
             .skip(offset)
             .take(list_area.height as usize)
-            .map(|(index, row)| {
+            .map(|(index, row_index)| {
                 row_line(
-                    row,
+                    &rows[*row_index],
                     app,
                     index == focused_index.unwrap_or(usize::MAX),
                     now,
@@ -72,7 +81,7 @@ pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
     if !alerts.is_empty() {
         frame.render_widget(Paragraph::new(alerts), alert_area);
     }
-    frame.render_widget(status_bar(app), status_area);
+    frame.render_widget(status_bar(app, cache.status_counts), status_area);
 }
 
 fn alert_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
@@ -153,38 +162,6 @@ fn wrap_long_word(word: &str, width: usize, lines: &mut Vec<String>) {
     if !line.is_empty() {
         lines.push(line);
     }
-}
-
-fn row_is_focused(row: &Row, focus: Option<&Focus>) -> bool {
-    match (row, focus) {
-        (Row::SessionHeader { session_id, .. }, Some(Focus::Header(focused))) => {
-            session_id == focused
-        }
-        (
-            Row::Pane {
-                session_id,
-                window_id,
-                pane_id,
-                ..
-            },
-            Some(Focus::Pane((focused_session, focused_window, focused_pane))),
-        ) => {
-            session_id == focused_session && window_id == focused_window && pane_id == focused_pane
-        }
-        _ => false,
-    }
-}
-
-fn visible_rows(app: &AppState) -> Vec<&Row> {
-    let grouped = matches!(app.mode, Mode::Grouped);
-    app.model
-        .rows(grouped)
-        .iter()
-        .filter(|row| match row {
-            Row::Pane { session_id, .. } => !grouped || !app.collapsed.contains(session_id),
-            Row::SessionHeader { .. } => true,
-        })
-        .collect()
 }
 
 fn scroll_offset(selected: Option<usize>, row_count: usize, height: usize) -> usize {
@@ -269,19 +246,7 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
                 )
             };
             let context = pad_to_width(&truncate_to_width(&path_basename(path), 12), 12);
-            let label = truncate_to_width(
-                label,
-                usize::from(width).saturating_sub(
-                    indent.width()
-                        + status_glyph(*status).width()
-                        + status_field.width()
-                        + suffix.width()
-                        + context.width()
-                        + model.width()
-                        + 3,
-                ),
-            );
-            vec![
+            let mut spans = vec![
                 Span::raw(indent),
                 Span::styled(
                     status_glyph(*status),
@@ -294,8 +259,14 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
                 Span::raw(" "),
                 Span::styled(model.clone(), Style::default().fg(palette::DIM)),
                 Span::raw("  "),
-                Span::styled(label, Style::default().fg(palette::TEXT)),
-            ]
+            ];
+            let label = truncate_to_width(
+                label,
+                usize::from(width)
+                    .saturating_sub(spans.iter().map(|span| span.content.width()).sum::<usize>()),
+            );
+            spans.push(Span::styled(label, Style::default().fg(palette::TEXT)));
+            spans
         }
     };
     let used = spans.iter().map(|span| span.content.width()).sum::<usize>();
@@ -309,11 +280,7 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
     })
 }
 
-fn status_bar(app: &AppState) -> Paragraph<'static> {
-    let mut counts = [0_usize; 6];
-    for pane in app.model.panes().values() {
-        counts[status_index(pane.status)] += 1;
-    }
+fn status_bar(app: &AppState, counts: [usize; 6]) -> Paragraph<'static> {
     let mut pieces = [
         Status::NeedsInput,
         Status::Working,
@@ -340,16 +307,6 @@ fn status_bar(app: &AppState) -> Paragraph<'static> {
     Paragraph::new(Line::from(spans))
 }
 
-fn status_index(status: Status) -> usize {
-    match status {
-        Status::NeedsInput => 0,
-        Status::Working => 1,
-        Status::Idle => 2,
-        Status::Error => 3,
-        Status::Unknown => 4,
-        Status::Stale => 5,
-    }
-}
 fn status_glyph(status: Status) -> &'static str {
     match status {
         Status::NeedsInput => "●",

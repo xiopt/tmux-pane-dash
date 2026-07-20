@@ -105,6 +105,22 @@ fn wide_labels_are_truncated_without_splitting_characters() {
 }
 
 #[test]
+fn label_width_uses_the_actual_prefix_and_keeps_a_final_wide_character_in_bounds() {
+    let retained = format!("{}東", "a".repeat(29));
+    let title = format!("{retained}tail");
+    let state = app(vec![record("dash", "%1", "working", &title)]);
+    let rendered = draw(&state, 80, 8);
+    assert!(rendered.contains(&retained));
+    assert!(!rendered.contains("tail"));
+
+    let backend = TestBackend::new(80, 8);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &state, NOW)).unwrap();
+    assert_eq!(terminal.backend().buffer()[(78, 1)].symbol(), "東");
+    assert_eq!(terminal.backend().buffer()[(79, 1)].symbol(), " ");
+}
+
+#[test]
 fn status_counts_deduplicate_linked_panes() {
     let mut linked = record("web", "%1", "needs_input", "Input");
     linked.window_id = "@web".into();
