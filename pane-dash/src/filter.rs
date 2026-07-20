@@ -76,7 +76,9 @@ pub fn ranked_row_indices(model: &Model, grouped: bool, query: &str) -> Vec<usiz
         let Row::SessionHeader { session_id, .. } = header else {
             continue;
         };
-        let mut session_matches = matches
+        // `matches` is globally sorted by descending score and native row order, and filtering
+        // preserves that order for each session's subset.
+        let session_matches = matches
             .iter()
             .copied()
             .filter(|(row_index, _, _)| {
@@ -89,7 +91,6 @@ pub fn ranked_row_indices(model: &Model, grouped: bool, query: &str) -> Vec<usiz
         if session_matches.is_empty() {
             continue;
         }
-        sort_matches(&mut session_matches);
         indices.push(header_index);
         indices.extend(
             session_matches

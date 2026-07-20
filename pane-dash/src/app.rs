@@ -236,7 +236,7 @@ impl AppState {
     }
 
     pub(crate) fn session_is_collapsed(&self, session_id: &SessionId) -> bool {
-        self.filter_query.is_empty() && self.collapsed.contains(session_id)
+        self.grouped() && self.filter_query.is_empty() && self.collapsed.contains(session_id)
     }
 
     fn reconcile_focus(&mut self) {
@@ -345,7 +345,9 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
                 });
                 result.changed = true;
             }
-            KeyCode::Char(character) if key.modifiers == KeyModifiers::NONE => {
+            KeyCode::Char(character)
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+            {
                 state.update_filter(|query| query.push(character));
                 result.changed = true;
             }
@@ -593,8 +595,12 @@ mod tests {
         Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
     }
 
-    fn modified_key(code: KeyCode) -> Event {
+    fn shift_key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::SHIFT))
+    }
+
+    fn key_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(code, modifiers))
     }
 
     fn enter_query(app: &mut AppState, query: &str) {
@@ -973,7 +979,22 @@ mod tests {
             record("$b", "@b", "%b", 0),
         ]);
         reduce(&mut app, key(KeyCode::Char('/')));
-        reduce(&mut app, modified_key(KeyCode::Char('x')));
+        reduce(&mut app, control_key(KeyCode::Char('x')));
+        reduce(
+            &mut app,
+            key_with_modifiers(KeyCode::Char('x'), KeyModifiers::ALT),
+        );
+        reduce(
+            &mut app,
+            key_with_modifiers(KeyCode::Char('x'), KeyModifiers::SUPER),
+        );
+        reduce(
+            &mut app,
+            key_with_modifiers(
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
         reduce(&mut app, key(KeyCode::Char('j')));
         reduce(&mut app, key(KeyCode::Enter));
         reduce(&mut app, key(KeyCode::Char('z')));
@@ -983,6 +1004,29 @@ mod tests {
         assert!(app.focus().is_none());
         assert!(app.pending_action.is_none());
         assert!(app.collapsed.is_empty());
+    }
+
+    #[test]
+    fn filter_mode_accepts_shift_modified_characters() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+
+        reduce(&mut app, key(KeyCode::Char('/')));
+        let result = reduce(&mut app, shift_key(KeyCode::Char('X')));
+
+        assert!(result.changed);
+        assert_eq!(app.filter_query, "X");
+    }
+
+    #[test]
+    fn backspace_on_an_empty_filter_query_is_a_noop() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+
+        reduce(&mut app, key(KeyCode::Char('/')));
+        let result = reduce(&mut app, key(KeyCode::Backspace));
+
+        assert!(!result.changed);
+        assert_eq!(app.input_mode, InputMode::Filter);
+        assert!(app.filter_query.is_empty());
     }
 
     #[test]
@@ -1081,6 +1125,30 @@ mod tests {
         );
         reduce(&mut app, snapshot(vec![record("$b", "@b", "%b", 0)], 12));
         assert!(app.collapsed.is_empty());
+    }
+
+    #[test]
+    fn flat_mode_shows_panes_from_a_session_collapsed_in_grouped_mode() {
+        let mut app = state(vec![
+            record("$a", "@a", "%a", 0),
+            record("$a", "@a", "%b", 1),
+            record("$b", "@b", "%c", 0),
+        ]);
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Char('h')));
+        assert!(app.collapsed.contains(&SessionId::from("$a")));
+        assert_eq!(visible_pane_ids(&app), vec!["%c"]);
+
+        reduce(&mut app, key(KeyCode::Char('s')));
+
+        assert_eq!(app.mode, Mode::Flat);
+        assert_eq!(visible_pane_ids(&app), vec!["%a", "%b", "%c"]);
+
+        reduce(&mut app, key(KeyCode::Char('s')));
+
+        assert!(app.collapsed.contains(&SessionId::from("$a")));
+        assert_eq!(visible_pane_ids(&app), vec!["%c"]);
     }
 
     #[test]
