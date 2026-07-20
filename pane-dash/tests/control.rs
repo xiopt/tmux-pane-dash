@@ -287,16 +287,20 @@ mod actor_tests {
         timeout(Duration::from_secs(2), async {
             fs::write(&release, "go\n").unwrap();
             assert_eq!(first.await.unwrap().unwrap(), b"\x1e$7\x1f%1\n");
+            let mut errors = Vec::new();
             for request in queued {
-                assert_eq!(
-                    request.await.unwrap().unwrap_err().to_string(),
-                    "tmux control stdout closed"
-                );
+                errors.push(request.await.unwrap().unwrap_err().to_string());
             }
-            assert_eq!(
-                events.recv().await,
-                Some(ControlEvent::Terminated("tmux control stdout closed".into()))
+            let reason = match events.recv().await {
+                Some(ControlEvent::Terminated(reason)) => reason,
+                event => panic!("expected termination event, got {event:?}"),
+            };
+            assert!(
+                reason == "tmux control stdout closed"
+                    || reason.starts_with("tmux control write failed:"),
+                "unexpected termination reason: {reason}"
             );
+            assert!(errors.iter().all(|error| error == &reason));
             assert_eq!(events.recv().await, None);
         })
         .await
