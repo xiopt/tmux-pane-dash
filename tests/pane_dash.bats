@@ -40,6 +40,28 @@ assert_call() {
     "set-option -p @pane_dash_label_input \"%%%\" ; run-shell '\"$ROOT/scripts/tag.sh\" label-from-option \"#{pane_id}\"'"
 }
 
+@test "uses fzf engine when no engine option is configured" {
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+  assert_call 1 bind-key D run-shell "\"$ROOT/scripts/dash.sh\" '#{client_tty}' '#{pane_id}'"
+}
+
+@test "binds the rust launcher when rust engine and binary are available" {
+  printf 'rust' > "$TMUX_STUB_DIR/global/@pane-dash-engine"
+  bin_dir="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$bin_dir"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$bin_dir/pane-dash"
+  chmod +x "$bin_dir/pane-dash"
+  export PATH="$bin_dir:$PATH"
+
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+  assert_call 1 bind-key D run-shell \
+    "\"$ROOT/scripts/open_v2.sh\" \"$bin_dir/pane-dash\" '#{client_tty}' '#{session_id}' '#{pane_id}'"
+}
+
 @test "quotes script paths when installed in a directory with spaces" {
   copy_root="$BATS_TEST_TMPDIR/with space"
   mkdir -p "$copy_root"

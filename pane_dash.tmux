@@ -9,8 +9,24 @@ get_opt() { local value; value="$(tmux show-option -gqv "$1" || true)"; printf '
 dash_key="$(get_opt @pane-dash-key D)"
 tag_key="$(get_opt @pane-dash-tag-key T)"
 label_key="$(get_opt @pane-dash-label-key M)"
+engine="$(get_opt @pane-dash-engine fzf)"
 
-tmux bind-key "$dash_key" run-shell "\"$DIR/scripts/dash.sh\" '#{client_tty}' '#{pane_id}'"
+if [ "$engine" = rust ]; then
+  binary="$DIR/pane-dash/target/release/pane-dash"
+  if [ ! -x "$binary" ]; then
+    binary="$(command -v pane-dash || true)"
+  fi
+
+  if [ -n "$binary" ]; then
+    tmux bind-key "$dash_key" run-shell \
+      "\"$DIR/scripts/open_v2.sh\" \"$binary\" '#{client_tty}' '#{session_id}' '#{pane_id}'"
+  else
+    tmux display-message "pane-dash: rust engine selected but pane-dash binary not found; using fzf"
+    tmux bind-key "$dash_key" run-shell "\"$DIR/scripts/dash.sh\" '#{client_tty}' '#{pane_id}'"
+  fi
+else
+  tmux bind-key "$dash_key" run-shell "\"$DIR/scripts/dash.sh\" '#{client_tty}' '#{pane_id}'"
+fi
 tmux bind-key "$tag_key" run-shell "\"$DIR/scripts/tag.sh\" toggle '#{pane_id}'"
 tmux bind-key "$label_key" command-prompt -p 'pane-dash label:' \
   "set-option -p @pane_dash_label_input \"%%%\" ; run-shell '\"$DIR/scripts/tag.sh\" label-from-option \"#{pane_id}\"'"

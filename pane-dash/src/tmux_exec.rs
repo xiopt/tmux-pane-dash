@@ -35,6 +35,16 @@ impl TmuxExec {
         Ok(())
     }
 
+    /// Runs a TOCTOU-sensitive action command without surfacing expected tmux
+    /// failures (for example, a pane disappearing between rendering and jump).
+    pub async fn run_silent(&self, args: &[String]) -> bool {
+        Command::new(&self.bin)
+            .args(args)
+            .output()
+            .await
+            .is_ok_and(|output| output.status.success())
+    }
+
     pub async fn startup(&self) -> Result<(Vec<u8>, Vec<u8>)> {
         let (snapshot, options) = tokio::join!(self.snapshot(), self.show_options());
         Ok((snapshot?, options?))

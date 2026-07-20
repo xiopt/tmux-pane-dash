@@ -8,6 +8,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures_util::StreamExt;
+use pane_dash::actions::execute_jump;
 use pane_dash::app::{Action, AppState, Event, reduce};
 use pane_dash::model::{Model, ModelConfig};
 use pane_dash::options::parse_show_options;
@@ -104,7 +105,7 @@ async fn main() -> Result<()> {
         tokio::select! {
             event = input.next() => match event {
                 Some(Ok(CrosstermEvent::Key(key))) => {
-                    if apply_event(&mut terminal, &mut app, Event::Key(key), &tmux).await? {
+                    if apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, &client_tty).await? {
                         snapshot_generation.record_successful_mutation();
                     }
                 },
@@ -126,7 +127,7 @@ async fn main() -> Result<()> {
                         let _ = tx.send(SnapshotResponse { seq, generation, observed_at: now_secs(), result });
                     });
                 }
-                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux).await? {
+                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux, &client_tty).await? {
                     snapshot_generation.record_successful_mutation();
                 }
             },
@@ -137,7 +138,7 @@ async fn main() -> Result<()> {
                         Ok(bytes) => Event::Snapshot { outcome: parse(&bytes), observed_at: response.observed_at },
                         Err(error) => Event::SnapshotFailed(error.to_string()),
                     };
-                    if apply_event(&mut terminal, &mut app, event, &tmux).await? {
+                    if apply_event(&mut terminal, &mut app, event, &tmux, &client_tty).await? {
                         snapshot_generation.record_successful_mutation();
                     }
                 }
@@ -153,6 +154,7 @@ async fn apply_event(
     app: &mut AppState,
     event: Event,
     tmux: &TmuxExec,
+    client_tty: &str,
 ) -> Result<bool> {
     let result = reduce(app, event);
     let mut mutated = false;
@@ -162,7 +164,13 @@ async fn apply_event(
                 tmux.set_group(on).await?;
                 mutated = true;
             }
-            Action::Jump { .. } | Action::Quit => {}
+            Action::Jump { target, zoom } => {
+                if execute_jump(tmux, client_tty, &target, zoom).await {
+                    app.should_quit = true;
+                    mutated = true;
+                }
+            }
+            Action::Quit => {}
         }
     }
     if result.changed {
