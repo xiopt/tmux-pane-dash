@@ -406,8 +406,8 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
                 Mode::Grouped
             };
             state.pending_key = None;
-            state.focus = state.selection.clone().map(Focus::Pane);
             state.invalidate_render_cache();
+            state.reconcile_focus();
             result.actions.push(Action::ToggleGroup(state.grouped()));
             result.changed = true;
         }
@@ -526,7 +526,8 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
                 .get(old_index)
                 .cloned()
                 .or_else(|| visible.last().cloned())
-        });
+        })
+        .or_else(|| visible.first().cloned());
     state.sync_selection();
     ReduceResult {
         actions: Vec::new(),
@@ -550,7 +551,7 @@ fn reduce_snapshot_failure(state: &mut AppState, error: String) -> ReduceResult 
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::app::{Action, AppState, Event, InputMode, JumpTarget, Mode, reduce};
+    use crate::app::{Action, AppState, Event, Focus, InputMode, JumpTarget, Mode, reduce};
     use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, Status, WindowId};
     use crate::snapshot::{ParseOutcome, RawRecord};
 
@@ -1110,6 +1111,51 @@ mod tests {
         assert_eq!(app.mode, Mode::Flat);
         assert_eq!(app.filter_query, "a");
         assert_eq!(visible_pane_ids(&app), vec!["%a"]);
+    }
+
+    #[test]
+    fn toggling_filtered_header_to_flat_focuses_the_first_matching_pane() {
+        let mut matching = record("$a", "@a", "%a", 0);
+        matching.title = "needle".into();
+        let mut app = state(vec![matching]);
+        enter_query(&mut app, "needle");
+        assert!(matches!(app.focus(), Some(Focus::Header(_))));
+        reduce(&mut app, key(KeyCode::Esc));
+
+        reduce(&mut app, key(KeyCode::Char('s')));
+
+        assert_eq!(app.mode, Mode::Flat);
+        assert_eq!(
+            app.selection,
+            Some((
+                SessionId::from("$a"),
+                WindowId::from("@a"),
+                PaneId::from("%a")
+            ))
+        );
+    }
+
+    #[test]
+    fn snapshot_with_first_query_match_focuses_it_when_focus_was_empty() {
+        let mut unmatched = record("$a", "@a", "%a", 0);
+        unmatched.group = "0".into();
+        let mut app = state(vec![unmatched]);
+        enter_query(&mut app, "needle");
+        assert!(app.focus().is_none());
+
+        let mut matching = record("$a", "@a", "%a", 0);
+        matching.group = "0".into();
+        matching.title = "needle".into();
+        reduce(&mut app, snapshot(vec![matching], 11));
+
+        assert_eq!(
+            app.selection,
+            Some((
+                SessionId::from("$a"),
+                WindowId::from("@a"),
+                PaneId::from("%a")
+            ))
+        );
     }
 
     #[test]
