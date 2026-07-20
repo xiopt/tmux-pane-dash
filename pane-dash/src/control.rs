@@ -140,6 +140,9 @@ async fn consume_attach_handshake<R: tokio::io::AsyncBufRead + Unpin>(
         if reader.read_until(b'\n', &mut line).await? == 0 {
             bail!("tmux control attach ended before its handshake");
         }
+        if !line.ends_with(b"\n") {
+            bail!("truncated tmux control line");
+        }
         for event in parser.push_line(&line) {
             match event {
                 ProtocolEvent::Response { ok: true, .. } => return Ok(()),
@@ -183,6 +186,7 @@ async fn control_actor(
         }
 
         tokio::select! {
+            biased;
             request = requests.recv() => match request {
                 Some(request) => queued.push_back(request),
                 None => break,
@@ -201,6 +205,10 @@ async fn control_actor(
                     break;
                 }
                 Ok(_) => {
+                    if !line.ends_with(b"\n") {
+                        terminated = Some("truncated tmux control line".into());
+                        break;
+                    }
                     let parsed = parser.push_line(&line);
                     line.clear();
                     for event in parsed {
