@@ -1,0 +1,16 @@
+[package]
+name = "pane-dash"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+ratatui = "0.30"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "time", "process", "sync", "io-util"] }
+
+[dev-dependencies]
+criterion = "0.7"
+insta = "1"
+tempfile = "3"
