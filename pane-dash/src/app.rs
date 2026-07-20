@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::filter::ranked_row_indices;
 use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, WindowId};
 use crate::options::DashConfig;
 use crate::snapshot::ParseOutcome;
@@ -13,6 +14,12 @@ type Selection = (SessionId, WindowId, PaneId);
 pub enum Mode {
     Grouped,
     Flat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
+    Navigation,
+    Filter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +74,8 @@ pub struct AppState {
     pub model: Model,
     pub cfg: DashConfig,
     pub mode: Mode,
+    pub input_mode: InputMode,
+    pub filter_query: String,
     pub selection: Option<Selection>,
     pub collapsed: HashSet<SessionId>,
     pub should_quit: bool,
@@ -86,14 +95,17 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(model: Model, cfg: DashConfig) -> Self {
+        let mode = if model.grouped() {
+            Mode::Grouped
+        } else {
+            Mode::Flat
+        };
         Self {
-            mode: if cfg.group_default {
-                Mode::Grouped
-            } else {
-                Mode::Flat
-            },
+            mode,
             model,
             cfg,
+            input_mode: InputMode::Navigation,
+            filter_query: String::new(),
             selection: None,
             collapsed: HashSet::new(),
             should_quit: false,
@@ -140,22 +152,24 @@ impl AppState {
             cache.status_counts = [0; 6];
 
             let grouped = self.grouped();
-            for (index, row) in self.model.rows(grouped).iter().enumerate() {
-                let focus =
-                    match row {
-                        Row::SessionHeader { session_id, .. } => {
-                            Some(Focus::Header(session_id.clone()))
-                        }
-                        Row::Pane {
-                            session_id,
-                            window_id,
-                            pane_id,
-                            ..
-                        } if !grouped || !self.collapsed.contains(session_id) => Some(Focus::Pane(
-                            (session_id.clone(), window_id.clone(), pane_id.clone()),
-                        )),
-                        Row::Pane { .. } => None,
-                    };
+            for index in ranked_row_indices(&self.model, grouped, &self.filter_query) {
+                let row = &self.model.rows(grouped)[index];
+                let focus = match row {
+                    Row::SessionHeader { session_id, .. } => {
+                        Some(Focus::Header(session_id.clone()))
+                    }
+                    Row::Pane {
+                        session_id,
+                        window_id,
+                        pane_id,
+                        ..
+                    } if !self.session_is_collapsed(session_id) => Some(Focus::Pane((
+                        session_id.clone(),
+                        window_id.clone(),
+                        pane_id.clone(),
+                    ))),
+                    Row::Pane { .. } => None,
+                };
                 if let Some(focus) = focus {
                     let visible_index = cache.visible_rows.len();
                     cache.visible_rows.push(index);
@@ -203,22 +217,44 @@ impl AppState {
     }
 
     fn visible_rows(&self) -> Vec<Focus> {
-        self.model
-            .rows(self.grouped())
+        let grouped = self.grouped();
+        let cache = self.render_cache();
+        cache
+            .visible_rows
             .iter()
-            .filter_map(|row| match row {
-                Row::SessionHeader { session_id, .. } => Some(Focus::Header(session_id.clone())),
+            .map(|index| &self.model.rows(grouped)[*index])
+            .map(|row| match row {
+                Row::SessionHeader { session_id, .. } => Focus::Header(session_id.clone()),
                 Row::Pane {
                     session_id,
                     window_id,
                     pane_id,
                     ..
-                } if !self.grouped() || !self.collapsed.contains(session_id) => Some(Focus::Pane(
-                    (session_id.clone(), window_id.clone(), pane_id.clone()),
-                )),
-                Row::Pane { .. } => None,
+                } => Focus::Pane((session_id.clone(), window_id.clone(), pane_id.clone())),
             })
             .collect()
+    }
+
+    pub(crate) fn session_is_collapsed(&self, session_id: &SessionId) -> bool {
+        self.filter_query.is_empty() && self.collapsed.contains(session_id)
+    }
+
+    fn reconcile_focus(&mut self) {
+        let visible = self.visible_rows();
+        if !self
+            .focus
+            .as_ref()
+            .is_some_and(|focus| visible.contains(focus))
+        {
+            self.focus = visible.first().cloned();
+        }
+        self.sync_selection();
+    }
+
+    fn update_filter(&mut self, edit: impl FnOnce(&mut String)) {
+        edit(&mut self.filter_query);
+        self.invalidate_render_cache();
+        self.reconcile_focus();
     }
 
     fn sync_selection(&mut self) {
@@ -297,6 +333,26 @@ pub(crate) fn status_index(status: crate::model::Status) -> usize {
 
 fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
     let mut result = ReduceResult::default();
+    if state.input_mode == InputMode::Filter {
+        match key.code {
+            KeyCode::Esc => {
+                state.input_mode = InputMode::Navigation;
+                result.changed = true;
+            }
+            KeyCode::Backspace if !state.filter_query.is_empty() => {
+                state.update_filter(|query| {
+                    query.pop();
+                });
+                result.changed = true;
+            }
+            KeyCode::Char(character) if key.modifiers == KeyModifiers::NONE => {
+                state.update_filter(|query| query.push(character));
+                result.changed = true;
+            }
+            _ => {}
+        }
+        return result;
+    }
     if state.pending_key.take().is_some() {
         if key.code == KeyCode::Char('a') && key.modifiers == KeyModifiers::NONE {
             toggle_collapsed(state, &mut result);
@@ -327,6 +383,10 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
     };
 
     match key.code {
+        KeyCode::Char('/') if key.modifiers == KeyModifiers::NONE => {
+            state.input_mode = InputMode::Filter;
+            result.changed = true;
+        }
         KeyCode::Char('j') | KeyCode::Down => move_focus(1),
         KeyCode::Char('k') | KeyCode::Up => move_focus(-1),
         KeyCode::Char('g') => set_focus(state, 0, &mut result),
@@ -345,7 +405,6 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
             } else {
                 Mode::Grouped
             };
-            state.collapsed.clear();
             state.pending_key = None;
             state.focus = state.selection.clone().map(Focus::Pane);
             state.invalidate_render_cache();
@@ -491,7 +550,7 @@ fn reduce_snapshot_failure(state: &mut AppState, error: String) -> ReduceResult 
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::app::{Action, AppState, Event, JumpTarget, Mode, reduce};
+    use crate::app::{Action, AppState, Event, InputMode, JumpTarget, Mode, reduce};
     use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, Status, WindowId};
     use crate::snapshot::{ParseOutcome, RawRecord};
 
@@ -531,6 +590,29 @@ mod tests {
 
     fn control_key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
+    }
+
+    fn modified_key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::SHIFT))
+    }
+
+    fn enter_query(app: &mut AppState, query: &str) {
+        reduce(app, key(KeyCode::Char('/')));
+        for character in query.chars() {
+            reduce(app, key(KeyCode::Char(character)));
+        }
+    }
+
+    fn visible_pane_ids(app: &AppState) -> Vec<String> {
+        let rows = app.model.rows(app.grouped());
+        app.render_cache()
+            .visible_rows
+            .iter()
+            .filter_map(|index| match &rows[*index] {
+                Row::Pane { pane_id, .. } => Some(pane_id.0.clone()),
+                Row::SessionHeader { .. } => None,
+            })
+            .collect()
     }
 
     fn snapshot(records: Vec<RawRecord>, observed_at: u64) -> Event {
@@ -833,5 +915,247 @@ mod tests {
         assert!(reduce(&mut app, Event::Tick { now: 1_060 }).changed);
         app.prepare_render(1_060);
         assert_eq!(app.age_deadline_rebuild_count, 2);
+    }
+
+    #[test]
+    fn slash_edits_live_filter_and_escape_keeps_the_query() {
+        let mut auth = record("$a", "@a", "%auth", 0);
+        auth.title = "auth".into();
+        let mut app = state(vec![auth, record("$b", "@b", "%worker", 0)]);
+
+        let result = reduce(&mut app, key(KeyCode::Char('/')));
+        assert!(result.changed);
+        assert_eq!(app.input_mode, InputMode::Filter);
+        reduce(&mut app, key(KeyCode::Char('a')));
+        reduce(&mut app, key(KeyCode::Char('u')));
+        assert_eq!(app.filter_query, "au");
+        assert_eq!(visible_pane_ids(&app), vec!["%auth"]);
+
+        let result = reduce(&mut app, key(KeyCode::Esc));
+        assert!(result.changed);
+        assert_eq!(app.input_mode, InputMode::Navigation);
+        assert_eq!(app.filter_query, "au");
+        assert_eq!(visible_pane_ids(&app), vec!["%auth"]);
+    }
+
+    #[test]
+    fn backspace_rebuilds_projection_and_stays_in_filter_mode() {
+        let mut app = state(vec![
+            record("$a", "@a", "%x", 0),
+            record("$b", "@b", "%y", 0),
+        ]);
+        enter_query(&mut app, "x");
+        let _ = app.render_cache();
+
+        reduce(&mut app, key(KeyCode::Backspace));
+
+        assert!(app.filter_query.is_empty());
+        assert_eq!(app.input_mode, InputMode::Filter);
+        assert_eq!(visible_pane_ids(&app).len(), 2);
+    }
+
+    #[test]
+    fn backspace_removes_one_unicode_scalar() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        enter_query(&mut app, "é💡");
+
+        reduce(&mut app, key(KeyCode::Backspace));
+        assert_eq!(app.filter_query, "é");
+        reduce(&mut app, key(KeyCode::Backspace));
+        assert!(app.filter_query.is_empty());
+    }
+
+    #[test]
+    fn filter_mode_ignores_modified_characters_and_navigation_actions() {
+        let mut app = state(vec![
+            record("$a", "@a", "%a", 0),
+            record("$b", "@b", "%b", 0),
+        ]);
+        reduce(&mut app, key(KeyCode::Char('/')));
+        reduce(&mut app, modified_key(KeyCode::Char('x')));
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Enter));
+        reduce(&mut app, key(KeyCode::Char('z')));
+        reduce(&mut app, key(KeyCode::Char('a')));
+
+        assert_eq!(app.filter_query, "jza");
+        assert!(app.focus().is_none());
+        assert!(app.pending_action.is_none());
+        assert!(app.collapsed.is_empty());
+    }
+
+    #[test]
+    fn unmatched_query_clears_focus() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        reduce(&mut app, key(KeyCode::Char('j')));
+        enter_query(&mut app, "no-match");
+
+        assert!(app.focus().is_none());
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn query_keeps_matching_focus_or_selects_first_visible_result() {
+        let mut alpha = record("$a", "@a", "%alpha", 0);
+        alpha.title = "alpha".into();
+        alpha.group = "0".into();
+        let mut beta = record("$b", "@b", "%beta", 0);
+        beta.title = "beta".into();
+        beta.group = "0".into();
+        let mut app = state(vec![alpha, beta]);
+        reduce(&mut app, key(KeyCode::Char('G')));
+
+        enter_query(&mut app, "beta");
+        assert_eq!(
+            app.selection.as_ref().map(|(_, _, pane)| pane.0.as_str()),
+            Some("%beta")
+        );
+
+        reduce(&mut app, key(KeyCode::Backspace));
+        reduce(&mut app, key(KeyCode::Backspace));
+        reduce(&mut app, key(KeyCode::Backspace));
+        reduce(&mut app, key(KeyCode::Backspace));
+        for character in "alpha".chars() {
+            reduce(&mut app, key(KeyCode::Char(character)));
+        }
+        assert_eq!(app.filter_query, "alpha");
+        assert_eq!(visible_pane_ids(&app), vec!["%alpha"]);
+        assert_eq!(
+            app.selection.as_ref().map(|(_, _, pane)| pane.0.as_str()),
+            Some("%alpha")
+        );
+    }
+
+    #[test]
+    fn filtering_temporarily_expands_collapsed_sessions_and_clearing_restores_collapse() {
+        let mut matching = record("$a", "@a", "%a", 0);
+        matching.title = "needle".into();
+        let mut app = state(vec![matching]);
+        app.collapsed.insert("$a".into());
+
+        enter_query(&mut app, "needle");
+        assert_eq!(visible_pane_ids(&app), vec!["%a"]);
+        for _ in "needle".chars() {
+            reduce(&mut app, key(KeyCode::Backspace));
+        }
+
+        assert!(app.collapsed.contains(&SessionId::from("$a")));
+        assert!(visible_pane_ids(&app).is_empty());
+    }
+
+    #[test]
+    fn collapse_keys_mutate_stored_state_while_filtering() {
+        let mut matching = record("$a", "@a", "%a", 0);
+        matching.title = "needle".into();
+        let mut app = state(vec![matching]);
+        enter_query(&mut app, "needle");
+        reduce(&mut app, key(KeyCode::Esc));
+
+        reduce(&mut app, key(KeyCode::Char('h')));
+        assert!(app.collapsed.contains(&SessionId::from("$a")));
+        assert_eq!(visible_pane_ids(&app), vec!["%a"]);
+        reduce(&mut app, key(KeyCode::Char('l')));
+        assert!(!app.collapsed.contains(&SessionId::from("$a")));
+        reduce(&mut app, key(KeyCode::Esc));
+        reduce(&mut app, key(KeyCode::Char('z')));
+        reduce(&mut app, key(KeyCode::Char('a')));
+        assert!(app.collapsed.contains(&SessionId::from("$a")));
+    }
+
+    #[test]
+    fn collapse_survives_mode_toggles_and_snapshots_but_dead_sessions_are_removed() {
+        let mut app = state(vec![
+            record("$a", "@a", "%a", 0),
+            record("$b", "@b", "%b", 0),
+        ]);
+        app.collapsed.insert("$a".into());
+        reduce(&mut app, key(KeyCode::Char('s')));
+        reduce(&mut app, key(KeyCode::Char('s')));
+        assert!(app.collapsed.contains(&SessionId::from("$a")));
+
+        reduce(&mut app, snapshot(vec![record("$a", "@a", "%a", 0)], 11));
+        assert_eq!(
+            app.collapsed,
+            std::collections::HashSet::from([SessionId::from("$a")])
+        );
+        reduce(&mut app, snapshot(vec![record("$b", "@b", "%b", 0)], 12));
+        assert!(app.collapsed.is_empty());
+    }
+
+    #[test]
+    fn escape_quits_only_from_navigation_and_za_is_navigation_only() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        reduce(&mut app, key(KeyCode::Char('/')));
+        let result = reduce(&mut app, key(KeyCode::Esc));
+        assert!(result.actions.is_empty());
+        assert!(!app.should_quit);
+        reduce(&mut app, key(KeyCode::Char('/')));
+        reduce(&mut app, key(KeyCode::Char('z')));
+        reduce(&mut app, key(KeyCode::Char('a')));
+        assert!(app.collapsed.is_empty());
+        reduce(&mut app, key(KeyCode::Esc));
+        let result = reduce(&mut app, key(KeyCode::Esc));
+        assert_eq!(result.actions, vec![Action::Quit]);
+    }
+
+    #[test]
+    fn active_query_survives_snapshot_grouped_flat_reconciliation() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        enter_query(&mut app, "a");
+        let mut flat = record("$a", "@a", "%a", 0);
+        flat.group = "0".into();
+
+        reduce(&mut app, snapshot(vec![flat], 11));
+
+        assert_eq!(app.mode, Mode::Flat);
+        assert_eq!(app.filter_query, "a");
+        assert_eq!(visible_pane_ids(&app), vec!["%a"]);
+    }
+
+    #[test]
+    fn new_uses_snapshot_group_mode_over_config_default() {
+        let mut flat = record("$a", "@a", "%a", 0);
+        flat.group = "0".into();
+        let model = Model::build(&[flat], &ModelConfig::default(), 10);
+        let cfg = crate::options::DashConfig {
+            group_default: true,
+            ..Default::default()
+        };
+
+        let app = AppState::new(model, cfg);
+
+        assert_eq!(app.mode, Mode::Flat);
+    }
+
+    #[test]
+    fn query_edits_rebuild_a_materialized_cache_once_and_reads_reuse_it() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        let _ = app.render_cache();
+        let initial_rebuilds = app.render_cache.borrow().rebuild_count;
+        reduce(&mut app, key(KeyCode::Char('/')));
+        reduce(&mut app, key(KeyCode::Char('a')));
+        let _ = app.render_cache();
+        assert_eq!(
+            app.render_cache.borrow().rebuild_count,
+            initial_rebuilds + 1
+        );
+        let _ = app.render_cache();
+        assert_eq!(
+            app.render_cache.borrow().rebuild_count,
+            initial_rebuilds + 1
+        );
+
+        reduce(&mut app, key(KeyCode::Backspace));
+        let _ = app.render_cache();
+        assert_eq!(
+            app.render_cache.borrow().rebuild_count,
+            initial_rebuilds + 2
+        );
+        reduce(&mut app, key(KeyCode::Backspace));
+        let _ = app.render_cache();
+        assert_eq!(
+            app.render_cache.borrow().rebuild_count,
+            initial_rebuilds + 2
+        );
     }
 }
