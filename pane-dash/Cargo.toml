@@ -16,3 +16,12 @@ unicode-width = "0.2"
 criterion = "0.7"
 insta = "1"
 tempfile = "3"
+
+[[bench]]
+name = "core"
+harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,5 +1,5 @@
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{Event as CrosstermEvent, EventStream};
@@ -71,6 +71,7 @@ impl Drop for TerminalGuard {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    let startup_started = Instant::now();
     let (client_tty, _session_id, _pane_id, bench_first_frame) = parse_args()?;
     let tmux = TmuxExec::new("tmux");
     let (snapshot_bytes, options_bytes) = tmux.startup().await?;
@@ -92,6 +93,10 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     redraw(&mut terminal, &mut app)?;
     if bench_first_frame {
+        eprintln!(
+            "{}",
+            bench_first_frame_message(startup_started.elapsed().as_secs_f64() * 1_000.0)
+        );
         return Ok(());
     }
 
@@ -147,6 +152,10 @@ async fn main() -> Result<()> {
     }
     let _ = client_tty;
     Ok(())
+}
+
+fn bench_first_frame_message(elapsed_ms: f64) -> String {
+    format!("pane-dash coldframe_ms={elapsed_ms:.3}")
 }
 
 async fn apply_event(
@@ -225,7 +234,7 @@ fn install_panic_cleanup() {
 
 #[cfg(test)]
 mod tests {
-    use super::SnapshotGeneration;
+    use super::{SnapshotGeneration, bench_first_frame_message};
 
     #[test]
     fn discards_snapshot_launched_before_a_successful_local_mutation() {
@@ -236,5 +245,13 @@ mod tests {
 
         let fresh_generation = guard.current();
         assert!(guard.accepts(2, fresh_generation));
+    }
+
+    #[test]
+    fn formats_the_cold_frame_measurement_for_the_probe() {
+        assert_eq!(
+            bench_first_frame_message(12.345),
+            "pane-dash coldframe_ms=12.345"
+        );
     }
 }

@@ -89,13 +89,16 @@ assert_notification() {
 @test "falls back to fzf with a hint when the rust binary is missing" {
   printf 'rust' > "$TMUX_STUB_DIR/global/@pane-dash-engine"
   export PATH="$BATS_TEST_DIRNAME/stubs:/usr/bin:/bin"
+  copy_root="$BATS_TEST_TMPDIR/plugin-no-bin"
+  mkdir -p "$copy_root"
+  cp "$SCRIPT" "$copy_root/pane_dash.tmux"
 
-  run "$SCRIPT"
+  run "$copy_root/pane_dash.tmux"
 
   [ "$status" -eq 0 ]
   assert_notification 1 display-message \
     'pane-dash: rust engine selected but pane-dash binary not found; using fzf'
-  assert_call 1 bind-key D run-shell "'$ROOT/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
+  assert_call 1 bind-key D run-shell "'$copy_root/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
 }
 
 @test "open_v2 passes the exact popup argv with defaults" {
