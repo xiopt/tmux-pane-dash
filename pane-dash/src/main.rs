@@ -922,14 +922,76 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
         );
         assert!(app.preview.inspect);
+        let dir = TempDir::new().unwrap();
+        let (tmux, log) = fake_snapshot_tmux(&dir);
+        let (mut coordinator, _) = TransportCoordinator::new();
+        coordinator.input(TransportInput::ConnectionFailed);
+        coordinator.input(TransportInput::ConnectionFailed);
+        assert_eq!(coordinator.mode(), TransportMode::Degraded);
+        let (connection_tx, _) = mpsc::unbounded_channel();
+        let (snapshot_tx, mut snapshots) = mpsc::unbounded_channel();
+        let mut control = None;
+        let mut pending_connection_generation = None;
+        let mut active_connection_generation = None;
+        let mut next_connection_generation = 0;
+        let mut debounce_deadline = None;
+        let mut next_snapshot_seq = 0;
+        let snapshot_generation = SnapshotGeneration::default();
+        let mut in_flight_snapshot = SnapshotInFlight::default();
+
         tokio::time::advance(Duration::from_millis(999)).await;
         assert!(
             tokio::time::timeout(Duration::ZERO, interval.tick())
                 .await
                 .is_err()
         );
-        tokio::time::advance(Duration::from_millis(1)).await;
-        interval.tick().await;
+        for advance in [Duration::from_millis(1), Duration::from_secs(1)] {
+            tokio::time::advance(advance).await;
+            interval.tick().await;
+            let directives = coordinator.input(TransportInput::FallbackTick);
+            assert_eq!(directives, vec![TransportDirective::OneShotSnapshot]);
+            dispatch_directives(
+                directives,
+                &mut coordinator,
+                &tmux,
+                "session",
+                &connection_tx,
+                &mut control,
+                &mut pending_connection_generation,
+                &mut active_connection_generation,
+                &mut next_connection_generation,
+                &mut debounce_deadline,
+                &snapshot_tx,
+                &mut next_snapshot_seq,
+                &snapshot_generation,
+                &mut in_flight_snapshot,
+            );
+            let response = snapshots.recv().await.expect("one-shot snapshot response");
+            assert!(in_flight_snapshot.accepts(response.seq));
+            let (completion, outcome) = classify_snapshot_payload(response.source, response.result);
+            assert!(coordinator.snapshot_completed(completion).is_empty());
+            reduce(
+                &mut app,
+                Event::Snapshot {
+                    outcome: outcome.expect("valid snapshot"),
+                    observed_at: response.observed_at,
+                },
+            );
+            assert!(app.preview.inspect || app.preview.target.is_none());
+        }
+        let log_bytes = fs::read(log).unwrap();
+        assert_eq!(
+            log_bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|entry| !entry.is_empty())
+                .count(),
+            2
+        );
+        assert!(
+            !log_bytes
+                .windows(b"show-options".len())
+                .any(|w| w == b"show-options")
+        );
         tokio::time::advance(Duration::from_secs(5)).await;
         interval.tick().await;
         assert!(
