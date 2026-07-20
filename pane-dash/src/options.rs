@@ -63,28 +63,28 @@ pub fn parse_show_options(bytes: &[u8]) -> DashConfig {
 }
 
 fn decode_args_escape(value: &[u8]) -> Option<String> {
-    let decoded = match value.first() {
-        Some(b'\'') => decode_single_quoted(value)?,
-        Some(b'"') => decode_double_quoted(value)?,
-        _ => decode_escapes(value, false)?,
+    let (value, reject_unescaped_quote) = match value.first() {
+        Some(b'\'') => (unwrap_single_quotes(value)?, false),
+        Some(b'"') => (unwrap_double_quotes(value)?, true),
+        _ => (value, false),
     };
 
-    String::from_utf8(decoded).ok()
+    String::from_utf8(decode_escapes(value, reject_unescaped_quote)?).ok()
 }
 
-fn decode_single_quoted(value: &[u8]) -> Option<Vec<u8>> {
+fn unwrap_single_quotes(value: &[u8]) -> Option<&[u8]> {
     (value.len() >= 2
         && value.last() == Some(&b'\'')
         && !value[1..value.len() - 1].contains(&b'\''))
-    .then(|| value[1..value.len() - 1].to_vec())
+    .then(|| &value[1..value.len() - 1])
 }
 
-fn decode_double_quoted(value: &[u8]) -> Option<Vec<u8>> {
+fn unwrap_double_quotes(value: &[u8]) -> Option<&[u8]> {
     if value.len() < 2 || value.last() != Some(&b'"') {
         return None;
     }
 
-    decode_escapes(&value[1..value.len() - 1], true)
+    Some(&value[1..value.len() - 1])
 }
 
 fn decode_escapes(value: &[u8], reject_unescaped_quote: bool) -> Option<Vec<u8>> {
@@ -104,20 +104,31 @@ fn decode_escapes(value: &[u8], reject_unescaped_quote: bool) -> Option<Vec<u8>>
         index += 1;
         let escaped = *value.get(index)?;
         let decoded_byte = match escaped {
-            b'\\' | b'"' | b'$' => escaped,
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b'f' => 0x0c,
             b'n' => b'\n',
             b'r' => b'\r',
             b't' => b'\t',
-            b'0'..=b'7' => {
-                let second = *value.get(index + 1)?;
-                let third = *value.get(index + 2)?;
-                if !matches!(second, b'0'..=b'7') || !matches!(third, b'0'..=b'7') {
-                    return None;
+            b'v' => 0x0b,
+            // Fail closed for \400 through \777: they cannot encode a byte,
+            // so the option is ignored rather than truncated or panicking.
+            b'4'..=b'7' => return None,
+            b'0'..=b'3' => {
+                let mut octal = u16::from(escaped - b'0');
+                for _ in 0..2 {
+                    let Some(next) = value.get(index + 1) else {
+                        break;
+                    };
+                    if !matches!(next, b'0'..=b'7') {
+                        break;
+                    }
+                    octal = octal * 8 + u16::from(*next - b'0');
+                    index += 1;
                 }
-                index += 2;
-                (escaped - b'0') * 64 + (second - b'0') * 8 + (third - b'0')
+                u8::try_from(octal).ok()?
             }
-            _ => return None,
+            _ => escaped,
         };
         decoded.push(decoded_byte);
         index += 1;
@@ -175,13 +186,37 @@ mod tests {
     }
 
     #[test]
-    fn ignores_malformed_or_unclosed_dash_options_and_invalid_stale_secs() {
+    fn unescapes_single_quoted_protected_and_c_style_forms() {
+        let config = parse_show_options(
+            b"@pane-dash-match 'path\\\\to\\#tag\\;\\%\\~'\n@pane-dash-new-command \\a\\b\\f\\v\n@pane-dash-theme \\q\n",
+        );
+
+        assert_eq!(config.match_pattern, "path\\to#tag;%~");
+        assert_eq!(config.new_command, "\x07\x08\x0c\x0b");
+        assert_eq!(config.theme, "q");
+    }
+
+    #[test]
+    fn ignores_overflowing_octal_escapes_without_panicking() {
+        let result = std::panic::catch_unwind(|| {
+            for escaped in [b"\\400".as_slice(), b"\\777".as_slice()] {
+                assert_eq!(
+                    parse_show_options(&[b"@pane-dash-match ".as_slice(), escaped, b"\n"].concat()),
+                    DashConfig::default()
+                );
+            }
+        });
+
+        result.expect("overflowing octal must not panic");
+    }
+
+    #[test]
+    fn ignores_unclosed_dash_options_and_invalid_stale_secs() {
         let config = parse_show_options(
             br#"@pane-dash-match "unterminated
 @pane-dash-stale-secs garbage
 @pane_dash_group 2
-@pane-dash-new-command "bad\q"
-@pane-dash-theme "bad\12"
+@pane-dash-new-command "unterminated
 @other-option "ignored"
 "#,
         );
