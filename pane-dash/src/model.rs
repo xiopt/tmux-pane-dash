@@ -252,7 +252,7 @@ mod tests {
         let built = model(&input);
         let ids: Vec<_> = built
             .rows(false)
-            .into_iter()
+            .iter()
             .map(|row| match row {
                 Row::Pane { pane_id, .. } => pane_id.0.clone(),
                 _ => unreachable!(),
