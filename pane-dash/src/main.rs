@@ -41,6 +41,46 @@ enum SnapshotSource {
     OneShot,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionMessageKind {
+    Connected,
+    Failed,
+    TopologyChanged,
+    Terminated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionRoute {
+    Ignore,
+    Install,
+    ConnectionFailed,
+    TopologyChanged,
+    ChannelEnded,
+}
+
+fn classify_connection_message(
+    kind: ConnectionMessageKind,
+    generation: u64,
+    pending_generation: Option<u64>,
+    active_generation: Option<u64>,
+) -> ConnectionRoute {
+    match kind {
+        ConnectionMessageKind::Connected if pending_generation == Some(generation) => {
+            ConnectionRoute::Install
+        }
+        ConnectionMessageKind::Failed if pending_generation == Some(generation) => {
+            ConnectionRoute::ConnectionFailed
+        }
+        ConnectionMessageKind::TopologyChanged if active_generation == Some(generation) => {
+            ConnectionRoute::TopologyChanged
+        }
+        ConnectionMessageKind::Terminated if active_generation == Some(generation) => {
+            ConnectionRoute::ChannelEnded
+        }
+        _ => ConnectionRoute::Ignore,
+    }
+}
+
 #[derive(Default)]
 struct SnapshotInFlight {
     seq: Option<u64>,
@@ -59,6 +99,27 @@ impl SnapshotInFlight {
         }
         self.seq = None;
         true
+    }
+}
+
+fn clear_terminated_connection_state<T>(
+    control: &mut Option<T>,
+    active_connection_generation: &mut Option<u64>,
+    in_flight_snapshot: &mut SnapshotInFlight,
+    debounce_deadline: &mut Option<tokio::time::Instant>,
+) {
+    *control = None;
+    *active_connection_generation = None;
+    in_flight_snapshot.reset();
+    *debounce_deadline = None;
+}
+
+fn recover_missing_channel_snapshot(coordinator: &mut TransportCoordinator) {
+    if !coordinator
+        .snapshot_completed(SnapshotCompletion::Failed)
+        .is_empty()
+    {
+        let _ = coordinator.snapshot_completed(SnapshotCompletion::Failed);
     }
 }
 
@@ -175,6 +236,7 @@ async fn main() -> Result<()> {
     let mut snapshot_generation = SnapshotGeneration::default();
     dispatch_directives(
         directives,
+        &mut coordinator,
         &tmux,
         &session_id,
         &connection_tx,
@@ -204,6 +266,7 @@ async fn main() -> Result<()> {
             _ = tick.tick() => {
                 dispatch_directives(
                     coordinator.input(pane_dash::transport::TransportInput::FallbackTick),
+                    &mut coordinator,
                     &tmux, &session_id, &connection_tx, &mut control,
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
@@ -215,34 +278,53 @@ async fn main() -> Result<()> {
                 }
             },
             message = connection_messages.recv() => if let Some(message) = message {
-                let directives = match message {
-                    ConnectionMessage::Connected { generation, handle }
-                        if pending_connection_generation == Some(generation) => {
-                            pending_connection_generation = None;
-                            active_connection_generation = Some(generation);
-                            control = Some(handle);
-                            coordinator.input(pane_dash::transport::TransportInput::Connected)
+                let (kind, generation) = match &message {
+                    ConnectionMessage::Connected { generation, .. } => {
+                        (ConnectionMessageKind::Connected, *generation)
+                    }
+                    ConnectionMessage::Failed { generation, .. } => {
+                        (ConnectionMessageKind::Failed, *generation)
+                    }
+                    ConnectionMessage::Event { generation, event } => match event {
+                        ControlEvent::TopologyChanged => {
+                            (ConnectionMessageKind::TopologyChanged, *generation)
                         }
-                    ConnectionMessage::Failed { generation, error: _ }
-                        if pending_connection_generation == Some(generation) => {
-                            pending_connection_generation = None;
-                            coordinator.input(pane_dash::transport::TransportInput::ConnectionFailed)
-                        }
-                    ConnectionMessage::Event { generation, event }
-                        if active_connection_generation == Some(generation) => match event {
-                            ControlEvent::TopologyChanged => coordinator.input(pane_dash::transport::TransportInput::TopologyChanged),
-                            ControlEvent::Terminated(_) => {
-                                control = None;
-                                active_connection_generation = None;
-                                debounce_deadline = None;
-                                in_flight_snapshot.reset();
-                                coordinator.input(pane_dash::transport::TransportInput::ChannelEnded)
-                            }
-                        },
+                        ControlEvent::Terminated(_) => (ConnectionMessageKind::Terminated, *generation),
+                    },
+                };
+                let route = classify_connection_message(
+                    kind,
+                    generation,
+                    pending_connection_generation,
+                    active_connection_generation,
+                );
+                let directives = match (route, message) {
+                    (ConnectionRoute::Install, ConnectionMessage::Connected { generation, handle }) => {
+                        pending_connection_generation = None;
+                        active_connection_generation = Some(generation);
+                        control = Some(handle);
+                        coordinator.input(pane_dash::transport::TransportInput::Connected)
+                    }
+                    (ConnectionRoute::ConnectionFailed, ConnectionMessage::Failed { .. }) => {
+                        pending_connection_generation = None;
+                        coordinator.input(pane_dash::transport::TransportInput::ConnectionFailed)
+                    }
+                    (ConnectionRoute::TopologyChanged, _) => {
+                        coordinator.input(pane_dash::transport::TransportInput::TopologyChanged)
+                    }
+                    (ConnectionRoute::ChannelEnded, _) => {
+                        clear_terminated_connection_state(
+                            &mut control,
+                            &mut active_connection_generation,
+                            &mut in_flight_snapshot,
+                            &mut debounce_deadline,
+                        );
+                        coordinator.input(pane_dash::transport::TransportInput::ChannelEnded)
+                    }
                     _ => Vec::new(),
                 };
                 dispatch_directives(
-                    directives, &tmux, &session_id, &connection_tx, &mut control,
+                    directives, &mut coordinator, &tmux, &session_id, &connection_tx, &mut control,
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
                     &mut next_snapshot_seq, &snapshot_generation,
@@ -262,6 +344,7 @@ async fn main() -> Result<()> {
                 debounce_deadline = None;
                 dispatch_directives(
                     coordinator.input(pane_dash::transport::TransportInput::DebounceElapsed),
+                    &mut coordinator,
                     &tmux, &session_id, &connection_tx, &mut control,
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
@@ -283,7 +366,7 @@ async fn main() -> Result<()> {
                 };
                 let directives = coordinator.snapshot_completed(completion);
                 dispatch_directives(
-                    directives, &tmux, &session_id, &connection_tx, &mut control,
+                    directives, &mut coordinator, &tmux, &session_id, &connection_tx, &mut control,
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
                     &mut next_snapshot_seq, &snapshot_generation,
@@ -307,6 +390,7 @@ fn bench_first_frame_message(elapsed_ms: f64) -> String {
 #[allow(clippy::too_many_arguments)]
 fn dispatch_directives(
     directives: Vec<TransportDirective>,
+    coordinator: &mut TransportCoordinator,
     tmux: &TmuxExec,
     session_id: &str,
     connection_tx: &mpsc::UnboundedSender<ConnectionMessage>,
@@ -339,6 +423,7 @@ fn dispatch_directives(
                 let (Some(handle), Some(connection_generation)) =
                     (control.clone(), *active_connection_generation)
                 else {
+                    recover_missing_channel_snapshot(coordinator);
                     continue;
                 };
                 in_flight_snapshot.spawned(spawn_snapshot(
@@ -485,10 +570,16 @@ fn install_panic_cleanup() {
 #[cfg(test)]
 mod tests {
     use super::{
-        SnapshotGeneration, SnapshotInFlight, SnapshotSource, bench_first_frame_message,
-        classify_snapshot_payload,
+        ConnectionMessageKind, ConnectionRoute, SnapshotGeneration, SnapshotInFlight,
+        SnapshotSource, bench_first_frame_message, classify_connection_message,
+        classify_snapshot_payload, clear_terminated_connection_state,
     };
-    use pane_dash::transport::SnapshotCompletion;
+    use pane_dash::tmux_exec::TmuxExec;
+    use pane_dash::transport::{
+        SnapshotCompletion, TransportCoordinator, TransportDirective, TransportInput,
+    };
+    use std::time::Duration;
+    use tokio::sync::mpsc;
 
     fn valid_record() -> Vec<u8> {
         b"\x1e$1\x1fs\x1f@1\x1f0\x1fw\x1f%1\x1f0\x1f1\x1fc\x1f/\x1f0\x1fa\x1f\x1f\x1f\x1f\x1f\x1f"
@@ -559,5 +650,139 @@ mod tests {
             bench_first_frame_message(12.345),
             "pane-dash coldframe_ms=12.345"
         );
+    }
+
+    #[test]
+    fn classifies_connection_messages_by_kind_and_generation() {
+        let pending = Some(2);
+        let active = Some(3);
+
+        for kind in [
+            ConnectionMessageKind::Connected,
+            ConnectionMessageKind::Failed,
+            ConnectionMessageKind::TopologyChanged,
+            ConnectionMessageKind::Terminated,
+        ] {
+            assert_eq!(
+                classify_connection_message(kind, 1, pending, active),
+                ConnectionRoute::Ignore
+            );
+        }
+        assert_eq!(
+            classify_connection_message(ConnectionMessageKind::Connected, 2, pending, active),
+            ConnectionRoute::Install
+        );
+        assert_eq!(
+            classify_connection_message(ConnectionMessageKind::Failed, 2, pending, active),
+            ConnectionRoute::ConnectionFailed
+        );
+        assert_eq!(
+            classify_connection_message(ConnectionMessageKind::TopologyChanged, 3, pending, active),
+            ConnectionRoute::TopologyChanged
+        );
+        assert_eq!(
+            classify_connection_message(ConnectionMessageKind::Terminated, 3, pending, active),
+            ConnectionRoute::ChannelEnded
+        );
+    }
+
+    #[test]
+    fn missing_channel_handle_completes_the_snapshot_request() {
+        let (mut coordinator, _) = TransportCoordinator::new();
+        coordinator.input(TransportInput::Connected);
+        let directives = coordinator.input(TransportInput::FallbackTick);
+        assert_eq!(directives, vec![TransportDirective::ChannelSnapshot]);
+        assert!(coordinator.input(TransportInput::RefreshNow).is_empty());
+
+        let tmux = TmuxExec::new("tmux");
+        let (connection_tx, _) = mpsc::unbounded_channel();
+        let (snapshot_tx, _) = mpsc::unbounded_channel();
+        let mut control = None;
+        let mut pending_connection_generation = None;
+        let mut active_connection_generation = None;
+        let mut next_connection_generation = 0;
+        let mut debounce_deadline = None;
+        let mut next_snapshot_seq = 0;
+        let snapshot_generation = SnapshotGeneration::default();
+        let mut in_flight_snapshot = SnapshotInFlight::default();
+
+        super::dispatch_directives(
+            directives,
+            &mut coordinator,
+            &tmux,
+            "session",
+            &connection_tx,
+            &mut control,
+            &mut pending_connection_generation,
+            &mut active_connection_generation,
+            &mut next_connection_generation,
+            &mut debounce_deadline,
+            &snapshot_tx,
+            &mut next_snapshot_seq,
+            &snapshot_generation,
+            &mut in_flight_snapshot,
+        );
+
+        assert_eq!(
+            coordinator.input(TransportInput::FallbackTick),
+            vec![TransportDirective::ChannelSnapshot]
+        );
+    }
+
+    #[test]
+    fn channel_end_clears_state_before_a_reconnected_topology_change_arms_debounce() {
+        let mut control = Some(());
+        let mut active_connection_generation = Some(3);
+        let mut in_flight_snapshot = SnapshotInFlight::default();
+        in_flight_snapshot.spawned(4);
+        let old_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let mut debounce_deadline = Some(old_deadline);
+
+        clear_terminated_connection_state(
+            &mut control,
+            &mut active_connection_generation,
+            &mut in_flight_snapshot,
+            &mut debounce_deadline,
+        );
+        assert_eq!(control, None);
+        assert_eq!(active_connection_generation, None);
+        assert_eq!(in_flight_snapshot.seq, None);
+        assert_eq!(debounce_deadline, None);
+
+        let (mut coordinator, _) = TransportCoordinator::new();
+        coordinator.input(TransportInput::Connected);
+        coordinator.input(TransportInput::ChannelEnded);
+        coordinator.input(TransportInput::Connected);
+        let directives = coordinator.input(TransportInput::TopologyChanged);
+        assert_eq!(directives, vec![TransportDirective::StartDebounce]);
+
+        let tmux = TmuxExec::new("tmux");
+        let (connection_tx, _) = mpsc::unbounded_channel();
+        let (snapshot_tx, _) = mpsc::unbounded_channel();
+        let mut control = None;
+        let mut pending_connection_generation = None;
+        let mut next_connection_generation = 0;
+        let mut next_snapshot_seq = 0;
+        let snapshot_generation = SnapshotGeneration::default();
+        let before_dispatch = tokio::time::Instant::now();
+        super::dispatch_directives(
+            directives,
+            &mut coordinator,
+            &tmux,
+            "session",
+            &connection_tx,
+            &mut control,
+            &mut pending_connection_generation,
+            &mut active_connection_generation,
+            &mut next_connection_generation,
+            &mut debounce_deadline,
+            &snapshot_tx,
+            &mut next_snapshot_seq,
+            &snapshot_generation,
+            &mut in_flight_snapshot,
+        );
+        let new_deadline = debounce_deadline.expect("reconnected debounce is armed");
+        assert!(new_deadline >= before_dispatch + Duration::from_millis(50));
+        assert!(new_deadline < old_deadline);
     }
 }
