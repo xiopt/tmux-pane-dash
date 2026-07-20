@@ -99,7 +99,21 @@ fn wide_labels_are_truncated_without_splitting_characters() {
         "東京の長いタイトルabc",
     )]);
 
-    insta::assert_snapshot!(draw(&state, 40, 8));
+    let rendered = draw(&state, 80, 8);
+    assert!(rendered.contains("東 京"));
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn status_counts_deduplicate_linked_panes() {
+    let mut linked = record("web", "%1", "needs_input", "Input");
+    linked.window_id = "@web".into();
+    let state = app(vec![record("dash", "%1", "needs_input", "Input"), linked]);
+
+    let rendered = draw(&state, 80, 24);
+    assert!(rendered.contains("needs_input 1"));
+    assert!(rendered.contains("1 panes"));
+    assert!(!rendered.contains("needs_input 2"));
 }
 
 #[test]

@@ -311,10 +311,8 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
 
 fn status_bar(app: &AppState) -> Paragraph<'static> {
     let mut counts = [0_usize; 6];
-    for row in app.model.rows(false) {
-        if let Row::Pane { status, .. } = row {
-            counts[status_index(*status)] += 1;
-        }
+    for pane in app.model.panes().values() {
+        counts[status_index(pane.status)] += 1;
     }
     let mut pieces = [
         Status::NeedsInput,
