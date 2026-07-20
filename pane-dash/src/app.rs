@@ -794,10 +794,14 @@ fn reduce_snapshot_failure(state: &mut AppState, error: String) -> ReduceResult 
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{
+        style::{Color, Style},
+        text::{Line, Span},
+    };
 
     use crate::app::{Action, AppState, Event, Focus, InputMode, JumpTarget, Mode, reduce};
     use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, Status, WindowId};
-    use crate::preview::parse_preview;
+    use crate::preview::{PreviewFrame, parse_preview};
     use crate::snapshot::{ParseOutcome, RawRecord};
 
     fn record(session: &str, window: &str, pane: &str, pane_index: u32) -> RawRecord {
@@ -893,7 +897,7 @@ mod tests {
             actions => panic!("expected replacement capture, got {actions:?}"),
         };
         assert!(second_sequence > first_sequence);
-        reduce(
+        let result = reduce(
             &mut app,
             Event::PreviewCaptured {
                 sequence: first_sequence,
@@ -901,6 +905,7 @@ mod tests {
                 result: Ok(parse_preview(PaneId::from("%a"), b"stale".to_vec())),
             },
         );
+        assert!(!result.changed);
         assert_eq!(app.preview.frame, None);
         assert_eq!(app.preview.in_flight, Some((second_sequence, second_pane)));
 
@@ -976,6 +981,159 @@ mod tests {
         );
         assert_eq!(app.preview.in_flight, None);
         assert!(!result.changed);
+    }
+
+    #[test]
+    fn repeated_identical_preview_failures_clear_in_flight_without_redrawing() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        let (sequence, pane_id) = select_first_pane(&mut app);
+        let failure = format!("capture failed\n{}", "x".repeat(300));
+
+        let result = reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id: pane_id.clone(),
+                result: Err(failure.clone()),
+            },
+        );
+        assert!(result.changed);
+        assert_eq!(app.preview.error.as_deref(), Some("capture failed"));
+
+        let sequence = match reduce(&mut app, Event::PreviewTick).actions.as_slice() {
+            [Action::CapturePreview { sequence, .. }] => *sequence,
+            actions => panic!("expected capture, got {actions:?}"),
+        };
+        let result = reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id,
+                result: Err(failure),
+            },
+        );
+
+        assert_eq!(app.preview.in_flight, None);
+        assert!(!result.changed);
+    }
+
+    #[test]
+    fn style_only_preview_frame_difference_redraws() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        let (sequence, pane_id) = select_first_pane(&mut app);
+        let plain_frame = parse_preview(pane_id.clone(), b"same".to_vec());
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id: pane_id.clone(),
+                result: Ok(plain_frame),
+            },
+        );
+
+        let sequence = match reduce(&mut app, Event::PreviewTick).actions.as_slice() {
+            [Action::CapturePreview { sequence, .. }] => *sequence,
+            actions => panic!("expected capture, got {actions:?}"),
+        };
+        let styled_frame = PreviewFrame {
+            pane_id: pane_id.clone(),
+            lines: vec![Line::from(Span::styled(
+                "same",
+                Style::default().fg(Color::Red),
+            ))],
+        };
+        let result = reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id,
+                result: Ok(styled_frame),
+            },
+        );
+
+        assert!(result.changed);
+    }
+
+    #[test]
+    fn successful_preview_after_error_redraws_even_when_restoring_prior_frame() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        let (sequence, pane_id) = select_first_pane(&mut app);
+        let frame = parse_preview(pane_id.clone(), b"same".to_vec());
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id: pane_id.clone(),
+                result: Ok(frame.clone()),
+            },
+        );
+
+        let sequence = match reduce(&mut app, Event::PreviewTick).actions.as_slice() {
+            [Action::CapturePreview { sequence, .. }] => *sequence,
+            actions => panic!("expected capture, got {actions:?}"),
+        };
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id: pane_id.clone(),
+                result: Err("capture failed".into()),
+            },
+        );
+        assert_eq!(app.preview.error.as_deref(), Some("capture failed"));
+
+        let sequence = match reduce(&mut app, Event::PreviewTick).actions.as_slice() {
+            [Action::CapturePreview { sequence, .. }] => *sequence,
+            actions => panic!("expected capture, got {actions:?}"),
+        };
+        let result = reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id,
+                result: Ok(frame),
+            },
+        );
+
+        assert_eq!(app.preview.error, None);
+        assert!(result.changed);
+    }
+
+    #[test]
+    fn accepted_preview_success_reset_to_bottom_redraws() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        let (sequence, pane_id) = select_first_pane(&mut app);
+        let frame = parse_preview(pane_id.clone(), b"one\ntwo\nthree\nfour".to_vec());
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id: pane_id.clone(),
+                result: Ok(frame.clone()),
+            },
+        );
+        reduce(&mut app, Event::PreviewViewport(2));
+
+        let sequence = match reduce(&mut app, Event::PreviewTick).actions.as_slice() {
+            [Action::CapturePreview { sequence, .. }] => *sequence,
+            actions => panic!("expected capture, got {actions:?}"),
+        };
+        // PreviewTick established this accepted request; model a pre-existing scroll offset
+        // without constructing the in-flight request directly.
+        app.preview.lines_from_bottom = 1;
+        assert!(app.preview.lines_from_bottom > 0);
+
+        let result = reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id,
+                result: Ok(frame),
+            },
+        );
+
+        assert_eq!(app.preview.lines_from_bottom, 0);
+        assert!(result.changed);
     }
 
     #[test]
