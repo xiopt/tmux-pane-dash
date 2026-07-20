@@ -59,6 +59,7 @@ pub struct AppState {
     pub should_quit: bool,
     pub pending_action: Option<Action>,
     pub consecutive_failures: u32,
+    pub dropped_records: usize,
     pub banner: Option<String>,
     focus: Option<Focus>,
     pending_key: Option<KeyCode>,
@@ -79,6 +80,7 @@ impl AppState {
             should_quit: false,
             pending_action: None,
             consecutive_failures: 0,
+            dropped_records: 0,
             banner: None,
             focus: None,
             pending_key: None,
@@ -270,6 +272,7 @@ fn emit_jump(state: &mut AppState, zoom: bool, result: &mut ReduceResult) {
 fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64) -> ReduceResult {
     let old_visible = state.visible_rows();
     let old_focus = state.focus.clone();
+    let dropped_changed = state.dropped_records != outcome.dropped;
     let model = Model::build(&outcome.records, &state.model_config(), observed_at);
     let mode = if model.grouped() {
         Mode::Grouped
@@ -277,12 +280,17 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
         Mode::Flat
     };
     let recovered = state.consecutive_failures != 0 || state.banner.is_some();
-    if model.content_hash() == state.model.content_hash() && mode == state.mode && !recovered {
+    if model.content_hash() == state.model.content_hash()
+        && mode == state.mode
+        && !recovered
+        && !dropped_changed
+    {
         return ReduceResult::default();
     }
     state.model = model;
     state.mode = mode;
     state.consecutive_failures = 0;
+    state.dropped_records = outcome.dropped;
     state.banner = None;
     state
         .collapsed

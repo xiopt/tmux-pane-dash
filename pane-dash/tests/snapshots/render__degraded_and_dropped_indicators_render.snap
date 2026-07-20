@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: "draw(&state, 80, 24)"
+---
+▾ dash (1)                                                                      
+  ✗ error        2m    1.2  sonnet  Build failed                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+error 1  1 panes  [grouped]  dropped: 3  ⚠ polling failures: 2

@@ -1,28 +1,21 @@
-pub mod app;
-pub mod model;
-pub mod options;
-pub mod snapshot;
-pub mod tmux_arg;
-pub mod tmux_exec;
-
-use std::io::{self, Write};
+use std::io;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use crossterm::cursor::MoveTo;
 use crossterm::event::{Event as CrosstermEvent, EventStream};
+use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::{execute, queue};
 use futures_util::StreamExt;
+use pane_dash::app::{Action, AppState, Event, reduce};
+use pane_dash::model::{Model, ModelConfig};
+use pane_dash::options::parse_show_options;
+use pane_dash::snapshot::parse;
+use pane_dash::tmux_exec::TmuxExec;
+use pane_dash::ui;
+use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
-
-use app::{Action, AppState, Event, reduce};
-use model::Model;
-use options::parse_show_options;
-use snapshot::parse;
-use tmux_exec::TmuxExec;
 
 struct TerminalGuard;
 
@@ -81,19 +74,22 @@ async fn main() -> Result<()> {
     let tmux = TmuxExec::new("tmux");
     let (snapshot_bytes, options_bytes) = tmux.startup().await?;
     let cfg = parse_show_options(&options_bytes);
+    let initial_snapshot = parse(&snapshot_bytes);
     let model = Model::build(
-        &parse(&snapshot_bytes).records,
-        &model::ModelConfig {
+        &initial_snapshot.records,
+        &ModelConfig {
             match_pattern: cfg.match_pattern.clone(),
             stale_secs: cfg.stale_secs,
         },
         now_secs(),
     );
     let mut app = AppState::new(model, cfg);
+    app.dropped_records = initial_snapshot.dropped;
 
     let _terminal = TerminalGuard::enter()?;
     install_panic_cleanup();
-    redraw(&app)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    redraw(&mut terminal, &app)?;
     if bench_first_frame {
         return Ok(());
     }
@@ -108,11 +104,11 @@ async fn main() -> Result<()> {
         tokio::select! {
             event = input.next() => match event {
                 Some(Ok(CrosstermEvent::Key(key))) => {
-                    if apply_event(&mut app, Event::Key(key), &tmux).await? {
+                    if apply_event(&mut terminal, &mut app, Event::Key(key), &tmux).await? {
                         snapshot_generation.record_successful_mutation();
                     }
                 },
-                Some(Ok(CrosstermEvent::Resize(_, _))) => redraw(&app)?,
+                Some(Ok(CrosstermEvent::Resize(_, _))) => redraw(&mut terminal, &app)?,
                 Some(Ok(_)) => {},
                 Some(Err(error)) => return Err(error).context("read terminal event"),
                 None => app.should_quit = true,
@@ -130,7 +126,7 @@ async fn main() -> Result<()> {
                         let _ = tx.send(SnapshotResponse { seq, generation, observed_at: now_secs(), result });
                     });
                 }
-                if apply_event(&mut app, Event::Tick, &tmux).await? {
+                if apply_event(&mut terminal, &mut app, Event::Tick, &tmux).await? {
                     snapshot_generation.record_successful_mutation();
                 }
             },
@@ -141,7 +137,7 @@ async fn main() -> Result<()> {
                         Ok(bytes) => Event::Snapshot { outcome: parse(&bytes), observed_at: response.observed_at },
                         Err(error) => Event::SnapshotFailed(error.to_string()),
                     };
-                    if apply_event(&mut app, event, &tmux).await? {
+                    if apply_event(&mut terminal, &mut app, event, &tmux).await? {
                         snapshot_generation.record_successful_mutation();
                     }
                 }
@@ -152,7 +148,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn apply_event(app: &mut AppState, event: Event, tmux: &TmuxExec) -> Result<bool> {
+async fn apply_event(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut AppState,
+    event: Event,
+    tmux: &TmuxExec,
+) -> Result<bool> {
     let result = reduce(app, event);
     let mut mutated = false;
     for action in result.actions {
@@ -165,42 +166,13 @@ async fn apply_event(app: &mut AppState, event: Event, tmux: &TmuxExec) -> Resul
         }
     }
     if result.changed {
-        redraw(app)?;
+        redraw(terminal, app)?;
     }
     Ok(mutated)
 }
 
-fn redraw(app: &AppState) -> Result<()> {
-    let mut stdout = io::stdout();
-    queue!(
-        stdout,
-        MoveTo(0, 0),
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
-    )?;
-    let mut line = 0_u16;
-    if let Some(banner) = &app.banner {
-        queue!(stdout, MoveTo(0, line))?;
-        write!(stdout, "{banner}")?;
-        line = line.saturating_add(1);
-    }
-    for row in app.model.rows(matches!(app.mode, app::Mode::Grouped)) {
-        let label = match row {
-            model::Row::SessionHeader { name, .. } => format!("{name}:"),
-            model::Row::Pane {
-                pane_id,
-                title,
-                command,
-                ..
-            } => {
-                let label = if title.is_empty() { command } else { title };
-                format!("  {} {label}", pane_id.0)
-            }
-        };
-        queue!(stdout, MoveTo(0, line))?;
-        write!(stdout, "{label}")?;
-        line = line.saturating_add(1);
-    }
-    stdout.flush()?;
+fn redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &AppState) -> Result<()> {
+    terminal.draw(|frame| ui::render(frame, app, now_secs()))?;
     Ok(())
 }
 
