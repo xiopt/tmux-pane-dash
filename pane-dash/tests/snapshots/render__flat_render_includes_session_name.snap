@@ -2,27 +2,27 @@
 source: tests/render.rs
 expression: "draw(&state, 80, 24)"
 ---
-◐ working      2m    1.2  dash       sonnet  Add retry logic                    
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
+◐ working      2m    1.2  dash       tmp          sonnet  Add retry logic
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 working 1  1 panes  [flat]

@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: rendered
+---
+▾ dash (6)                                                             1 working
+  ● needs_input  2m    1.2  tmp          sonnet  Input
+  ◐ working      2m    1.2  tmp          sonnet  Work
+  ○ idle         2m    1.2  tmp          sonnet  Idle
+  ✗ error        2m    1.2  tmp          sonnet  Error
+  ? unknown      2m    1.2  tmp          sonnet  Unknown
+  ⊘ stale        2m    1.2  tmp          sonnet  Stale
+
+
+
+
+
+
+
+
+
+
+
+
+
+snapshot failed (2): tmux unavailable
+⚠ polling failures: 2
+dropped: 3
+needs_input 1  working 1  idle 1  error 1  unknown 1  stale 1  6 panes  [grouped

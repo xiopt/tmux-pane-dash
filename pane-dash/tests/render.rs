@@ -40,15 +40,21 @@ fn app(records: Vec<RawRecord>) -> AppState {
 }
 
 fn draw(app: &AppState, width: u16, height: u16) -> String {
+    draw_at(app, width, height, NOW)
+}
+
+fn draw_at(app: &AppState, width: u16, height: u16, now: u64) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, app, NOW)).unwrap();
+    terminal.draw(|frame| render(frame, app, now)).unwrap();
     let buffer = terminal.backend().buffer();
     (0..height)
         .map(|y| {
             (0..width)
                 .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>()
+                .trim_end()
+                .to_owned()
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -121,12 +127,95 @@ fn selected_row_is_reversed() {
 }
 
 #[test]
+fn focused_header_is_reversed() {
+    let mut state = app(vec![record("dash", "%1", "working", "Add retry logic")]);
+    reduce(
+        &mut state,
+        Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    );
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &state, NOW)).unwrap();
+    assert!(
+        terminal.backend().buffer()[(0, 0)]
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    );
+}
+
+#[test]
+fn focused_header_scrolls_into_view() {
+    let mut state = app((0..12)
+        .map(|index| {
+            record(
+                &format!("session-{index:02}"),
+                &format!("%{index}"),
+                "idle",
+                "Work",
+            )
+        })
+        .collect());
+    reduce(
+        &mut state,
+        Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)),
+    );
+    reduce(
+        &mut state,
+        Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+    );
+
+    let backend = TestBackend::new(80, 4);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &state, NOW)).unwrap();
+    assert!(
+        terminal.backend().buffer()[(0, 2)]
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    );
+}
+
+#[test]
 fn degraded_and_dropped_indicators_render() {
     let mut state = app(vec![record("dash", "%1", "error", "Build failed")]);
     state.consecutive_failures = 2;
     state.dropped_records = 3;
 
     insta::assert_snapshot!(draw(&state, 80, 24));
+}
+
+#[test]
+fn alerts_remain_visible_with_all_statuses_at_80_columns() {
+    let mut stale = record("dash", "%6", "working", "Stale");
+    stale.heartbeat = Some(0);
+    let mut state = app(vec![
+        record("dash", "%1", "needs_input", "Input"),
+        record("dash", "%2", "working", "Work"),
+        record("dash", "%3", "idle", "Idle"),
+        record("dash", "%4", "error", "Error"),
+        record("dash", "%5", "unknown", "Unknown"),
+        stale,
+    ]);
+    state.dropped_records = 3;
+    state.consecutive_failures = 2;
+    state.banner = Some("snapshot failed (2): tmux unavailable".into());
+
+    let rendered = draw(&state, 80, 24);
+    assert!(rendered.contains("⚠ polling failures: 2"));
+    assert!(rendered.contains("dropped: 3"));
+    assert!(rendered.contains("snapshot failed (2): tmux unavailable"));
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn long_banner_wraps_instead_of_clipping() {
+    let mut state = app(vec![record("dash", "%1", "idle", "Idle")]);
+    let banner = "x".repeat(120);
+    state.banner = Some(banner.clone());
+
+    assert!(draw(&state, 80, 24).replace('\n', "").contains(&banner));
 }
 
 #[test]

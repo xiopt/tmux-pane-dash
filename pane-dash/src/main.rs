@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
     let _terminal = TerminalGuard::enter()?;
     install_panic_cleanup();
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    redraw(&mut terminal, &app)?;
+    redraw(&mut terminal, &mut app)?;
     if bench_first_frame {
         return Ok(());
     }
@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
                         snapshot_generation.record_successful_mutation();
                     }
                 },
-                Some(Ok(CrosstermEvent::Resize(_, _))) => redraw(&mut terminal, &app)?,
+                Some(Ok(CrosstermEvent::Resize(_, _))) => redraw(&mut terminal, &mut app)?,
                 Some(Ok(_)) => {},
                 Some(Err(error)) => return Err(error).context("read terminal event"),
                 None => app.should_quit = true,
@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
                         let _ = tx.send(SnapshotResponse { seq, generation, observed_at: now_secs(), result });
                     });
                 }
-                if apply_event(&mut terminal, &mut app, Event::Tick, &tmux).await? {
+                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux).await? {
                     snapshot_generation.record_successful_mutation();
                 }
             },
@@ -171,8 +171,10 @@ async fn apply_event(
     Ok(mutated)
 }
 
-fn redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &AppState) -> Result<()> {
-    terminal.draw(|frame| ui::render(frame, app, now_secs()))?;
+fn redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut AppState) -> Result<()> {
+    let now = now_secs();
+    terminal.draw(|frame| ui::render(frame, app, now))?;
+    app.mark_rendered(now);
     Ok(())
 }
 

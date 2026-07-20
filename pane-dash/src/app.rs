@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -35,7 +37,9 @@ pub enum Event {
         observed_at: u64,
     },
     SnapshotFailed(String),
-    Tick,
+    Tick {
+        now: u64,
+    },
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -45,7 +49,7 @@ pub struct ReduceResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Focus {
+pub(crate) enum Focus {
     Header(SessionId),
     Pane(Selection),
 }
@@ -63,6 +67,7 @@ pub struct AppState {
     pub banner: Option<String>,
     focus: Option<Focus>,
     pending_key: Option<KeyCode>,
+    last_age_hash: Option<u64>,
 }
 
 impl AppState {
@@ -84,6 +89,7 @@ impl AppState {
             banner: None,
             focus: None,
             pending_key: None,
+            last_age_hash: None,
         }
     }
 
@@ -96,6 +102,14 @@ impl AppState {
 
     fn grouped(&self) -> bool {
         self.mode == Mode::Grouped
+    }
+
+    pub(crate) fn focus(&self) -> Option<&Focus> {
+        self.focus.as_ref()
+    }
+
+    pub fn mark_rendered(&mut self, now: u64) {
+        self.last_age_hash = Some(age_hash(&self.model, self.grouped(), &self.collapsed, now));
     }
 
     fn visible_rows(&self) -> Vec<Focus> {
@@ -133,7 +147,51 @@ pub fn reduce(state: &mut AppState, event: Event) -> ReduceResult {
             observed_at,
         } => reduce_snapshot(state, outcome, observed_at),
         Event::SnapshotFailed(error) => reduce_snapshot_failure(state, error),
-        Event::Tick => ReduceResult::default(),
+        Event::Tick { now } => reduce_tick(state, now),
+    }
+}
+
+fn reduce_tick(state: &mut AppState, now: u64) -> ReduceResult {
+    let age_hash = age_hash(&state.model, state.grouped(), &state.collapsed, now);
+    if state.last_age_hash == Some(age_hash) {
+        return ReduceResult::default();
+    }
+    state.last_age_hash = Some(age_hash);
+    ReduceResult {
+        actions: Vec::new(),
+        changed: true,
+    }
+}
+
+fn age_hash(model: &Model, grouped: bool, collapsed: &HashSet<SessionId>, now: u64) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for row in model.rows(grouped) {
+        if let Row::Pane {
+            session_id,
+            status_since,
+            ..
+        } = row
+            && (!grouped || !collapsed.contains(session_id))
+        {
+            format_age(*status_since, now).hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+pub fn format_age(status_since: Option<u64>, now: u64) -> String {
+    let Some(since) = status_since else {
+        return "-".into();
+    };
+    let age = now.saturating_sub(since);
+    if age >= 86_400 {
+        format!("{}d", age / 86_400)
+    } else if age >= 3_600 {
+        format!("{}h", age / 3_600)
+    } else if age >= 60 {
+        format!("{}m", age / 60)
+    } else {
+        format!("{age}s")
     }
 }
 
@@ -594,5 +652,28 @@ mod tests {
         reduce(&mut app, key(KeyCode::Char('x')));
         reduce(&mut app, key(KeyCode::Char('a')));
         assert!(!app.collapsed.contains(&SessionId::from("$a")));
+    }
+
+    #[test]
+    fn tick_redraws_only_when_a_displayed_age_changes() {
+        let mut record = record("$a", "@a", "%a", 0);
+        record.status_since = Some(999);
+        let mut app = state(vec![record]);
+        app.mark_rendered(1_000);
+
+        assert!(!reduce(&mut app, Event::Tick { now: 1_000 }).changed);
+        assert!(reduce(&mut app, Event::Tick { now: 1_001 }).changed);
+        assert!(!reduce(&mut app, Event::Tick { now: 1_001 }).changed);
+    }
+
+    #[test]
+    fn tick_ignores_age_changes_in_collapsed_sessions() {
+        let mut record = record("$a", "@a", "%a", 0);
+        record.status_since = Some(999);
+        let mut app = state(vec![record]);
+        app.collapsed.insert(SessionId::from("$a"));
+        app.mark_rendered(1_000);
+
+        assert!(!reduce(&mut app, Event::Tick { now: 1_001 }).changed);
     }
 }

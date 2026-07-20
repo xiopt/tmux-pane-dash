@@ -3,26 +3,26 @@ source: tests/render.rs
 expression: "draw(&state, 80, 24)"
 ---
 ▾ dash (1)                                                             1 working
-  ◐ working      2m    1.2  sonnet  Add retry logic                             
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
+  ◐ working      2m    1.2  tmp          sonnet  Add retry logic
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 working 1  1 panes  [grouped]
