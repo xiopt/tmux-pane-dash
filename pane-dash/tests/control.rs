@@ -228,6 +228,123 @@ mod actor_tests {
     }
 
     #[tokio::test]
+    async fn eof_fails_active_buffered_and_blocked_request_senders() {
+        let dir = TempDir::new().unwrap();
+        let first_read = dir.path().join("first-read");
+        let release = dir.path().join("release");
+        std::process::Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .unwrap();
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\necho first > '{}'\nIFS= read -r _ < '{}'\nexec 1>&-\nIFS= read -r _ < '{}'",
+                first_read.display(),
+                release.display(),
+                release.display(),
+            ),
+        );
+        let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
+        let first_handle = handle.clone();
+        let first = tokio::spawn(async move { first_handle.snapshot().await });
+        marker(&first_read).await;
+        let (submitted, mut submitted_requests) = tokio::sync::mpsc::unbounded_channel();
+        let requests: Vec<_> = (0..41)
+            .map(|index| {
+                let handle = handle.clone();
+                let submitted = submitted.clone();
+                tokio::spawn(async move {
+                    let _ = submitted.send(());
+                    if index % 2 == 0 {
+                        handle.snapshot().await.map(|_| ())
+                    } else {
+                        handle.jump("/dev/ttys001", "%2").await.map(|_| ())
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..41 {
+            submitted_requests.recv().await.unwrap();
+        }
+
+        timeout(Duration::from_secs(2), async {
+            fs::write(&release, "go\n").unwrap();
+            assert!(first.await.unwrap().is_err());
+            for request in requests {
+                assert!(request.await.unwrap().is_err());
+            }
+            assert!(matches!(events.recv().await, Some(ControlEvent::Terminated(_))));
+            assert_eq!(events.recv().await, None);
+        })
+        .await
+        .expect("termination left a request sender hanging");
+    }
+
+    #[tokio::test]
+    async fn ready_response_completes_while_later_request_senders_are_blocked() {
+        let dir = TempDir::new().unwrap();
+        let first_read = dir.path().join("first-read");
+        let response_release = dir.path().join("response-release");
+        let termination_release = dir.path().join("termination-release");
+        for fifo in [&response_release, &termination_release] {
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap();
+        }
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\necho first > '{}'\nIFS= read -r _ < '{}'\nprintf '%s\\n' '%begin 2 2 1'\nprintf '\\036$7\\037%%1\\n'\nprintf '%s\\n' '%end 2 2 1'\nIFS= read -r _ < '{}'\nexec 1>&-",
+                first_read.display(),
+                response_release.display(),
+                termination_release.display(),
+            ),
+        );
+        let (handle, _events) = connect_control(fake, "$7").await.unwrap();
+        let first_handle = handle.clone();
+        let first = tokio::spawn(async move { first_handle.snapshot().await });
+        marker(&first_read).await;
+        let (submitted, mut submitted_requests) = tokio::sync::mpsc::unbounded_channel();
+        let requests: Vec<_> = (0..41)
+            .map(|index| {
+                let handle = handle.clone();
+                let submitted = submitted.clone();
+                tokio::spawn(async move {
+                    let _ = submitted.send(());
+                    if index % 2 == 0 {
+                        handle.snapshot().await.map(|_| ())
+                    } else {
+                        handle.jump("/dev/ttys001", "%2").await.map(|_| ())
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..41 {
+            submitted_requests.recv().await.unwrap();
+        }
+
+        fs::write(&response_release, "go\n").unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), first)
+                .await
+                .expect("ready response did not complete promptly")
+                .unwrap()
+                .unwrap(),
+            b"\x1e$7\x1f%1\n"
+        );
+        fs::write(&termination_release, "go\n").unwrap();
+        timeout(Duration::from_secs(2), async {
+            for request in requests {
+                assert!(request.await.unwrap().is_err());
+            }
+        })
+        .await
+        .expect("termination left a request sender hanging");
+    }
+
+    #[tokio::test]
     async fn termination_closes_retained_handle_before_event() {
         let dir = TempDir::new().unwrap();
         let pid = dir.path().join("pid");
