@@ -25,4 +25,4 @@ expression: rendered
 snapshot failed (2): tmux unavailable
 ⚠ polling failures: 2
 dropped: 3
-needs_input 1  working 1  idle 1  error 1  unknown 1  stale 1  6 panes  grouped
+N1W1I1E1U1S1P6  grouped | NAV

@@ -6,6 +6,7 @@ use pane_dash::snapshot::RawRecord;
 use pane_dash::ui::{format_age, render, truncate_to_width};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use unicode_width::UnicodeWidthStr;
 
 const NOW: u64 = 1_000;
 
@@ -58,6 +59,25 @@ fn draw_at(app: &AppState, width: u16, height: u16, now: u64) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn buffer_line_widths(app: &AppState, width: u16, height: u16) -> Vec<usize> {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, app, NOW)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            let mut used = 0;
+            let mut x = 0;
+            while x < width {
+                let symbol_width = buffer[(x, y)].symbol().width().max(1) as u16;
+                used += usize::from(symbol_width);
+                x = x.saturating_add(symbol_width);
+            }
+            used
+        })
+        .collect()
 }
 
 fn enter_query(app: &mut AppState, query: &str) {
@@ -262,6 +282,7 @@ fn alerts_remain_visible_with_all_statuses_at_80_columns() {
     assert!(rendered.contains("⚠ polling failures: 2"));
     assert!(rendered.contains("dropped: 3"));
     assert!(rendered.contains("snapshot failed (2): tmux unavailable"));
+    assert!(rendered.contains("grouped | NAV"));
     insta::assert_snapshot!(rendered);
 }
 
@@ -384,13 +405,15 @@ fn filtering_keeps_canonical_counts_and_identifies_the_current_mode() {
 
 #[test]
 fn narrow_status_truncates_unicode_query_without_losing_failure_indicators() {
+    let mut stale = record("dash", "%6", "working", "Stale");
+    stale.heartbeat = Some(0);
     let mut state = app(vec![
         record("dash", "%1", "needs_input", "Input"),
         record("dash", "%2", "working", "Work"),
         record("dash", "%3", "idle", "Idle"),
         record("dash", "%4", "error", "Error"),
         record("dash", "%5", "unknown", "Unknown"),
-        record("dash", "%6", "working", "Stale"),
+        stale,
     ]);
     state.consecutive_failures = 2;
     state.dropped_records = 3;
@@ -401,8 +424,20 @@ fn narrow_status_truncates_unicode_query_without_losing_failure_indicators() {
     assert!(rendered.contains("⚠ polling failures: 2"));
     assert!(rendered.contains("dropped: 3"));
     assert!(rendered.contains("snapshot failed (2): tmux unavailable"));
+    let status = rendered.lines().last().unwrap();
+    let compact_status = status.replace(' ', "");
+    assert!(status.contains("grouped"));
+    assert!(status.contains("FILTER"));
+    assert!(compact_status.contains("東京e\u{301}"));
+    for count in ["N1", "W1", "I1", "E1", "U1", "S1", "P6"] {
+        assert!(status.contains(count), "missing {count} in {status}");
+    }
     assert!(!rendered.contains('\u{fffd}'));
-    assert!(rendered.lines().all(|line| line.chars().count() <= 40));
+    assert!(
+        buffer_line_widths(&state, 40, 12)
+            .into_iter()
+            .all(|width| width <= 40)
+    );
 }
 
 #[test]

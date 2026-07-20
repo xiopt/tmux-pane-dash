@@ -288,22 +288,37 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
 }
 
 fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'static> {
-    let mut pieces = [
+    let statuses = [
         Status::NeedsInput,
         Status::Working,
         Status::Idle,
         Status::Error,
         Status::Unknown,
         Status::Stale,
-    ]
-    .into_iter()
-    .filter_map(|status| {
-        let count = counts[status_index(status)];
-        (count > 0).then(|| format!("{} {count}", status_text(status)))
-    })
-    .collect::<Vec<_>>();
-    pieces.push(format!("{} panes", counts.iter().sum::<usize>()));
-    let counts = pieces.join("  ");
+    ];
+    let verbose_counts = statuses
+        .into_iter()
+        .filter_map(|status| {
+            let count = counts[status_index(status)];
+            (count > 0).then(|| format!("{} {count}", status_text(status)))
+        })
+        .chain(std::iter::once(format!(
+            "{} panes",
+            counts.iter().sum::<usize>()
+        )))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let compact_counts = statuses
+        .into_iter()
+        .filter_map(|status| {
+            let count = counts[status_index(status)];
+            (count > 0).then(|| format!("{}{}", compact_status_token(status), count))
+        })
+        .chain(std::iter::once(format!(
+            "P{}",
+            counts.iter().sum::<usize>()
+        )))
+        .collect::<String>();
     let mode = match app.mode {
         Mode::Grouped => "grouped",
         Mode::Flat => "flat",
@@ -321,23 +336,45 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
         } else {
             prefix
         };
-    let separator = if counts.is_empty() { "" } else { "  " };
+    let query_is_visible =
+        app.input_mode == crate::app::InputMode::Filter || !app.filter_query.is_empty();
+    let minimum_query_width = app
+        .filter_query
+        .chars()
+        .filter_map(|character| character.width())
+        .find(|width| *width > 0)
+        .unwrap_or(0);
+    let counts = if verbose_counts.width() + 2 + suffix.width() + minimum_query_width
+        <= usize::from(width)
+    {
+        verbose_counts
+    } else {
+        compact_counts
+    };
+    let separator = "  ";
     let available_query_width =
         usize::from(width).saturating_sub(counts.width() + separator.width() + suffix.width());
-    let query = if app.input_mode == crate::app::InputMode::Filter || !app.filter_query.is_empty() {
+    let query = if query_is_visible {
         truncate_to_width(&app.filter_query, available_query_width)
     } else {
         String::new()
     };
-    pieces = vec![counts, separator.to_owned(), suffix, query]
-        .into_iter()
-        .filter(|piece| !piece.is_empty())
-        .collect();
     let spans = vec![Span::styled(
-        pieces.concat(),
+        format!("{counts}{separator}{suffix}{query}"),
         Style::default().fg(palette::STATUS_BAR),
     )];
     Paragraph::new(Line::from(spans))
+}
+
+fn compact_status_token(status: Status) -> char {
+    match status {
+        Status::NeedsInput => 'N',
+        Status::Working => 'W',
+        Status::Idle => 'I',
+        Status::Error => 'E',
+        Status::Unknown => 'U',
+        Status::Stale => 'S',
+    }
 }
 
 fn status_glyph(status: Status) -> &'static str {
