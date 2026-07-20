@@ -2,6 +2,267 @@
 /// escapes so the protocol command itself contains no raw record separators.
 pub const CONTROL_SNAPSHOT_COMMAND: &str = "list-panes -a -F \"\\036#{session_id}\\037#{session_name}\\037#{window_id}\\037#{window_index}\\037#{window_name}\\037#{pane_id}\\037#{pane_index}\\037#{pane_active}\\037#{pane_current_command}\\037#{pane_current_path}\\037#{pane_dead}\\037#{@pane_dash_status}\\037#{@pane_dash_status_since}\\037#{@pane_dash_heartbeat}\\037#{@pane_dash_title}\\037#{@pane_dash_model}\\037#{@pane_dash_tag}\\037#{@pane_dash_group}\"\n";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlEvent {
+    TopologyChanged,
+    Terminated(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct ControlHandle {
+    requests: mpsc::Sender<Request>,
+}
+
+impl ControlHandle {
+    pub async fn snapshot(&self) -> Result<Vec<u8>> {
+        let (reply, response) = oneshot::channel();
+        self.requests
+            .send(Request::Snapshot { reply })
+            .await
+            .map_err(|_| anyhow!("tmux control actor is not running"))?;
+        response
+            .await
+            .map_err(|_| anyhow!("tmux control actor stopped before replying"))?
+    }
+
+    pub async fn jump(&self, client_tty: &str, target: &str) -> Result<bool> {
+        let command = jump_command(client_tty, target)
+            .ok_or_else(|| anyhow!("invalid tmux control jump arguments"))?;
+        let (reply, response) = oneshot::channel();
+        self.requests
+            .send(Request::Jump { command, reply })
+            .await
+            .map_err(|_| anyhow!("tmux control actor is not running"))?;
+        response
+            .await
+            .map_err(|_| anyhow!("tmux control actor stopped before replying"))?
+    }
+}
+
+pub async fn connect_control(
+    tmux_bin: impl Into<PathBuf>,
+    session_id: &str,
+) -> Result<(ControlHandle, mpsc::UnboundedReceiver<ControlEvent>)> {
+    if !is_machine_session_id(session_id) {
+        bail!("invalid tmux session ID");
+    }
+
+    let mut child = Command::new(tmux_bin.into())
+        .args([
+            "-C",
+            "attach-session",
+            "-f",
+            "no-output,ignore-size",
+            "-t",
+            session_id,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("tmux stdin was not piped"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("tmux stdout was not piped"))?;
+    let mut stdout = BufReader::new(stdout);
+
+    if let Err(error) = consume_attach_handshake(&mut stdout).await {
+        drop(stdin);
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(error);
+    }
+
+    let (requests, request_rx) = mpsc::channel(32);
+    let (events, event_rx) = mpsc::unbounded_channel();
+    tokio::spawn(control_actor(child, stdin, stdout, request_rx, events));
+    Ok((ControlHandle { requests }, event_rx))
+}
+
+#[derive(Debug)]
+enum Request {
+    Snapshot {
+        reply: oneshot::Sender<Result<Vec<u8>>>,
+    },
+    Jump {
+        command: String,
+        reply: oneshot::Sender<Result<bool>>,
+    },
+}
+
+impl Request {
+    fn command(&self) -> &str {
+        match self {
+            Self::Snapshot { .. } => CONTROL_SNAPSHOT_COMMAND,
+            Self::Jump { command, .. } => command,
+        }
+    }
+
+    fn complete(self, ok: bool, data: Vec<u8>) {
+        match self {
+            Self::Snapshot { reply } => {
+                let _ = reply.send(if ok {
+                    Ok(data)
+                } else {
+                    Err(anyhow!("tmux control snapshot failed"))
+                });
+            }
+            Self::Jump { reply, .. } => {
+                let _ = reply.send(Ok(ok));
+            }
+        }
+    }
+
+    fn fail(self, message: &str) {
+        match self {
+            Self::Snapshot { reply } => {
+                let _ = reply.send(Err(anyhow!("{message}")));
+            }
+            Self::Jump { reply, .. } => {
+                let _ = reply.send(Err(anyhow!("{message}")));
+            }
+        }
+    }
+}
+
+async fn consume_attach_handshake<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<()> {
+    let mut parser = ProtocolParser::default();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line).await? == 0 {
+            bail!("tmux control attach ended before its handshake");
+        }
+        for event in parser.push_line(&line) {
+            match event {
+                ProtocolEvent::Response { ok: true, .. } => return Ok(()),
+                ProtocolEvent::Response { ok: false, .. } => bail!("tmux control attach failed"),
+                ProtocolEvent::MalformedResponse => bail!("malformed tmux control attach response"),
+                ProtocolEvent::Exit => bail!("tmux control exited during attach"),
+                ProtocolEvent::TopologyChanged => {}
+            }
+        }
+    }
+}
+
+async fn control_actor(
+    mut child: Child,
+    mut stdin: ChildStdin,
+    mut stdout: BufReader<tokio::process::ChildStdout>,
+    mut requests: mpsc::Receiver<Request>,
+    events: mpsc::UnboundedSender<ControlEvent>,
+) {
+    let mut parser = ProtocolParser::default();
+    let mut queued: VecDeque<Request> = VecDeque::new();
+    let mut active = None;
+    let mut line = Vec::new();
+    let mut terminated = None;
+
+    loop {
+        if active.is_none() && !queued.is_empty() {
+            let request = queued.pop_front().expect("queue was nonempty");
+            if let Err(error) = stdin.write_all(request.command().as_bytes()).await {
+                request.fail(&format!("tmux control write failed: {error}"));
+                terminated = Some(format!("tmux control write failed: {error}"));
+                break;
+            }
+            if let Err(error) = stdin.flush().await {
+                request.fail(&format!("tmux control write failed: {error}"));
+                terminated = Some(format!("tmux control write failed: {error}"));
+                break;
+            }
+            active = Some(request);
+            continue;
+        }
+
+        tokio::select! {
+            request = requests.recv() => match request {
+                Some(request) => queued.push_back(request),
+                None => break,
+            },
+            read = stdout.read_until(b'\n', &mut line) => match read {
+                Ok(0) => {
+                    for event in parser.finish() {
+                        if matches!(event, ProtocolEvent::MalformedResponse)
+                            && let Some(request) = active.take()
+                        {
+                            request.fail("malformed tmux control response");
+                        }
+                    }
+                    terminated = Some("tmux control stdout closed".into());
+                    break;
+                }
+                Ok(_) => {
+                    let parsed = parser.push_line(&line);
+                    line.clear();
+                    for event in parsed {
+                        match event {
+                            ProtocolEvent::Response { ok, data, .. } => {
+                                if let Some(request) = active.take() {
+                                    request.complete(ok, data);
+                                }
+                            }
+                            ProtocolEvent::TopologyChanged => { let _ = events.send(ControlEvent::TopologyChanged); }
+                            ProtocolEvent::Exit => {
+                                terminated = Some("tmux control exited".into());
+                                break;
+                            }
+                            ProtocolEvent::MalformedResponse => {
+                                if let Some(request) = active.take() {
+                                    request.fail("malformed tmux control response");
+                                }
+                            }
+                        }
+                    }
+                    if terminated.is_some() { break; }
+                }
+                Err(error) => {
+                    terminated = Some(format!("tmux control read failed: {error}"));
+                    break;
+                }
+            },
+            status = child.wait() => {
+                terminated = Some(match status {
+                    Ok(status) => format!("tmux control child exited: {status}"),
+                    Err(error) => format!("tmux control child wait failed: {error}"),
+                });
+                break;
+            },
+        }
+    }
+
+    drop(stdin);
+    if let Some(reason) = terminated {
+        fail_requests(active, &mut queued, &mut requests, &reason);
+        let _ = events.send(ControlEvent::Terminated(reason));
+    }
+    let _ = child.wait().await;
+}
+
+fn fail_requests(
+    active: Option<Request>,
+    queued: &mut VecDeque<Request>,
+    requests: &mut mpsc::Receiver<Request>,
+    reason: &str,
+) {
+    if let Some(request) = active {
+        request.fail(reason);
+    }
+    while let Some(request) = queued.pop_front() {
+        request.fail(reason);
+    }
+    while let Ok(request) = requests.try_recv() {
+        request.fail(reason);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GuardId {
     pub timestamp: u64,
@@ -154,3 +415,15 @@ fn is_safe_control_argument(value: &str) -> bool {
             || matches!(byte, b'\\' | b'\"' | b';')
     })
 }
+
+fn is_machine_session_id(value: &str) -> bool {
+    value.starts_with('$') && value.len() > 1 && is_safe_control_argument(value)
+}
+use std::{collections::VecDeque, path::PathBuf, process::Stdio};
+
+use anyhow::{Result, anyhow, bail};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStdin, Command},
+    sync::{mpsc, oneshot},
+};

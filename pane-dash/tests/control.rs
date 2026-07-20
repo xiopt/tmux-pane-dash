@@ -2,6 +2,320 @@ use pane_dash::control::{
     CONTROL_SNAPSHOT_COMMAND, GuardId, ProtocolEvent, ProtocolParser, jump_command,
 };
 
+#[cfg(unix)]
+mod actor_tests {
+    use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+
+    use pane_dash::control::{CONTROL_SNAPSHOT_COMMAND, ControlEvent, connect_control};
+    use tempfile::TempDir;
+    use tokio::time::{Duration, timeout};
+
+    fn fake_tmux(dir: &TempDir, body: &str) -> std::path::PathBuf {
+        let path = dir.path().join("fake-tmux");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    async fn marker(path: &Path) -> String {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if path.exists() {
+                    return fs::read_to_string(path).unwrap();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("marker timed out")
+    }
+
+    #[tokio::test]
+    async fn connects_with_exact_control_attach_argv() {
+        let dir = TempDir::new().unwrap();
+        let argv = dir.path().join("argv");
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nwhile IFS= read -r _; do :; done",
+                argv.display()
+            ),
+        );
+
+        let (_handle, _events) = connect_control(fake, "$7").await.unwrap();
+
+        assert_eq!(
+            marker(&argv).await,
+            "-C\nattach-session\n-f\nno-output,ignore-size\n-t\n$7\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_session_ids_before_spawning() {
+        let dir = TempDir::new().unwrap();
+        let invoked = dir.path().join("invoked");
+        let fake = fake_tmux(&dir, &format!("echo invoked > '{}'", invoked.display()));
+
+        assert!(connect_control(fake, "$ bad").await.is_err());
+        assert!(!invoked.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_attach_handshake_returns_error_and_reaps_child() {
+        let dir = TempDir::new().unwrap();
+        let fake = fake_tmux(
+            &dir,
+            "printf '%s\\n' '%begin 1 1 1' '%error 1 1 1'\nwhile IFS= read -r _; do :; done",
+        );
+
+        assert!(connect_control(fake, "$7").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn serializes_concurrent_requests_fifo_and_preserves_binary_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let commands = dir.path().join("commands");
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nn=1\nwhile IFS= read -r command; do\n  printf '%s\\n' \"$command\" >> '{}'\n  n=$((n + 1))\n  printf '%%begin 2 %s 1\\n' \"$n\"\n  if [ \"$n\" = 2 ]; then printf '\\036$7\\037%%1\\n'; fi\n  printf '%%end 2 %s 1\\n' \"$n\"\ndone",
+                commands.display()
+            ),
+        );
+        let (handle, _events) = connect_control(fake, "$7").await.unwrap();
+        let snapshot = handle.snapshot();
+        let jump = handle.jump("/dev/ttys001", "%2");
+        let (snapshot, jump) = tokio::join!(snapshot, jump);
+
+        assert_eq!(snapshot.unwrap(), b"\x1e$7\x1f%1\n");
+        assert!(jump.unwrap());
+        assert_eq!(
+            marker(&commands).await,
+            format!("{CONTROL_SNAPSHOT_COMMAND}switch-client -Z -c /dev/ttys001 -t %2\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_error_is_an_error_and_jump_error_is_false() {
+        let dir = TempDir::new().unwrap();
+        let fake = fake_tmux(
+            &dir,
+            "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nn=1\nwhile IFS= read -r _; do\n n=$((n + 1)); printf '%%begin 2 %s 1\\n%%error 2 %s 1\\n' \"$n\" \"$n\"\ndone",
+        );
+        let (handle, _events) = connect_control(fake, "$7").await.unwrap();
+
+        assert!(handle.snapshot().await.is_err());
+        assert!(!handle.jump("/dev/ttys001", "%2").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn forwards_recognized_notifications_and_ignores_unknown_tokens() {
+        let dir = TempDir::new().unwrap();
+        let fake = fake_tmux(
+            &dir,
+            "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1' '%window-add @3' '%future-token ignored'\nwhile IFS= read -r _; do :; done",
+        );
+        let (_handle, mut events) = connect_control(fake, "$7").await.unwrap();
+
+        assert_eq!(
+            timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(ControlEvent::TopologyChanged)
+        );
+        assert!(
+            timeout(Duration::from_millis(50), events.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_emits_one_termination_and_fails_the_active_request() {
+        let dir = TempDir::new().unwrap();
+        let fake = fake_tmux(
+            &dir,
+            "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\nprintf '%s\\n' '%exit'\nwhile IFS= read -r _; do :; done",
+        );
+        let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
+
+        assert!(handle.snapshot().await.is_err());
+        assert!(matches!(
+            timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(ControlEvent::Terminated(_))
+        ));
+        assert_eq!(events.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn eof_emits_one_termination_and_fails_the_active_request() {
+        let dir = TempDir::new().unwrap();
+        let fake = fake_tmux(
+            &dir,
+            "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\nexit 0",
+        );
+        let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
+
+        assert!(handle.snapshot().await.is_err());
+        assert!(matches!(
+            timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(ControlEvent::Terminated(_))
+        ));
+        assert_eq!(events.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn exit_fails_active_and_queued_replies() {
+        let dir = TempDir::new().unwrap();
+        let ready = dir.path().join("ready");
+        let release = dir.path().join("release");
+        std::process::Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .unwrap();
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\necho ready > '{}'\nIFS= read -r _ < '{}'\nprintf '%s\\n' '%exit'",
+                ready.display(),
+                release.display()
+            ),
+        );
+        let (handle, _events) = connect_control(fake, "$7").await.unwrap();
+        let first_handle = handle.clone();
+        let first = tokio::spawn(async move { first_handle.snapshot().await });
+        marker(&ready).await;
+        let second_handle = handle.clone();
+        let second = tokio::spawn(async move { second_handle.jump("/dev/ttys001", "%2").await });
+        tokio::task::yield_now().await;
+        fs::write(&release, "go\n").unwrap();
+
+        assert!(first.await.unwrap().is_err());
+        assert!(second.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn dropping_all_handles_closes_stdin_and_reaps_the_child() {
+        let dir = TempDir::new().unwrap();
+        let exited = dir.path().join("exited");
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nwhile IFS= read -r _; do :; done\necho exited > '{}'",
+                exited.display()
+            ),
+        );
+        let (handle, _events) = connect_control(fake, "$7").await.unwrap();
+        drop(handle);
+
+        assert_eq!(marker(&exited).await, "exited\n");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed tmux >= 3.6 and macOS script(1) PTY support"]
+    async fn real_tmux_control_actor() {
+        use std::process::{Command, Stdio};
+
+        struct Server(String);
+        impl Drop for Server {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux")
+                    .args(["-L", &self.0, "kill-server"])
+                    .status();
+            }
+        }
+        fn tmux(socket: &str, args: &[&str]) -> String {
+            let output = Command::new("tmux")
+                .args(["-L", socket])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "tmux {:?}: {:?}", args, output);
+            String::from_utf8(output.stdout).unwrap()
+        }
+
+        let socket = format!("pd_control_it_{}", std::process::id());
+        let _server = Server(socket.clone());
+        let bin_dir = TempDir::new().unwrap();
+        let tmux_bin = fake_tmux(&bin_dir, &format!("exec tmux -L '{}' \"$@\"", socket));
+        tmux(&socket, &["new-session", "-d", "-s", "first"]);
+        tmux(&socket, &["new-session", "-d", "-s", "second"]);
+        let first_id = tmux(
+            &socket,
+            &["display-message", "-p", "-t", "first", "#{session_id}"],
+        )
+        .trim()
+        .to_owned();
+        let second_id = tmux(
+            &socket,
+            &["display-message", "-p", "-t", "second", "#{session_id}"],
+        )
+        .trim()
+        .to_owned();
+        let mut pty = Command::new("script")
+            .args([
+                "-q",
+                "/dev/null",
+                "tmux",
+                "-L",
+                &socket,
+                "attach-session",
+                "-t",
+                "first",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let client_tty = timeout(Duration::from_secs(2), async {
+            loop {
+                let tty = tmux(&socket, &["list-clients", "-F", "#{client_tty}"]);
+                if let Some(tty) = tty.lines().find(|tty| tty.starts_with('/')) {
+                    return tty.to_owned();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let (handle, mut events) = connect_control(tmux_bin, &first_id).await.unwrap();
+        let snapshot = handle.snapshot().await.unwrap();
+        assert!(snapshot.starts_with(b"\x1e"));
+        assert!(!pane_dash::snapshot::parse(&snapshot).records.is_empty());
+        tmux(&socket, &["rename-window", "-t", "first:0", "renamed"]);
+        assert_eq!(
+            timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(ControlEvent::TopologyChanged)
+        );
+        assert!(handle.jump(&client_tty, &second_id).await.unwrap());
+        assert_eq!(
+            tmux(
+                &socket,
+                &["display-message", "-p", "-t", &client_tty, "#{session_id}"]
+            )
+            .trim(),
+            second_id
+        );
+
+        drop(handle);
+        tmux(&socket, &["detach-client", "-t", &client_tty]);
+        let _ = pty.kill();
+        std::thread::spawn(move || {
+            let _ = pty.wait();
+        });
+    }
+}
+
 fn guard(timestamp: u64, command_number: u64) -> GuardId {
     GuardId {
         timestamp,
