@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod app;
+pub mod filter;
 pub mod model;
 pub mod options;
 pub mod snapshot;
