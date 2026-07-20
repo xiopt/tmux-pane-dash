@@ -1,11 +1,15 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pane_dash::app::{AppState, Event, Mode, reduce};
-use pane_dash::model::{Model, ModelConfig};
+use pane_dash::model::{Model, ModelConfig, PaneId};
 use pane_dash::options::DashConfig;
+use pane_dash::preview::PreviewFrame;
 use pane_dash::snapshot::RawRecord;
-use pane_dash::ui::{format_age, render, truncate_to_width};
+use pane_dash::ui::{dashboard_areas, format_age, preview_inner_height, render, truncate_to_width};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 const NOW: u64 = 1_000;
@@ -59,6 +63,157 @@ fn draw_at(app: &AppState, width: u16, height: u16, now: u64) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn dashboard_layout_switches_at_one_hundred_columns() {
+    let horizontal = dashboard_areas(Rect::new(0, 0, 160, 50));
+    assert!(horizontal.horizontal);
+    assert_eq!(horizontal.list, Rect::new(0, 0, 72, 50));
+    assert_eq!(horizontal.preview, Rect::new(72, 0, 88, 50));
+
+    let vertical = dashboard_areas(Rect::new(0, 0, 99, 50));
+    assert!(!vertical.horizontal);
+    assert_eq!(vertical.list, Rect::new(0, 0, 99, 23));
+    assert_eq!(vertical.preview, Rect::new(0, 23, 99, 27));
+
+    assert!(dashboard_areas(Rect::new(0, 0, 100, 50)).horizontal);
+}
+
+#[test]
+fn preview_height_uses_the_same_vertical_layout_and_border_as_rendering() {
+    let state = app(vec![record("dash", "%1", "working", "Task")]);
+    assert_eq!(preview_inner_height(&state, Rect::new(0, 0, 160, 50)), 49);
+    assert_eq!(preview_inner_height(&state, Rect::new(0, 0, 80, 24)), 12);
+}
+
+#[test]
+fn preview_hints_distinguish_selection_waiting_and_capture_failure() {
+    let state = app(vec![record("dash", "%1", "working", "Task")]);
+    assert!(draw(&state, 80, 24).contains("select a pane to preview"));
+
+    let mut waiting = app(vec![record("dash", "%1", "working", "Task")]);
+    waiting.preview.target = Some(PaneId::from("%1"));
+    assert!(draw(&waiting, 80, 24).contains("capturing pane…"));
+
+    waiting.preview.error = Some("pane vanished".into());
+    assert!(draw(&waiting, 80, 24).contains("preview unavailable: pane vanished"));
+    insta::assert_snapshot!("preview_hints", draw(&waiting, 80, 24));
+}
+
+#[test]
+fn preview_follows_bottom_and_inspect_scrolls_back_from_it() {
+    let state = with_preview(
+        app(vec![record("dash", "%1", "working", "Task")]),
+        preview((0..20).map(|line| Line::raw(format!("line-{line:02}")))),
+    );
+    let followed = draw(&state, 80, 24);
+    assert!(followed.contains("line-08"));
+    assert!(followed.contains("line-19"));
+    assert!(!followed.contains("line-07"));
+
+    let mut inspected = state;
+    inspected.preview.inspect = true;
+    inspected.preview.lines_from_bottom = 3;
+    let scrolled = draw(&inspected, 80, 24);
+    assert!(scrolled.contains("line-05"));
+    assert!(scrolled.contains("line-16"));
+    assert!(!scrolled.contains("line-17"));
+    insta::assert_snapshot!("preview_follow_bottom", followed);
+    insta::assert_snapshot!("preview_inspect_scroll", scrolled);
+}
+
+#[test]
+fn preview_preserves_span_style_and_clips_wide_combining_lines_without_wrapping() {
+    let state = with_preview(
+        app(vec![record("dash", "%1", "working", "Task")]),
+        preview([Line::from(vec![Span::styled(
+            "東京e\u{301}abcdefgh",
+            Style::default()
+                .fg(Color::Red)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )])]),
+    );
+    let backend = TestBackend::new(100, 8);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &state, NOW)).unwrap();
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(46, 0)].symbol(), "東");
+    assert_eq!(buffer[(46, 0)].fg, Color::Red);
+    assert_eq!(buffer[(46, 0)].bg, Color::Blue);
+    assert!(
+        buffer[(46, 0)]
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD)
+    );
+    assert!(!draw(&state, 8, 8).contains("abcdefgh"));
+    insta::assert_snapshot!("preview_styled_wide_clipped", draw(&state, 100, 8));
+}
+
+#[test]
+fn preview_viewport_feedback_clamps_the_inspect_offset() {
+    let mut selected = app(vec![record("dash", "%1", "working", "Task")]);
+    reduce(
+        &mut selected,
+        Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    );
+    reduce(
+        &mut selected,
+        Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    );
+    let mut state = with_preview(
+        selected,
+        preview((0..20).map(|line| Line::raw(format!("line-{line:02}")))),
+    );
+    state.preview.inspect = true;
+    reduce(&mut state, Event::PreviewViewport(12));
+    state.preview.lines_from_bottom = usize::MAX;
+    reduce(&mut state, Event::PreviewViewport(12));
+    assert_eq!(state.preview.viewport_height, 12);
+    assert_eq!(state.preview.lines_from_bottom, 8);
+}
+
+#[test]
+fn inspect_status_survives_narrow_status_truncation_with_all_counts() {
+    let mut stale = record("dash", "%6", "working", "Stale");
+    stale.heartbeat = Some(0);
+    let mut state = with_preview(
+        app(vec![
+            record("dash", "%1", "needs_input", "Input"),
+            record("dash", "%2", "working", "Work"),
+            record("dash", "%3", "idle", "Idle"),
+            record("dash", "%4", "error", "Error"),
+            record("dash", "%5", "unknown", "Unknown"),
+            stale,
+        ]),
+        preview([Line::raw("capture")]),
+    );
+    enter_query(&mut state, "東京e\u{301}long-query");
+    state.preview.inspect = true;
+    state.transport_degraded = true;
+
+    let status = draw(&state, 40, 12).lines().last().unwrap().to_owned();
+    for token in [
+        "N1", "W1", "I1", "E1", "U1", "S1", "P6", "grouped", "FILTER", "INSPECT",
+    ] {
+        assert!(status.contains(token), "missing {token} in {status}");
+    }
+    insta::assert_snapshot!("degraded_inspect_narrow_status", draw(&state, 40, 12));
+}
+
+#[test]
+fn tiny_dashboard_dimensions_never_panic() {
+    let state = with_preview(
+        app(vec![record("dash", "%1", "working", "Task")]),
+        preview([Line::raw("capture")]),
+    );
+    for width in 0..4 {
+        for height in 0..4 {
+            let _ = draw(&state, width, height);
+        }
+    }
 }
 
 #[test]
@@ -118,6 +273,19 @@ fn clear_query(app: &mut AppState) {
             Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
         );
     }
+}
+
+fn preview(lines: impl IntoIterator<Item = Line<'static>>) -> PreviewFrame {
+    PreviewFrame {
+        pane_id: PaneId::from("%1"),
+        lines: lines.into_iter().collect(),
+    }
+}
+
+fn with_preview(mut state: AppState, frame: PreviewFrame) -> AppState {
+    state.preview.target = Some(PaneId::from("%1"));
+    state.preview.frame = Some(frame);
+    state
 }
 
 #[test]
@@ -260,7 +428,7 @@ fn focused_header_scrolls_into_view() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, &state, NOW)).unwrap();
     assert!(
-        terminal.backend().buffer()[(0, 2)]
+        terminal.backend().buffer()[(0, 0)]
             .style()
             .add_modifier
             .contains(ratatui::style::Modifier::REVERSED)

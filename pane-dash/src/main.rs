@@ -640,6 +640,8 @@ fn spawn_preview_capture(
 }
 
 fn redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut AppState) -> Result<()> {
+    let viewport_height = ui::preview_inner_height(app, terminal.size()?.into());
+    reduce(app, Event::PreviewViewport(viewport_height));
     let now = now_secs();
     app.prepare_render(now);
     terminal.draw(|frame| ui::render(frame, app, now))?;

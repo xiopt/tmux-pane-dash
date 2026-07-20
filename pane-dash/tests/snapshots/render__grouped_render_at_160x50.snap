@@ -2,53 +2,53 @@
 source: tests/render.rs
 expression: "draw(&state, 160, 50)"
 ---
-▾ dash (2)                                                                                                                                             1 working
-  ● needs_input  2m    1.2  tmp          sonnet  Fix auth refactor
-  ◐ working      2m    1.2  tmp          sonnet  Add retry logic
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+▾ dash (2)                                                     1 working│select a pane to preview
+  ● needs_input  2m    1.2  tmp          sonnet  Fix auth refactor      │
+  ◐ working      2m    1.2  tmp          sonnet  Add retry logic        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
 needs_input 1  working 1  2 panes  grouped | NAV

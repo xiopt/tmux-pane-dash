@@ -2,13 +2,27 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{AppState, Mode, status_index};
 use crate::model::{Row, Status};
 
 pub use crate::app::format_age;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DashboardAreas {
+    pub list: Rect,
+    pub preview: Rect,
+    pub horizontal: bool,
+}
+
+struct FullLayout {
+    alerts: Vec<Line<'static>>,
+    alerts_area: Rect,
+    status_area: Rect,
+    dashboard: DashboardAreas,
+}
 
 pub mod palette {
     use ratatui::style::Color;
@@ -24,17 +38,57 @@ pub mod palette {
     pub const DEGRADE: Color = Color::Red;
 }
 
-pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
-    let alerts = alert_lines(app, frame.area().width);
+pub fn dashboard_areas(content: Rect) -> DashboardAreas {
+    let horizontal = content.width >= 100;
+    let [list, preview] = if horizontal {
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(content)
+    } else {
+        Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(content)
+    };
+    DashboardAreas {
+        list,
+        preview,
+        horizontal,
+    }
+}
+
+pub fn preview_inner_height(app: &AppState, full_area: Rect) -> u16 {
+    let layout = full_layout(app, full_area);
+    preview_block(layout.dashboard.horizontal)
+        .inner(layout.dashboard.preview)
+        .height
+}
+
+fn full_layout(app: &AppState, full_area: Rect) -> FullLayout {
+    let alerts = alert_lines(app, full_area.width);
     let alert_height = alerts
         .len()
-        .min(frame.area().height.saturating_sub(1) as usize) as u16;
-    let [list_area, alert_area, status_area] = Layout::vertical([
+        .min(full_area.height.saturating_sub(1) as usize) as u16;
+    let [content, alerts_area, status_area] = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(alert_height),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
+    .areas(full_area);
+    FullLayout {
+        alerts,
+        alerts_area,
+        status_area,
+        dashboard: dashboard_areas(content),
+    }
+}
+
+fn preview_block(horizontal: bool) -> Block<'static> {
+    Block::default().borders(if horizontal {
+        Borders::LEFT
+    } else {
+        Borders::TOP
+    })
+}
+
+pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
+    let layout = full_layout(app, frame.area());
+    let list_area = layout.dashboard.list;
     let grouped = matches!(app.mode, Mode::Grouped);
     let rows = app.model.rows(grouped);
     let cache = app.render_cache();
@@ -82,13 +136,49 @@ pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(lines), list_area);
     }
-    if !alerts.is_empty() {
-        frame.render_widget(Paragraph::new(alerts), alert_area);
+    render_preview(frame, app, layout.dashboard);
+    if !layout.alerts.is_empty() {
+        frame.render_widget(Paragraph::new(layout.alerts), layout.alerts_area);
     }
     frame.render_widget(
-        status_bar(app, cache.status_counts, status_area.width),
-        status_area,
+        status_bar(app, cache.status_counts, layout.status_area.width),
+        layout.status_area,
     );
+}
+
+fn render_preview(frame: &mut Frame, app: &AppState, areas: DashboardAreas) {
+    let block = preview_block(areas.horizontal);
+    let inner = block.inner(areas.preview);
+    frame.render_widget(block, areas.preview);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let paragraph = match (&app.preview.target, &app.preview.frame, &app.preview.error) {
+        (None, _, _) => {
+            Paragraph::new("select a pane to preview").style(Style::default().fg(palette::DIM))
+        }
+        (Some(_), _, Some(error)) => Paragraph::new(format!("preview unavailable: {error}"))
+            .style(Style::default().fg(palette::DIM)),
+        (Some(_), Some(preview), None) => {
+            let start = preview_scroll(app, preview.lines.len(), inner.height);
+            Paragraph::new(preview.lines.clone()).scroll((start, 0))
+        }
+        (Some(_), None, None) => {
+            Paragraph::new("capturing pane…").style(Style::default().fg(palette::DIM))
+        }
+    };
+    frame.render_widget(paragraph, inner);
+}
+
+fn preview_scroll(app: &AppState, line_count: usize, inner_height: u16) -> u16 {
+    let follow_start = line_count.saturating_sub(usize::from(inner_height));
+    let start = if app.preview.inspect {
+        follow_start.saturating_sub(app.preview.lines_from_bottom)
+    } else {
+        follow_start
+    };
+    u16::try_from(start).unwrap_or(u16::MAX)
 }
 
 fn alert_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
@@ -344,6 +434,11 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
         } else {
             prefix
         };
+    let suffix = if app.preview.inspect {
+        format!("{suffix} | INSPECT")
+    } else {
+        suffix
+    };
     let query_is_visible =
         app.input_mode == crate::app::InputMode::Filter || !app.filter_query.is_empty();
     let minimum_query_width = app
@@ -359,7 +454,16 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
     } else {
         compact_counts
     };
-    let separator = "  ";
+    let compact_suffix = if app.preview.inspect {
+        format!("{mode} {input} INSPECT")
+    } else {
+        suffix.clone()
+    };
+    let (suffix, separator) = if counts.width() + 2 + suffix.width() <= usize::from(width) {
+        (suffix, "  ")
+    } else {
+        (compact_suffix, " ")
+    };
     let available_query_width =
         usize::from(width).saturating_sub(counts.width() + separator.width() + suffix.width());
     let query = if query_is_visible {
