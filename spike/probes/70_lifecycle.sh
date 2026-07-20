@@ -3,6 +3,16 @@
 # shellcheck disable=SC1091 # The shared harness is resolved relative to this probe.
 source "$(dirname "$0")/../lib.sh"
 
+assert_switch_zoom_artifact() { # $1=artifact containing switch-client finding
+  grep -qx 'FINDING: switch-client -Z zoomed=0' "$1"
+}
+
+if [[ "${1:-}" == "--assert-switch-zoom" ]]; then
+  [[ $# == 2 ]] || { echo "usage: $0 --assert-switch-zoom <artifact>" >&2; exit 2; }
+  assert_switch_zoom_artifact "$2"
+  exit
+fi
+
 A="70_lifecycle.txt"
 pd_reset_artifact "$A"
 
@@ -211,8 +221,14 @@ if [[ "$switch_state" != *":$target:zoom="* ]]; then
   pd_record "$A" "FINDING: switch-client via channel target mismatch state=[$switch_state] target=[$target]"
   exit 1
 fi
-pd_record "$A" "FINDING: switch-client via channel response=OK outer-current=[$switch_state] target=[$target]"
-pd_record "$A" "FINDING: switch-client -Z zoomed=${switch_state##*zoom=}"
+switch_zoomed="${switch_state##*zoom=}"
+pd_record "$A" "FINDING: switch-client -Z zoomed=$switch_zoomed"
+if [[ "$switch_zoomed" == 0 ]]; then
+  pd_record "$A" "FINDING: switch-client via channel response=OK outer-current=[$switch_state] target=[$target]"
+else
+  pd_record "$A" "FINDING: switch-client via channel zoom preservation FAILED outer-current=[$switch_state] target=[$target]"
+  exit 1
+fi
 
 stop_control
 TMUX='' pd_kill_server "$sock2"
