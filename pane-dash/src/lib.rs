@@ -4,6 +4,7 @@ pub mod control;
 pub mod filter;
 pub mod model;
 pub mod options;
+pub mod preview;
 pub mod snapshot;
 pub mod tmux_arg;
 pub mod tmux_exec;

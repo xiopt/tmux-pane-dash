@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ansi-to-tui = "8.0.1"
 anyhow = "1"
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "=0.3.32"

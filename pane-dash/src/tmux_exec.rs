@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
+use crate::model::PaneId;
+
 pub const SNAPSHOT_FORMAT: &str = "\x1e#{session_id}\x1f#{session_name}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_dead}\x1f#{@pane_dash_status}\x1f#{@pane_dash_status_since}\x1f#{@pane_dash_heartbeat}\x1f#{@pane_dash_title}\x1f#{@pane_dash_model}\x1f#{@pane_dash_tag}\x1f#{@pane_dash_group}";
 
 #[derive(Debug, Clone)]
@@ -25,6 +27,12 @@ impl TmuxExec {
         self.run(["show-options", "-g"])
             .await
             .context("tmux show-options -g")
+    }
+
+    pub async fn capture_pane(&self, pane_id: &PaneId) -> Result<Vec<u8>> {
+        self.run(["capture-pane", "-p", "-e", "-t", &pane_id.0])
+            .await
+            .context("tmux capture-pane")
     }
 
     pub async fn set_group(&self, on: bool) -> Result<()> {
