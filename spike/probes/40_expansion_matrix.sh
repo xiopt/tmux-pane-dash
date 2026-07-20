@@ -12,6 +12,7 @@ M='#{session_name}'
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/pd_spike_cwd.XXXXXX")"
 d="$temp_dir/pd_spike_cwd_#{session_name}"
 operational_failures=0
+doubling_contract_failures=0
 
 cleanup() {
   rm -rf "$temp_dir"
@@ -81,14 +82,17 @@ record_doubling() { # $1=label $2=expected; action function; readback function
 
   if ! error="$($action 2>&1)"; then
     pd_record "$A" "$label: DOUBLING_BROKEN action_error=[$error]"
+    doubling_contract_failures=$((doubling_contract_failures + 1))
     operational_failures=$((operational_failures + 1))
   elif ! got="$($readback 2>&1)"; then
     pd_record "$A" "$label: DOUBLING_BROKEN readback_error=[$got]"
+    doubling_contract_failures=$((doubling_contract_failures + 1))
     operational_failures=$((operational_failures + 1))
   elif grep -Fqx -- "$expected" <<<"$got"; then
     pd_record "$A" "$label: DOUBLING_OK"
   else
     pd_record "$A" "$label: DOUBLING_BROKEN got=[$got]"
+    doubling_contract_failures=$((doubling_contract_failures + 1))
   fi
 }
 
@@ -262,5 +266,10 @@ done
 
 if (( operational_failures > 0 )); then
   echo "expansion matrix encountered $operational_failures operational failure(s)" >&2
+  exit 1
+fi
+
+if (( doubling_contract_failures > 0 )); then
+  echo "expansion matrix encountered $doubling_contract_failures doubling contract failure(s)" >&2
   exit 1
 fi
