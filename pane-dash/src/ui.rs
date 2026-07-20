@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{AppState, Focus, Mode};
@@ -25,8 +25,9 @@ pub mod palette {
 }
 
 pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
-    let alerts = alert_lines(app);
-    let alert_height = alert_height(&alerts, frame.area().width)
+    let alerts = alert_lines(app, frame.area().width);
+    let alert_height = alerts
+        .len()
         .min(frame.area().height.saturating_sub(1) as usize) as u16;
     let [list_area, alert_area, status_area] = Layout::vertical([
         Constraint::Min(0),
@@ -69,43 +70,89 @@ pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
         frame.render_widget(Paragraph::new(lines), list_area);
     }
     if !alerts.is_empty() {
-        frame.render_widget(
-            Paragraph::new(alerts).wrap(Wrap { trim: false }),
-            alert_area,
-        );
+        frame.render_widget(Paragraph::new(alerts), alert_area);
     }
     frame.render_widget(status_bar(app), status_area);
 }
 
-fn alert_lines(app: &AppState) -> Vec<Line<'static>> {
+fn alert_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
     let mut alerts = Vec::new();
     if let Some(banner) = &app.banner {
-        alerts.push(Line::styled(
-            banner.clone(),
+        push_alert(
+            &mut alerts,
+            banner,
             Style::default().fg(palette::DEGRADE),
-        ));
+            width,
+        );
     }
     if app.consecutive_failures > 0 {
-        alerts.push(Line::styled(
-            format!("⚠ polling failures: {}", app.consecutive_failures),
+        push_alert(
+            &mut alerts,
+            &format!("⚠ polling failures: {}", app.consecutive_failures),
             Style::default().fg(palette::DEGRADE),
-        ));
+            width,
+        );
     }
     if app.dropped_records > 0 {
-        alerts.push(Line::styled(
-            format!("dropped: {}", app.dropped_records),
+        push_alert(
+            &mut alerts,
+            &format!("dropped: {}", app.dropped_records),
             Style::default().fg(palette::DIM),
-        ));
+            width,
+        );
     }
     alerts
 }
 
-fn alert_height(alerts: &[Line<'_>], width: u16) -> usize {
-    let width = usize::from(width).max(1);
-    alerts
-        .iter()
-        .map(|line| line.width().div_ceil(width).max(1))
-        .sum()
+fn push_alert(alerts: &mut Vec<Line<'static>>, message: &str, style: Style, width: u16) {
+    alerts.extend(
+        wrap_alert(message, usize::from(width))
+            .into_iter()
+            .map(|line| Line::styled(line, style)),
+    );
+}
+
+fn wrap_alert(message: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in message.split_whitespace() {
+        if word.width() > width {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            wrap_long_word(word, width, &mut lines);
+        } else if line.is_empty() {
+            line.push_str(word);
+        } else if line.width() + 1 + word.width() <= width {
+            line.push(' ');
+            line.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut line));
+            line.push_str(word);
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn wrap_long_word(word: &str, width: usize, lines: &mut Vec<String>) {
+    let mut line = String::new();
+    for character in word.chars() {
+        let character_width = character.width().unwrap_or(0);
+        if !line.is_empty() && line.width() + character_width > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        line.push(character);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
 }
 
 fn row_is_focused(row: &Row, focus: Option<&Focus>) -> bool {
@@ -204,18 +251,17 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
                 .iter()
                 .find(|value| !value.is_empty())
                 .map_or("", |value| value.as_str());
-            let prefix = if session.is_empty() {
+            let status_field = format!("{:<11}", status_text(*status));
+            let suffix = if session.is_empty() {
                 format!(
-                    " {:<11} {:>3} {:>4}.{: <2} ",
-                    status_text(*status),
+                    " {:>3} {:>4}.{: <2} ",
                     format_age(*status_since, now),
                     window_index,
                     pane_index
                 )
             } else {
                 format!(
-                    " {:<11} {:>3} {:>4}.{: <2} {:<10} ",
-                    status_text(*status),
+                    " {:>3} {:>4}.{: <2} {:<10} ",
                     format_age(*status_since, now),
                     window_index,
                     pane_index,
@@ -228,7 +274,8 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
                 usize::from(width).saturating_sub(
                     indent.width()
                         + status_glyph(*status).width()
-                        + prefix.width()
+                        + status_field.width()
+                        + suffix.width()
                         + context.width()
                         + model.width()
                         + 3,
@@ -240,7 +287,9 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
                     status_glyph(*status),
                     Style::default().fg(status_color(*status)),
                 ),
-                Span::raw(prefix),
+                Span::raw(" "),
+                Span::styled(status_field, Style::default().fg(status_color(*status))),
+                Span::raw(suffix),
                 Span::styled(context, Style::default().fg(palette::DIM)),
                 Span::raw(" "),
                 Span::styled(model.clone(), Style::default().fg(palette::DIM)),

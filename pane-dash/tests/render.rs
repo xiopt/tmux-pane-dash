@@ -219,6 +219,28 @@ fn long_banner_wraps_instead_of_clipping() {
 }
 
 #[test]
+fn narrow_multiword_banner_wraps_without_losing_words() {
+    let mut state = app(vec![record("dash", "%1", "idle", "Idle")]);
+    state.banner = Some("123456 123456 123456".into());
+
+    let rendered = draw(&state, 10, 8);
+    assert_eq!(rendered.matches("123456").count(), 3);
+}
+
+#[test]
+fn needs_input_status_text_uses_the_status_color() {
+    let state = app(vec![record("dash", "%1", "needs_input", "Input")]);
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &state, NOW)).unwrap();
+
+    assert_eq!(
+        terminal.backend().buffer()[(4, 1)].fg,
+        ratatui::style::Color::Red
+    );
+}
+
+#[test]
 fn empty_dashboard_shows_centered_hint() {
     insta::assert_snapshot!(draw(&app(vec![]), 80, 24));
 }
