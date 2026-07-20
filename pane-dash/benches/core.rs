@@ -116,10 +116,10 @@ fn benches(criterion: &mut Criterion) {
     assert_eq!(grouped_model.memberships().len(), 500);
     let flat_model = model(500, false);
     assert_eq!(flat_model.memberships().len(), 500);
-    criterion.bench_function("matcher_only/500/grouped", |bench| {
+    criterion.bench_function("filter/matcher_only/500/grouped", |bench| {
         bench.iter(|| ranked_row_indices(black_box(&grouped_model), true, black_box("auth")));
     });
-    criterion.bench_function("matcher_only/500/flat", |bench| {
+    criterion.bench_function("filter/matcher_only/500/flat", |bench| {
         bench.iter(|| ranked_row_indices(black_box(&flat_model), false, black_box("auth")));
     });
     bench_filter_keystroke_to_frame(
