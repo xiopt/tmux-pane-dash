@@ -31,15 +31,9 @@ pub struct ParseOutcome {
 }
 
 pub fn parse(bytes: &[u8]) -> ParseOutcome {
-    let Some(first_record) = bytes.iter().position(|byte| *byte == RS) else {
-        return ParseOutcome::default();
-    };
-
     let mut outcome = ParseOutcome::default();
     let mut open_record = None;
-    let response = bytes[first_record..]
-        .strip_suffix(b"\n")
-        .unwrap_or(&bytes[first_record..]);
+    let response = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     for line in response.split(|byte| *byte == b'\n') {
         if line.starts_with(&[RS]) {
             for record in line[1..].split(|byte| *byte == RS) {
@@ -320,6 +314,17 @@ mod tests {
 
         assert_eq!(outcome.dropped, 0);
         assert_eq!(outcome.records.len(), 1);
+    }
+
+    #[test]
+    fn ignores_valid_record_embedded_in_non_prefixed_preamble_line() {
+        let mut bytes = b"tmux chatter ".to_vec();
+        bytes.extend(record(&fields("embedded")));
+
+        let outcome = parse(&bytes);
+
+        assert!(outcome.records.is_empty());
+        assert_eq!(outcome.dropped, 0);
     }
 
     #[test]
