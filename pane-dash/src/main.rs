@@ -28,8 +28,33 @@ struct TerminalGuard;
 
 struct SnapshotResponse {
     seq: u64,
+    generation: u64,
     observed_at: u64,
     result: Result<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct SnapshotGeneration {
+    current: u64,
+    last_seq: u64,
+}
+
+impl SnapshotGeneration {
+    fn current(&self) -> u64 {
+        self.current
+    }
+
+    fn record_successful_mutation(&mut self) {
+        self.current = self.current.wrapping_add(1);
+    }
+
+    fn accepts(&mut self, seq: u64, generation: u64) -> bool {
+        if seq <= self.last_seq {
+            return false;
+        }
+        self.last_seq = seq;
+        generation == self.current
+    }
 }
 
 impl TerminalGuard {
@@ -78,11 +103,15 @@ async fn main() -> Result<()> {
     let (snapshot_tx, mut snapshots) = mpsc::unbounded_channel();
     let mut snapshot_pending = false;
     let mut next_snapshot_seq = 0_u64;
-    let mut last_snapshot_seq = 0_u64;
+    let mut snapshot_generation = SnapshotGeneration::default();
     while !app.should_quit {
         tokio::select! {
             event = input.next() => match event {
-                Some(Ok(CrosstermEvent::Key(key))) => apply_event(&mut app, Event::Key(key), &tmux).await?,
+                Some(Ok(CrosstermEvent::Key(key))) => {
+                    if apply_event(&mut app, Event::Key(key), &tmux).await? {
+                        snapshot_generation.record_successful_mutation();
+                    }
+                },
                 Some(Ok(CrosstermEvent::Resize(_, _))) => redraw(&app)?,
                 Some(Ok(_)) => {},
                 Some(Err(error)) => return Err(error).context("read terminal event"),
@@ -95,22 +124,26 @@ async fn main() -> Result<()> {
                     let snapshot_tmux = tmux.clone();
                     let tx = snapshot_tx.clone();
                     let seq = next_snapshot_seq;
+                    let generation = snapshot_generation.current();
                     tokio::spawn(async move {
                         let result = snapshot_tmux.snapshot().await;
-                        let _ = tx.send(SnapshotResponse { seq, observed_at: now_secs(), result });
+                        let _ = tx.send(SnapshotResponse { seq, generation, observed_at: now_secs(), result });
                     });
                 }
-                apply_event(&mut app, Event::Tick, &tmux).await?;
+                if apply_event(&mut app, Event::Tick, &tmux).await? {
+                    snapshot_generation.record_successful_mutation();
+                }
             },
             response = snapshots.recv() => if let Some(response) = response {
                 snapshot_pending = false;
-                if response.seq > last_snapshot_seq {
-                    last_snapshot_seq = response.seq;
+                if snapshot_generation.accepts(response.seq, response.generation) {
                     let event = match response.result {
                         Ok(bytes) => Event::Snapshot { outcome: parse(&bytes), observed_at: response.observed_at },
                         Err(error) => Event::SnapshotFailed(error.to_string()),
                     };
-                    apply_event(&mut app, event, &tmux).await?;
+                    if apply_event(&mut app, event, &tmux).await? {
+                        snapshot_generation.record_successful_mutation();
+                    }
                 }
             },
         }
@@ -119,18 +152,22 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn apply_event(app: &mut AppState, event: Event, tmux: &TmuxExec) -> Result<()> {
+async fn apply_event(app: &mut AppState, event: Event, tmux: &TmuxExec) -> Result<bool> {
     let result = reduce(app, event);
+    let mut mutated = false;
     for action in result.actions {
         match action {
-            Action::ToggleGroup(on) => tmux.set_group(on).await?,
+            Action::ToggleGroup(on) => {
+                tmux.set_group(on).await?;
+                mutated = true;
+            }
             Action::Jump { .. } | Action::Quit => {}
         }
     }
     if result.changed {
         redraw(app)?;
     }
-    Ok(())
+    Ok(mutated)
 }
 
 fn redraw(app: &AppState) -> Result<()> {
@@ -202,4 +239,20 @@ fn install_panic_cleanup() {
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         previous(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SnapshotGeneration;
+
+    #[test]
+    fn discards_snapshot_launched_before_a_successful_local_mutation() {
+        let mut guard = SnapshotGeneration::default();
+        let stale_generation = guard.current();
+        guard.record_successful_mutation();
+        assert!(!guard.accepts(1, stale_generation));
+
+        let fresh_generation = guard.current();
+        assert!(guard.accepts(2, fresh_generation));
+    }
 }
