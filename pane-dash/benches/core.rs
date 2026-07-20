@@ -25,7 +25,13 @@ fn snapshot(panes: usize, grouped: bool) -> Vec<u8> {
             _ => "",
         };
         let command = if index % 4 == 2 { "opencode" } else { "zsh" };
-        let tag = if index % 11 == 0 { "investigate" } else { "" };
+        let tag = if index % 11 == 0 {
+            "investigate"
+        } else if status.is_empty() && command != "opencode" {
+            "benchmark"
+        } else {
+            ""
+        };
         let group = if grouped { "1" } else { "0" };
         let record = format!(
             "\x1e${session}\x1fsession-{session}\x1f@{window}\x1f{}\x1fwork-{window}\x1f%{}\x1f{}\x1f{}\x1f{command}\x1f/Users/example/project-{session}\x1f0\x1f{status}\x1f{}\x1f{}\x1fauth Task {index}\x1fclaude-sonnet-{}\x1f{tag}\x1f{group}\n",
@@ -107,7 +113,9 @@ fn benches(criterion: &mut Criterion) {
     group.finish();
 
     let grouped_model = model(500, true);
+    assert_eq!(grouped_model.memberships().len(), 500);
     let flat_model = model(500, false);
+    assert_eq!(flat_model.memberships().len(), 500);
     criterion.bench_function("matcher_only/500/grouped", |bench| {
         bench.iter(|| ranked_row_indices(black_box(&grouped_model), true, black_box("auth")));
     });
