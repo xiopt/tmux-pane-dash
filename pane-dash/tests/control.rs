@@ -274,7 +274,10 @@ mod actor_tests {
             for request in requests {
                 assert!(request.await.unwrap().is_err());
             }
-            assert!(matches!(events.recv().await, Some(ControlEvent::Terminated(_))));
+            assert!(matches!(
+                events.recv().await,
+                Some(ControlEvent::Terminated(_))
+            ));
             assert_eq!(events.recv().await, None);
         })
         .await
