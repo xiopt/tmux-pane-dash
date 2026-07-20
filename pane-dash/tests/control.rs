@@ -233,14 +233,14 @@ mod actor_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn idle_child_exit_with_retained_handle_emits_one_termination() {
         let dir = TempDir::new().unwrap();
-        let fake = fake_tmux(
-            &dir,
-            "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nexit 0",
-        );
+        let fake = fake_tmux(&dir, "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nexit 0");
         let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
 
         timeout(Duration::from_secs(2), async {
-            assert!(matches!(events.recv().await, Some(ControlEvent::Terminated(_))));
+            assert!(matches!(
+                events.recv().await,
+                Some(ControlEvent::Terminated(_))
+            ));
             assert_eq!(events.recv().await, None);
             assert!(handle.snapshot().await.is_err());
         })
