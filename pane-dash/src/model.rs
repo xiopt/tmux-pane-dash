@@ -222,6 +222,7 @@ mod tests {
 
         let mut same_status_later_pane = record();
         same_status_later_pane.pane_id = "%14".into();
+        same_status_later_pane.window_index = 2;
         same_status_later_pane.pane_index = 2;
         same_status_later_pane.status = "working".into();
         same_status_later_pane.status_since = Some(30);
