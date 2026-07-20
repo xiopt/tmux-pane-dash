@@ -51,6 +51,25 @@ mod tests {
     }
 
     #[test]
+    fn discovers_only_exact_command_name_matches_for_the_configured_pattern() {
+        let mut exact = record();
+        exact.pane_current_command = "agent".into();
+        let mut near_miss = exact.clone();
+        near_miss.pane_id = "%2".into();
+        near_miss.pane_current_command = "my-agent-helper".into();
+        let cfg = ModelConfig {
+            match_pattern: "agent".into(),
+            ..ModelConfig::default()
+        };
+
+        let built = Model::build(&[exact, near_miss], &cfg, 1_000);
+
+        assert_eq!(built.memberships.len(), 1);
+        assert!(built.panes.contains_key(&"%1".into()));
+        assert!(!built.panes.contains_key(&"%2".into()));
+    }
+
+    #[test]
     fn preserves_linked_pane_memberships_and_last_canonical_facts() {
         let mut first = record();
         first.status = "working".into();
@@ -129,31 +148,33 @@ mod tests {
     }
 
     #[test]
-    fn flat_rows_follow_status_priority_and_documented_ties() {
-        let mut needs_old = record();
-        needs_old.status = "needs_input".into();
-        needs_old.status_since = Some(10);
-        let mut needs_new = needs_old.clone();
-        needs_new.pane_id = "%2".into();
-        needs_new.status_since = Some(20);
-        let mut error = needs_old.clone();
-        error.pane_id = "%3".into();
-        error.status = "error".into();
-        let mut working = error.clone();
-        working.pane_id = "%4".into();
-        working.status = "working".into();
-        let mut stale = error.clone();
-        stale.pane_id = "%5".into();
-        stale.status = "idle".into();
-        stale.heartbeat = Some(1);
-        let mut idle = error.clone();
-        idle.pane_id = "%6".into();
-        idle.status = "idle".into();
-        let mut unknown = error.clone();
-        unknown.pane_id = "%7".into();
-        unknown.status = "garbage".into();
+    fn flat_rows_follow_v1_status_priority_and_missing_last_timestamp_ties() {
+        let mut items = Vec::new();
+        for (pane_id, status, status_since) in [
+            ("%1", "needs_input", Some(10)),
+            ("%2", "needs_input", None),
+            ("%3", "error", Some(20)),
+            ("%4", "error", None),
+            ("%5", "working", Some(30)),
+            ("%6", "working", None),
+            ("%7", "idle", Some(40)),
+            ("%8", "idle", None),
+            ("%9", "unknown", Some(50)),
+            ("%10", "unknown", None),
+            ("%11", "idle", Some(60)),
+            ("%12", "idle", None),
+        ] {
+            let mut item = record();
+            item.pane_id = pane_id.into();
+            item.status = status.into();
+            item.status_since = status_since;
+            if pane_id == "%11" || pane_id == "%12" {
+                item.heartbeat = Some(1);
+            }
+            items.push(item);
+        }
 
-        let ids: Vec<_> = model(&[unknown, idle, stale, working, error, needs_new, needs_old])
+        let ids: Vec<_> = model(&items)
             .rows(false)
             .into_iter()
             .map(|row| match row {
@@ -161,7 +182,12 @@ mod tests {
                 _ => unreachable!(),
             })
             .collect();
-        assert_eq!(ids, ["%1", "%2", "%3", "%4", "%5", "%6", "%7"]);
+        assert_eq!(
+            ids,
+            [
+                "%1", "%2", "%3", "%4", "%5", "%6", "%7", "%8", "%9", "%10", "%11", "%12"
+            ]
+        );
     }
 
     #[test]
@@ -424,16 +450,13 @@ impl Model {
             return status_order;
         }
 
-        // v1 treats needs-input age as urgency: older requests sort first.
-        // Other equal-status rows retain deterministic topology order rather
-        // than pretending absent status timestamps carry an age ordering.
-        if left_pane.status == Status::NeedsInput {
-            return left_pane
-                .status_since
-                .cmp(&right_pane.status_since)
-                .then_with(|| topology_order(left, right));
-        }
-        topology_order(left, right)
+        // v1 ranks every status group by its age, with missing timestamps
+        // sorted last, then uses a deterministic topology tie-break.
+        left_pane
+            .status_since
+            .unwrap_or(u64::MAX)
+            .cmp(&right_pane.status_since.unwrap_or(u64::MAX))
+            .then_with(|| topology_order(left, right))
     }
 
     fn pane_row(&self, membership: &Membership) -> Row {
@@ -459,7 +482,7 @@ impl Model {
 
 fn is_discovered(record: &RawRecord, cfg: &ModelConfig) -> bool {
     !record.status.is_empty()
-        || record.pane_current_command.contains(&cfg.match_pattern)
+        || record.pane_current_command == cfg.match_pattern
         || !record.tag.is_empty()
 }
 
@@ -487,9 +510,9 @@ fn status_priority(status: Status) -> u8 {
         Status::NeedsInput => 0,
         Status::Error => 1,
         Status::Working => 2,
-        Status::Stale => 3,
-        Status::Idle => 4,
-        Status::Unknown => 5,
+        Status::Idle => 3,
+        Status::Unknown => 4,
+        Status::Stale => 5,
     }
 }
 
