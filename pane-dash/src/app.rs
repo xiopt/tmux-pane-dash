@@ -407,7 +407,7 @@ fn reduce_terminal_focus(state: &mut AppState, focused: bool) -> ReduceResult {
         actions: Vec::new(),
         changed: true,
     };
-    if state.preview.target.is_some() {
+    if state.preview.target.is_some() && !state.preview.inspect {
         request_preview(state, &mut result);
     }
     result
@@ -543,14 +543,6 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
             _ => {}
         }
     }
-    if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE {
-        if !state.preview.inspect || state.preview.in_flight.is_some() {
-            state.preview.inspect = true;
-            state.preview.in_flight = None;
-            result.changed = true;
-        }
-        return result;
-    }
     if state.input_mode == InputMode::Filter {
         match key.code {
             KeyCode::Esc => {
@@ -603,6 +595,7 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
     };
 
     match key.code {
+        KeyCode::Enter => emit_jump(state, false, &mut result),
         KeyCode::Char('/') if key.modifiers == KeyModifiers::NONE => {
             state.input_mode = InputMode::Filter;
             result.changed = true;
@@ -1013,7 +1006,7 @@ mod tests {
                 result: Ok(parse_preview(PaneId::from("%a"), b"frame".to_vec())),
             },
         );
-        reduce(&mut app, key(KeyCode::Enter));
+        reduce(&mut app, control_key(KeyCode::Char('u')));
         assert!(app.preview.inspect);
         assert!(reduce(&mut app, Event::PreviewTick).actions.is_empty());
     }
@@ -1031,7 +1024,7 @@ mod tests {
                 result: Ok(parse_preview(PaneId::from("%a"), b"frame".to_vec())),
             },
         );
-        reduce(&mut app, key(KeyCode::Enter));
+        reduce(&mut app, control_key(KeyCode::Char('u')));
         reduce(&mut app, snapshot(vec![record], 11));
         assert!(app.preview.inspect);
         assert_eq!(app.preview.target, Some(PaneId::from("%a")));
@@ -1040,6 +1033,38 @@ mod tests {
         assert_eq!(app.preview.target, None);
         assert_eq!(app.preview.frame, None);
         assert!(!app.preview.inspect);
+    }
+
+    #[test]
+    fn focus_regain_preserves_inspect_frame_and_offset_until_ctrl_r() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        let (sequence, pane_id) = select_first_pane(&mut app);
+        let frame = parse_preview(pane_id.clone(), b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10".to_vec());
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id,
+                result: Ok(frame.clone()),
+            },
+        );
+        reduce(&mut app, Event::PreviewViewport(4));
+        reduce(&mut app, control_key(KeyCode::Char('u')));
+        let offset = app.preview.lines_from_bottom;
+        assert!(offset > 0);
+
+        reduce(&mut app, Event::TerminalFocus(false));
+        let resumed = reduce(&mut app, Event::TerminalFocus(true));
+        assert!(resumed.actions.is_empty());
+        assert_eq!(app.preview.frame, Some(frame));
+        assert_eq!(app.preview.lines_from_bottom, offset);
+        assert!(app.preview.inspect);
+
+        let result = reduce(&mut app, control_key(KeyCode::Char('r')));
+        assert!(matches!(
+            result.actions.as_slice(),
+            [Action::CapturePreview { .. }]
+        ));
     }
 
     fn visible_pane_ids(app: &AppState) -> Vec<String> {
@@ -1218,32 +1243,32 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_z_targets_session_headers_without_zoom() {
-        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
-        reduce(&mut app, key(KeyCode::Char('j')));
-        let result = reduce(&mut app, control_key(KeyCode::Char('z')));
-        assert_eq!(
-            result.actions,
-            vec![Action::Jump {
-                target: JumpTarget::Session(SessionId::from("$a")),
-                zoom: false,
-            }]
-        );
-    }
+    fn enter_and_ctrl_z_target_headers_and_panes_with_expected_zoom() {
+        for (code, modifiers, zoom) in [
+            (KeyCode::Enter, KeyModifiers::NONE, false),
+            (KeyCode::Char('z'), KeyModifiers::CONTROL, true),
+        ] {
+            let mut header_app = state(vec![record("$a", "@a", "%a", 0)]);
+            reduce(&mut header_app, key(KeyCode::Char('j')));
+            assert_eq!(
+                reduce(&mut header_app, Event::Key(KeyEvent::new(code, modifiers))).actions,
+                vec![Action::Jump {
+                    target: JumpTarget::Session(SessionId::from("$a")),
+                    zoom: false,
+                }]
+            );
 
-    #[test]
-    fn ctrl_z_targets_panes_with_zoom() {
-        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
-        reduce(&mut app, key(KeyCode::Char('j')));
-        reduce(&mut app, key(KeyCode::Char('j')));
-        let result = reduce(&mut app, control_key(KeyCode::Char('z')));
-        assert_eq!(
-            result.actions,
-            vec![Action::Jump {
-                target: JumpTarget::Pane(PaneId::from("%a")),
-                zoom: true,
-            }]
-        );
+            let mut pane_app = state(vec![record("$a", "@a", "%a", 0)]);
+            reduce(&mut pane_app, key(KeyCode::Char('j')));
+            reduce(&mut pane_app, key(KeyCode::Char('j')));
+            assert_eq!(
+                reduce(&mut pane_app, Event::Key(KeyEvent::new(code, modifiers))).actions,
+                vec![Action::Jump {
+                    target: JumpTarget::Pane(PaneId::from("%a")),
+                    zoom,
+                }]
+            );
+        }
     }
 
     #[test]

@@ -27,6 +27,7 @@ use pane_dash::transport::{
 use pane_dash::ui;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
+use tokio::time::MissedTickBehavior;
 
 struct TerminalGuard;
 
@@ -238,10 +239,7 @@ async fn main() -> Result<()> {
 
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
-    let mut preview_tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + Duration::from_millis(500),
-        Duration::from_millis(500),
-    );
+    let mut preview_tick = preview_interval();
     let (snapshot_tx, mut snapshots) = mpsc::unbounded_channel();
     let (preview_tx, mut preview_responses) = mpsc::unbounded_channel();
     let (connection_tx, mut connection_messages) = mpsc::unbounded_channel();
@@ -435,6 +433,15 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn preview_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_millis(500),
+        Duration::from_millis(500),
+    );
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    interval
 }
 
 fn bench_first_frame_message(elapsed_ms: f64) -> String {
@@ -653,13 +660,12 @@ mod tests {
         ConnectionMessageKind, ConnectionRoute, SnapshotGeneration, SnapshotInFlight,
         SnapshotSource, bench_first_frame_message, classify_connection_message,
         classify_snapshot_payload, clear_terminated_connection_state, dispatch_directives,
-        spawn_preview_capture, sync_transport_degraded,
+        preview_interval, spawn_preview_capture, sync_transport_degraded,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pane_dash::app::{Action, AppState, Event, reduce};
     use pane_dash::model::{Model, ModelConfig};
     use pane_dash::options::DashConfig;
-    use pane_dash::preview::parse_preview;
     use pane_dash::tmux_exec::{SNAPSHOT_FORMAT, TmuxExec};
     use pane_dash::transport::{
         SnapshotCompletion, TransportCoordinator, TransportDirective, TransportInput, TransportMode,
@@ -710,12 +716,63 @@ mod tests {
         app
     }
 
+    fn fake_preview_tmux(dir: &TempDir) -> (TmuxExec, std::path::PathBuf) {
+        let log = dir.path().join("preview-argv.log");
+        let executable = dir.path().join("fake-preview-tmux");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\0' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nprintf 'captured\\n'\n",
+                log.display(),
+                log.display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        (TmuxExec::new(executable), log)
+    }
+
+    async fn execute_preview_action(
+        app: &mut AppState,
+        tmux: &TmuxExec,
+        tx: &mpsc::UnboundedSender<super::PreviewResponse>,
+        responses: &mut mpsc::UnboundedReceiver<super::PreviewResponse>,
+        action: Action,
+    ) {
+        let Action::CapturePreview { sequence, pane_id } = action else {
+            panic!("expected preview capture action");
+        };
+        spawn_preview_capture(tx, tmux.clone(), sequence, pane_id);
+        let response = responses.recv().await.expect("preview response");
+        reduce(
+            app,
+            Event::PreviewCaptured {
+                sequence: response.sequence,
+                pane_id: response.pane_id,
+                result: response.result,
+            },
+        );
+    }
+
     #[tokio::test(start_paused = true, flavor = "current_thread")]
     async fn preview_scheduler_starts_at_500ms_and_pauses_for_inspect_or_focus_loss() {
-        let mut scheduler = tokio::time::interval_at(
-            tokio::time::Instant::now() + Duration::from_millis(500),
-            Duration::from_millis(500),
-        );
+        let mut scheduler = preview_interval();
+        let dir = TempDir::new().unwrap();
+        let (tmux, log) = fake_preview_tmux(&dir);
+        let (tx, mut responses) = mpsc::unbounded_channel();
+        let mut app = preview_app();
+        let (sequence, pane_id) = app.preview.in_flight.clone().expect("initial request");
+        execute_preview_action(
+            &mut app,
+            &tmux,
+            &tx,
+            &mut responses,
+            Action::CapturePreview { sequence, pane_id },
+        )
+        .await;
+
         tokio::time::advance(Duration::from_millis(499)).await;
         assert!(
             tokio::time::timeout(Duration::ZERO, scheduler.tick())
@@ -725,34 +782,76 @@ mod tests {
         );
         tokio::time::advance(Duration::from_millis(1)).await;
         scheduler.tick().await;
+        let action = reduce(&mut app, Event::PreviewTick)
+            .actions
+            .pop()
+            .expect("capture at 500ms");
+        execute_preview_action(&mut app, &tmux, &tx, &mut responses, action).await;
+        tokio::time::advance(Duration::from_millis(500)).await;
+        scheduler.tick().await;
+        let action = reduce(&mut app, Event::PreviewTick)
+            .actions
+            .pop()
+            .expect("second steady capture");
+        execute_preview_action(&mut app, &tmux, &tx, &mut responses, action).await;
 
-        let mut app = preview_app();
-        let (sequence, pane_id) = app.preview.in_flight.clone().expect("initial request");
-        reduce(
-            &mut app,
-            Event::PreviewCaptured {
-                sequence,
-                pane_id: pane_id.clone(),
-                result: Ok(parse_preview(pane_id, b"frame".to_vec())),
-            },
+        let log_bytes = fs::read(log).unwrap();
+        let invocations = log_bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry
+                    .split(|byte| *byte == b'\0')
+                    .filter(|argument| !argument.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(invocations.len(), 3, "initial plus two per second");
+        assert!(invocations.iter().all(|arguments| {
+            arguments == &vec![b"capture-pane".as_slice(), b"-p", b"-e", b"-t", b"%1"]
+        }));
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        scheduler.tick().await;
+        let action = reduce(&mut app, Event::PreviewTick)
+            .actions
+            .pop()
+            .expect("one delayed capture after a stall");
+        execute_preview_action(&mut app, &tmux, &tx, &mut responses, action).await;
+        assert!(
+            tokio::time::timeout(Duration::ZERO, scheduler.tick())
+                .await
+                .is_err(),
+            "missed ticks must not burst"
         );
-        assert!(matches!(
-            reduce(&mut app, Event::PreviewTick).actions.as_slice(),
-            [Action::CapturePreview { .. }]
-        ));
         reduce(
             &mut app,
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
         );
         assert!(reduce(&mut app, Event::PreviewTick).actions.is_empty());
         reduce(&mut app, Event::TerminalFocus(false));
         assert!(reduce(&mut app, Event::PreviewTick).actions.is_empty());
-        assert!(matches!(
+        assert!(
             reduce(&mut app, Event::TerminalFocus(true))
                 .actions
-                .as_slice(),
-            [Action::CapturePreview { .. }]
-        ));
+                .is_empty()
+        );
+        let action = reduce(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+        )
+        .actions
+        .pop()
+        .expect("ctrl-r capture");
+        execute_preview_action(
+            &mut app,
+            &TmuxExec::new("/missing/tmux"),
+            &tx,
+            &mut responses,
+            action,
+        )
+        .await;
+        assert!(app.preview.error.is_some());
     }
 
     #[test]
@@ -760,7 +859,7 @@ mod tests {
         let mut app = preview_app();
         reduce(
             &mut app,
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
         );
         assert!(app.preview.inspect);
 
