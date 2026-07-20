@@ -108,6 +108,53 @@ mod actor_tests {
     }
 
     #[tokio::test]
+    async fn does_not_write_a_second_request_while_the_first_response_is_blocked() {
+        let dir = TempDir::new().unwrap();
+        let first_read = dir.path().join("first-read");
+        let second_reader_ready = dir.path().join("second-reader-ready");
+        let second_read = dir.path().join("second-read");
+        let release = dir.path().join("release");
+        std::process::Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .unwrap();
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\necho first > '{}'\necho ready > '{}'\nIFS= read -r _ < '{}'\nprintf '%s\\n' '%begin 2 2 1'\nprintf '\\036$7\\037%%1\\n'\nprintf '%s\\n' '%end 2 2 1'\nIFS= read -r _\necho second > '{}'\nprintf '%s\\n' '%begin 2 3 1' '%end 2 3 1'",
+                first_read.display(),
+                second_reader_ready.display(),
+                release.display(),
+                second_read.display(),
+            ),
+        );
+        let (handle, _events) = connect_control(fake, "$7").await.unwrap();
+        let first_handle = handle.clone();
+        let first = tokio::spawn(async move { first_handle.snapshot().await });
+        marker(&first_read).await;
+        marker(&second_reader_ready).await;
+        let second_handle = handle.clone();
+        let second = tokio::spawn(async move { second_handle.jump("/dev/ttys001", "%2").await });
+
+        assert!(
+            timeout(Duration::from_millis(100), async {
+                loop {
+                    if second_read.exists() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err()
+        );
+        fs::write(&release, "go\n").unwrap();
+        assert_eq!(first.await.unwrap().unwrap(), b"\x1e$7\x1f%1\n");
+        assert!(second.await.unwrap().unwrap());
+        assert_eq!(marker(&second_read).await, "second\n");
+    }
+
+    #[tokio::test]
     async fn snapshot_error_is_an_error_and_jump_error_is_false() {
         let dir = TempDir::new().unwrap();
         let fake = fake_tmux(
