@@ -1,4 +1,5 @@
 use crate::app::JumpTarget;
+use crate::control::ControlHandle;
 use crate::tmux_exec::TmuxExec;
 
 /// Builds the one-shot tmux argv vectors for a jump action.
@@ -44,16 +45,35 @@ pub fn jump_commands(client_tty: &str, target: &JumpTarget, zoom: bool) -> Vec<V
 /// a failed one-shot is intentionally reported only as an unsuccessful action.
 pub async fn execute_jump(
     tmux: &TmuxExec,
+    control: Option<&ControlHandle>,
     client_tty: &str,
     target: &JumpTarget,
     zoom: bool,
 ) -> bool {
-    for command in jump_commands(client_tty, target, zoom) {
-        if !tmux.run_silent(&command).await {
-            return false;
-        }
+    if zoom
+        && let JumpTarget::Pane(pane_id) = target
+        && !tmux
+            .run_silent(&[
+                "resize-pane".into(),
+                "-Z".into(),
+                "-t".into(),
+                pane_id.0.clone(),
+            ])
+            .await
+    {
+        return false;
     }
-    true
+
+    if let Some(control) = control {
+        let target = match target {
+            JumpTarget::Session(session_id) => &session_id.0,
+            JumpTarget::Pane(pane_id) => &pane_id.0,
+        };
+        return control.jump(client_tty, target).await.unwrap_or(false);
+    }
+
+    let commands = jump_commands(client_tty, target, false);
+    tmux.run_silent(&commands[0]).await
 }
 
 #[cfg(test)]
@@ -107,6 +127,7 @@ mod tests {
         assert!(
             !super::execute_jump(
                 &tmux,
+                None,
                 "/definitely-not-a-tmux-client",
                 &JumpTarget::Pane("%999999".into()),
                 false,

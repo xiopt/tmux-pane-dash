@@ -93,6 +93,14 @@ pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
 
 fn alert_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
     let mut alerts = Vec::new();
+    if app.transport_degraded {
+        push_alert(
+            &mut alerts,
+            "live updates lost — polling",
+            Style::default().fg(palette::DEGRADE),
+            width,
+        );
+    }
     if let Some(banner) = &app.banner {
         push_alert(
             &mut alerts,

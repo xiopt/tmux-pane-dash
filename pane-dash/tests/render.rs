@@ -61,6 +61,20 @@ fn draw_at(app: &AppState, width: u16, height: u16, now: u64) -> String {
         .join("\n")
 }
 
+#[test]
+fn degraded_alert_remains_visible_with_snapshot_and_dropped_record_alerts() {
+    let mut state = app(vec![record("dash", "%1", "working", "Task")]);
+    state.transport_degraded = true;
+    state.banner = Some("snapshot failed (2): tmux unavailable".into());
+    state.dropped_records = 1;
+
+    let rendered = draw(&state, 80, 10);
+
+    assert!(rendered.contains("live updates lost — polling"));
+    assert!(rendered.contains("snapshot failed (2): tmux unavailable"));
+    assert!(rendered.contains("dropped: 1"));
+}
+
 fn buffer_line_widths(app: &AppState, width: u16, height: u16) -> Vec<usize> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();

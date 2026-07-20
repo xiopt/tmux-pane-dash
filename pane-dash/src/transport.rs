@@ -1,3 +1,61 @@
+use std::path::PathBuf;
+
+use tokio::sync::mpsc;
+
+use crate::control::{ControlEvent, ControlHandle, connect_control};
+
+#[derive(Debug)]
+pub enum ConnectionMessage {
+    Connected {
+        generation: u64,
+        handle: ControlHandle,
+    },
+    Failed {
+        generation: u64,
+        error: String,
+    },
+    Event {
+        generation: u64,
+        event: ControlEvent,
+    },
+}
+
+pub fn spawn_connection_attempt(
+    tmux_bin: PathBuf,
+    session_id: String,
+    generation: u64,
+    tx: mpsc::UnboundedSender<ConnectionMessage>,
+) {
+    tokio::spawn(async move {
+        match connect_control(tmux_bin, &session_id).await {
+            Ok((handle, mut events)) => {
+                if tx
+                    .send(ConnectionMessage::Connected { handle, generation })
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::spawn(async move {
+                    while let Some(event) = events.recv().await {
+                        if tx
+                            .send(ConnectionMessage::Event { generation, event })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+            Err(error) => {
+                let _ = tx.send(ConnectionMessage::Failed {
+                    generation,
+                    error: error.to_string(),
+                });
+            }
+        }
+    });
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportMode {
     Connecting,
@@ -185,6 +243,94 @@ impl TransportCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod connection_tests {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        use tempfile::TempDir;
+        use tokio::sync::mpsc;
+        use tokio::time::{Duration, timeout};
+
+        use super::super::{ConnectionMessage, spawn_connection_attempt};
+        use crate::control::ControlEvent;
+
+        fn fake_tmux(dir: &TempDir, body: &str) -> std::path::PathBuf {
+            let path = dir.path().join("fake-tmux");
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).unwrap();
+            path
+        }
+
+        #[tokio::test]
+        async fn success_hands_off_connected_before_an_immediate_eof_event() {
+            let dir = TempDir::new().unwrap();
+            let fake = fake_tmux(
+                &dir,
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nsleep 0.05",
+            );
+            let (tx, mut rx) = mpsc::unbounded_channel();
+
+            spawn_connection_attempt(fake, "$7".into(), 4, tx);
+
+            let Some(ConnectionMessage::Connected {
+                generation: 4,
+                handle: _handle,
+            }) = timeout(Duration::from_secs(1), rx.recv()).await.unwrap()
+            else {
+                panic!("expected generation 4 connection handoff");
+            };
+            assert!(matches!(
+                timeout(Duration::from_secs(1), rx.recv()).await.unwrap(),
+                Some(ConnectionMessage::Event {
+                    generation: 4,
+                    event: ControlEvent::Terminated(_),
+                })
+            ));
+        }
+
+        #[tokio::test]
+        async fn failed_handshake_hands_off_the_attempt_generation() {
+            let dir = TempDir::new().unwrap();
+            let fake = fake_tmux(&dir, "printf '%s\\n' '%begin 1 1 1' '%error 1 1 1'");
+            let (tx, mut rx) = mpsc::unbounded_channel();
+
+            spawn_connection_attempt(fake, "$7".into(), 8, tx);
+
+            assert!(matches!(
+                timeout(Duration::from_secs(1), rx.recv()).await.unwrap(),
+                Some(ConnectionMessage::Failed { generation: 8, .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn late_events_keep_the_generation_of_the_connection_that_emitted_them() {
+            let dir = TempDir::new().unwrap();
+            let fake = fake_tmux(
+                &dir,
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nsleep 0.05",
+            );
+            let (tx, mut rx) = mpsc::unbounded_channel();
+
+            spawn_connection_attempt(fake, "$7".into(), 3, tx);
+            let Some(ConnectionMessage::Connected {
+                handle: _handle, ..
+            }) = rx.recv().await
+            else {
+                panic!("expected connection handoff");
+            };
+
+            assert!(matches!(
+                timeout(Duration::from_secs(1), rx.recv()).await.unwrap(),
+                Some(ConnectionMessage::Event {
+                    generation: 3,
+                    event: ControlEvent::Terminated(_),
+                })
+            ));
+        }
+    }
 
     fn directives(
         coordinator: &mut TransportCoordinator,
