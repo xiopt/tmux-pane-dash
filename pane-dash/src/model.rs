@@ -44,10 +44,10 @@ mod tests {
 
         let built = model(&[status_only, command_only, tag_only, none]);
 
-        assert_eq!(built.memberships.len(), 3);
-        assert!(built.panes.contains_key(&"%1".into()));
-        assert!(built.panes.contains_key(&"%2".into()));
-        assert!(built.panes.contains_key(&"%3".into()));
+        assert_eq!(built.memberships().len(), 3);
+        assert!(built.panes().contains_key(&"%1".into()));
+        assert!(built.panes().contains_key(&"%2".into()));
+        assert!(built.panes().contains_key(&"%3".into()));
     }
 
     #[test]
@@ -64,9 +64,9 @@ mod tests {
 
         let built = Model::build(&[exact, near_miss], &cfg, 1_000);
 
-        assert_eq!(built.memberships.len(), 1);
-        assert!(built.panes.contains_key(&"%1".into()));
-        assert!(!built.panes.contains_key(&"%2".into()));
+        assert_eq!(built.memberships().len(), 1);
+        assert!(built.panes().contains_key(&"%1".into()));
+        assert!(!built.panes().contains_key(&"%2".into()));
     }
 
     #[test]
@@ -82,9 +82,32 @@ mod tests {
 
         let built = model(&[first, linked]);
 
-        assert_eq!(built.panes.len(), 1);
-        assert_eq!(built.memberships.len(), 2);
-        assert_eq!(built.panes[&"%1".into()].title, "newest");
+        assert_eq!(built.panes().len(), 1);
+        assert_eq!(built.memberships().len(), 2);
+        assert_eq!(built.panes()[&"%1".into()].title, "newest");
+    }
+
+    #[test]
+    fn keeps_window_index_on_memberships_and_hashes_linked_windows_independently_of_input_order() {
+        let mut first = record();
+        first.status = "working".into();
+        first.heartbeat = Some(1_000);
+        first.window_index = 1;
+        let mut linked = first.clone();
+        linked.session_id = "$2".into();
+        linked.session_name = "beta".into();
+        linked.window_index = 9;
+
+        let forward = model(&[first.clone(), linked.clone()]);
+        let reverse = model(&[linked, first]);
+
+        assert_eq!(forward.content_hash(), reverse.content_hash());
+        let indexes: Vec<_> = forward
+            .memberships()
+            .iter()
+            .map(|membership| (membership.session_id.0.clone(), membership.window_index))
+            .collect();
+        assert_eq!(indexes, [("$1".to_owned(), 1), ("$2".to_owned(), 9)]);
     }
 
     #[test]
@@ -105,7 +128,8 @@ mod tests {
         alpha_first.pane_id = "%3".into();
         alpha_first.pane_index = 0;
 
-        let rows = model(&[beta, alpha_later, alpha_first]).rows(true);
+        let built = model(&[beta, alpha_later, alpha_first]);
+        let rows = built.rows(true);
         assert!(
             matches!(&rows[0], Row::SessionHeader { name, pane_count: 2, working_count: 2, .. } if name == "alpha")
         );
@@ -132,10 +156,10 @@ mod tests {
         command.pane_current_command = "opencode".into();
 
         let built = model(&[threshold, stale, garbage, command]);
-        assert_eq!(built.panes[&"%1".into()].status, Status::Working);
-        assert_eq!(built.panes[&"%2".into()].status, Status::Stale);
-        assert_eq!(built.panes[&"%3".into()].status, Status::Unknown);
-        assert_eq!(built.panes[&"%4".into()].status, Status::Unknown);
+        assert_eq!(built.panes()[&"%1".into()].status, Status::Working);
+        assert_eq!(built.panes()[&"%2".into()].status, Status::Stale);
+        assert_eq!(built.panes()[&"%3".into()].status, Status::Unknown);
+        assert_eq!(built.panes()[&"%4".into()].status, Status::Unknown);
     }
 
     #[test]
@@ -153,9 +177,9 @@ mod tests {
 
         let built = model(&[missing_heartbeat, command_only, tag_only]);
 
-        assert_eq!(built.panes[&"%1".into()].status, Status::Stale);
-        assert_eq!(built.panes[&"%2".into()].status, Status::Unknown);
-        assert_eq!(built.panes[&"%3".into()].status, Status::Unknown);
+        assert_eq!(built.panes()[&"%1".into()].status, Status::Stale);
+        assert_eq!(built.panes()[&"%2".into()].status, Status::Unknown);
+        assert_eq!(built.panes()[&"%3".into()].status, Status::Unknown);
     }
 
     #[test]
@@ -164,7 +188,7 @@ mod tests {
             let mut item = record();
             item.status = "idle".into();
             item.group = value.into();
-            assert_eq!(model(&[item]).grouped, expected, "{value:?}");
+            assert_eq!(model(&[item]).grouped(), expected, "{value:?}");
         }
     }
 
@@ -196,11 +220,12 @@ mod tests {
             items.push(item);
         }
 
-        let ids: Vec<_> = model(&items)
+        let built = model(&items);
+        let ids: Vec<_> = built
             .rows(false)
             .into_iter()
             .map(|row| match row {
-                Row::Pane { pane_id, .. } => pane_id.0,
+                Row::Pane { pane_id, .. } => pane_id.0.clone(),
                 _ => unreachable!(),
             })
             .collect();
@@ -221,14 +246,19 @@ mod tests {
 
         let first_grouped = built.rows(true);
         assert_eq!(built.row_rebuild_count(), 1);
-        assert_eq!(built.rows(true), first_grouped);
+        let second_grouped = built.rows(true);
+        assert_eq!(second_grouped, first_grouped);
+        assert!(std::ptr::eq(
+            first_grouped.as_ptr(),
+            second_grouped.as_ptr()
+        ));
         assert_eq!(built.row_rebuild_count(), 1);
         built.rows(false);
         assert_eq!(built.row_rebuild_count(), 2);
 
         item.status = "working".into();
         let changed = model(&[item]);
-        assert_ne!(built.content_hash, changed.content_hash);
+        assert_ne!(built.content_hash(), changed.content_hash());
         assert_eq!(changed.row_rebuild_count(), 0);
         changed.rows(true);
         assert_eq!(changed.row_rebuild_count(), 1);
@@ -244,11 +274,11 @@ mod tests {
         let mut changed = item;
         changed.status = "working".into();
 
-        assert_eq!(same.content_hash, identical.content_hash);
-        assert_ne!(same.content_hash, model(&[changed]).content_hash);
+        assert_eq!(same.content_hash(), identical.content_hash());
+        assert_ne!(same.content_hash(), model(&[changed]).content_hash());
     }
 }
-use std::cell::RefCell;
+use std::cell::{Cell, OnceCell};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -308,7 +338,6 @@ pub struct Session {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
     pub name: String,
-    pub index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -338,13 +367,13 @@ impl Default for ModelConfig {
 
 #[derive(Debug, Clone)]
 pub struct Model {
-    pub panes: HashMap<PaneId, Pane>,
-    pub sessions: HashMap<SessionId, Session>,
-    pub windows: HashMap<WindowId, Window>,
-    pub memberships: Vec<Membership>,
-    pub grouped: bool,
-    pub content_hash: u64,
-    row_cache: RefCell<RowCache>,
+    panes: HashMap<PaneId, Pane>,
+    sessions: HashMap<SessionId, Session>,
+    windows: HashMap<WindowId, Window>,
+    memberships: Vec<Membership>,
+    grouped: bool,
+    content_hash: u64,
+    row_cache: RowCache,
 }
 
 impl PartialEq for Model {
@@ -362,9 +391,9 @@ impl Eq for Model {}
 
 #[derive(Debug, Clone, Default)]
 struct RowCache {
-    grouped: Option<Vec<Row>>,
-    flat: Option<Vec<Row>>,
-    rebuild_count: usize,
+    grouped: OnceCell<Vec<Row>>,
+    flat: OnceCell<Vec<Row>>,
+    rebuild_count: Cell<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,7 +447,6 @@ impl Model {
                 window_id.clone(),
                 Window {
                     name: record.window_name.clone(),
-                    index: record.window_index,
                 },
             );
             panes.insert(
@@ -452,41 +480,56 @@ impl Model {
             memberships,
             grouped,
             content_hash,
-            row_cache: RefCell::new(RowCache::default()),
+            row_cache: RowCache::default(),
         }
     }
 
-    pub fn rows(&self, grouped: bool) -> Vec<Row> {
-        if let Some(rows) = self.cached_rows(grouped) {
-            return rows;
-        }
+    pub fn panes(&self) -> &HashMap<PaneId, Pane> {
+        &self.panes
+    }
 
+    pub fn sessions(&self) -> &HashMap<SessionId, Session> {
+        &self.sessions
+    }
+
+    pub fn windows(&self) -> &HashMap<WindowId, Window> {
+        &self.windows
+    }
+
+    pub fn memberships(&self) -> &[Membership] {
+        &self.memberships
+    }
+
+    pub fn grouped(&self) -> bool {
+        self.grouped
+    }
+
+    pub fn content_hash(&self) -> u64 {
+        self.content_hash
+    }
+
+    pub fn rows(&self, grouped: bool) -> &[Row] {
         let rows = if grouped {
-            self.grouped_rows()
+            self.row_cache.grouped.get_or_init(|| self.build_rows(true))
         } else {
-            self.flat_rows()
+            self.row_cache.flat.get_or_init(|| self.build_rows(false))
         };
-        let mut cache = self.row_cache.borrow_mut();
-        if grouped {
-            cache.grouped = Some(rows.clone());
-        } else {
-            cache.flat = Some(rows.clone());
-        }
-        cache.rebuild_count += 1;
-        rows
+        rows.as_slice()
     }
 
     #[cfg(test)]
     fn row_rebuild_count(&self) -> usize {
-        self.row_cache.borrow().rebuild_count
+        self.row_cache.rebuild_count.get()
     }
 
-    fn cached_rows(&self, grouped: bool) -> Option<Vec<Row>> {
-        let cache = self.row_cache.borrow();
+    fn build_rows(&self, grouped: bool) -> Vec<Row> {
+        self.row_cache
+            .rebuild_count
+            .set(self.row_cache.rebuild_count.get() + 1);
         if grouped {
-            cache.grouped.clone()
+            self.grouped_rows()
         } else {
-            cache.flat.clone()
+            self.flat_rows()
         }
     }
 
@@ -659,7 +702,6 @@ fn hash_content(
     for (id, window) in window_entries {
         id.hash(&mut hasher);
         window.name.hash(&mut hasher);
-        window.index.hash(&mut hasher);
     }
     for entry in entries {
         entry.hash(&mut hasher);
