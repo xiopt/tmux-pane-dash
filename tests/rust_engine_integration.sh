@@ -42,9 +42,9 @@ TMUX='' PATH="$WRAPPER:$PATH" "$TMUX_BIN" -L "$SOCK" new-session -d -s two 'slee
 TMUX='' PATH="$WRAPPER:$PATH" "$TMUX_BIN" -L "$SOCK" set-option -g @pane-dash-engine rust
 TMUX='' PATH="$WRAPPER:$PATH" bash "$PLUGIN/pane_dash.tmux"
 
-{ sleep 120; } | TMUX='' script -q /dev/null "$TMUX_BIN" -L "$SOCK" attach-session -t one >/dev/null 2>&1 &
+{ sleep 2; printf '\002'; sleep 118; } | TMUX='' script -q /dev/null "$TMUX_BIN" -L "$SOCK" attach-session -t one >/dev/null 2>&1 &
 CLIENT1_PID=$!
-{ sleep 1; printf '\002D'; sleep 5; } | TMUX='' script -q /dev/null "$TMUX_BIN" -L "$SOCK" attach-session -t two >/dev/null 2>&1 &
+{ sleep 120; } | TMUX='' script -q /dev/null "$TMUX_BIN" -L "$SOCK" attach-session -t two >/dev/null 2>&1 &
 CLIENT2_PID=$!
 
 for _ in $(seq 1 30); do
@@ -55,9 +55,18 @@ done
 [[ "${client_count:-0}" = 2 ]] || fail "two PTY clients did not attach"
 
 expected_tty="$(TMUX='' "$TMUX_BIN" -L "$SOCK" list-clients -t two -F '#{client_tty}')"
+client1_tty="$(TMUX='' "$TMUX_BIN" -L "$SOCK" list-clients -t one -F '#{client_tty}')"
 expected_session="$(TMUX='' "$TMUX_BIN" -L "$SOCK" list-clients -t two -F '#{session_id}')"
 expected_pane="$(TMUX='' "$TMUX_BIN" -L "$SOCK" list-clients -t two -F '#{pane_id}')"
 expected="$(printf '%s\t%s\t%s' "$expected_tty" "$expected_session" "$expected_pane")"
+for _ in $(seq 1 30); do
+  best_tty="$(TMUX='' "$TMUX_BIN" -L "$SOCK" display-message -p '#{client_tty}')"
+  [[ "$best_tty" = "$client1_tty" ]] && break
+  sleep 0.1
+done
+[[ "${best_tty:-}" = "$client1_tty" ]] || fail "test invalid: client 1 did not become the untargeted best client"
+[[ "$best_tty" != "$expected_tty" ]] || fail "test invalid: client 2 is the untargeted best client"
+TMUX='' "$TMUX_BIN" -L "$SOCK" send-keys -K -c "$expected_tty" C-b D
 for _ in $(seq 1 50); do
   [[ -s "$LOG" ]] && break
   sleep 0.1
