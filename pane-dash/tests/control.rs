@@ -111,7 +111,8 @@ mod actor_tests {
     async fn does_not_write_a_second_request_while_the_first_response_is_blocked() {
         let dir = TempDir::new().unwrap();
         let first_read = dir.path().join("first-read");
-        let second_reader_ready = dir.path().join("second-reader-ready");
+        let reader_armed = dir.path().join("reader-armed");
+        let early_write = dir.path().join("early-write");
         let second_read = dir.path().join("second-read");
         let release = dir.path().join("release");
         std::process::Command::new("mkfifo")
@@ -121,9 +122,10 @@ mod actor_tests {
         let fake = fake_tmux(
             &dir,
             &format!(
-                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\necho first > '{}'\necho ready > '{}'\nIFS= read -r _ < '{}'\nprintf '%s\\n' '%begin 2 2 1'\nprintf '\\036$7\\037%%1\\n'\nprintf '%s\\n' '%end 2 2 1'\nIFS= read -r _\necho second > '{}'\nprintf '%s\\n' '%begin 2 3 1' '%end 2 3 1'",
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\necho first > '{}'\n(\n  echo armed > '{}'\n  IFS= read -r command\n  printf '%s\\n' \"$command\" > '{}'\n) <&0 &\nreader=$!\nIFS= read -r _ < '{}'\nkill \"$reader\" 2>/dev/null || :\nwait \"$reader\" 2>/dev/null || :\nprintf '%s\\n' '%begin 2 2 1'\nprintf '\\036$7\\037%%1\\n'\nprintf '%s\\n' '%end 2 2 1'\nIFS= read -r _\necho second > '{}'\nprintf '%s\\n' '%begin 2 3 1' '%end 2 3 1'",
                 first_read.display(),
-                second_reader_ready.display(),
+                reader_armed.display(),
+                early_write.display(),
                 release.display(),
                 second_read.display(),
             ),
@@ -132,26 +134,27 @@ mod actor_tests {
         let first_handle = handle.clone();
         let first = tokio::spawn(async move { first_handle.snapshot().await });
         marker(&first_read).await;
-        marker(&second_reader_ready).await;
+        marker(&reader_armed).await;
+        let (second_started, second_started_rx) = tokio::sync::oneshot::channel();
         let second_handle = handle.clone();
-        let second = tokio::spawn(async move { second_handle.jump("/dev/ttys001", "%2").await });
+        let second = tokio::spawn(async move {
+            let _ = second_started.send(());
+            second_handle.jump("/dev/ttys001", "%2").await
+        });
 
-        assert!(
-            timeout(Duration::from_millis(100), async {
-                loop {
-                    if second_read.exists() {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .is_err()
-        );
-        fs::write(&release, "go\n").unwrap();
-        assert_eq!(first.await.unwrap().unwrap(), b"\x1e$7\x1f%1\n");
-        assert!(second.await.unwrap().unwrap());
-        assert_eq!(marker(&second_read).await, "second\n");
+        timeout(Duration::from_secs(2), async {
+            second_started_rx.await.unwrap();
+            assert!(
+                !early_write.exists(),
+                "second request was written while the first response was held"
+            );
+            fs::write(&release, "go\n").unwrap();
+            assert_eq!(first.await.unwrap().unwrap(), b"\x1e$7\x1f%1\n");
+            assert!(second.await.unwrap().unwrap());
+            assert_eq!(marker(&second_read).await, "second\n");
+        })
+        .await
+        .expect("control requests did not complete");
     }
 
     #[tokio::test]
