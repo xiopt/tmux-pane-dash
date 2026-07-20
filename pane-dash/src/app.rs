@@ -1,6 +1,5 @@
 use std::cell::{RefCell, RefMut};
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -79,8 +78,10 @@ pub struct AppState {
     pending_key: Option<KeyCode>,
     render_cache: RefCell<RenderCache>,
     render_revision: u64,
-    age_deadlines: BinaryHeap<Reverse<(u64, u64)>>,
+    next_age_deadline: Option<u64>,
     age_deadline_revision: Option<u64>,
+    #[cfg(test)]
+    age_deadline_rebuild_count: usize,
 }
 
 impl AppState {
@@ -104,8 +105,10 @@ impl AppState {
             pending_key: None,
             render_cache: RefCell::new(RenderCache::default()),
             render_revision: 0,
-            age_deadlines: BinaryHeap::new(),
+            next_age_deadline: None,
             age_deadline_revision: None,
+            #[cfg(test)]
+            age_deadline_rebuild_count: 0,
         }
     }
 
@@ -175,23 +178,27 @@ impl AppState {
         };
         drop(cache);
         if self.age_deadline_revision != Some(self.render_revision) {
-            self.age_deadlines = visible_rows
+            self.next_age_deadline = visible_rows
                 .iter()
                 .filter_map(|index| match &self.model.rows(self.grouped())[*index] {
                     Row::Pane {
                         status_since: Some(since),
                         ..
-                    } => Some(Reverse((next_age_boundary(*since, now), *since))),
+                    } => Some(next_age_boundary(*since, now)),
                     _ => None,
                 })
-                .collect();
+                .min();
             self.age_deadline_revision = Some(self.render_revision);
+            #[cfg(test)]
+            {
+                self.age_deadline_rebuild_count += 1;
+            }
         }
     }
 
     fn invalidate_render_cache(&mut self) {
         self.render_revision = self.render_revision.wrapping_add(1);
-        self.age_deadlines.clear();
+        self.next_age_deadline = None;
         self.age_deadline_revision = None;
     }
 
@@ -235,15 +242,11 @@ pub fn reduce(state: &mut AppState, event: Event) -> ReduceResult {
 }
 
 fn reduce_tick(state: &mut AppState, now: u64) -> ReduceResult {
-    let mut changed = false;
-    while let Some(Reverse((deadline, since))) = state.age_deadlines.peek().copied()
-        && deadline <= now
-    {
-        state.age_deadlines.pop();
-        state
-            .age_deadlines
-            .push(Reverse((next_age_boundary(since, now), since)));
-        changed = true;
+    let changed = state
+        .next_age_deadline
+        .is_some_and(|deadline| now >= deadline);
+    if changed {
+        state.age_deadline_revision = None;
     }
     ReduceResult {
         actions: Vec::new(),
@@ -763,6 +766,7 @@ mod tests {
 
         assert!(!reduce(&mut app, Event::Tick { now: 1_000 }).changed);
         assert!(reduce(&mut app, Event::Tick { now: 1_001 }).changed);
+        app.prepare_render(1_001);
         assert!(!reduce(&mut app, Event::Tick { now: 1_001 }).changed);
     }
 
@@ -806,5 +810,28 @@ mod tests {
         app.prepare_render(1_000);
 
         assert_eq!(app.render_cache.borrow().rebuild_count, rebuilds);
+    }
+
+    #[test]
+    fn many_panes_use_one_global_age_deadline_between_rebuilds() {
+        let records = (0..100)
+            .map(|index| {
+                let mut record = record("$a", "@a", &format!("%{index}"), index as u32);
+                record.status_since = Some(940);
+                record.heartbeat = Some(1_000);
+                record
+            })
+            .collect();
+        let mut app = state(records);
+        app.prepare_render(1_000);
+        assert_eq!(app.age_deadline_rebuild_count, 1);
+
+        for now in 1_001..=1_003 {
+            assert!(!reduce(&mut app, Event::Tick { now }).changed);
+            assert_eq!(app.age_deadline_rebuild_count, 1);
+        }
+        assert!(reduce(&mut app, Event::Tick { now: 1_060 }).changed);
+        app.prepare_render(1_060);
+        assert_eq!(app.age_deadline_rebuild_count, 2);
     }
 }
