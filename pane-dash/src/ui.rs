@@ -46,9 +46,13 @@ pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
             1,
         );
         frame.render_widget(
-            Paragraph::new("no opencode panes found")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(palette::DIM)),
+            Paragraph::new(if app.model.memberships().is_empty() {
+                "no opencode panes found"
+            } else {
+                "no panes match filter"
+            })
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(palette::DIM)),
             hint_area,
         );
     } else {
@@ -81,7 +85,10 @@ pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
     if !alerts.is_empty() {
         frame.render_widget(Paragraph::new(alerts), alert_area);
     }
-    frame.render_widget(status_bar(app, cache.status_counts), status_area);
+    frame.render_widget(
+        status_bar(app, cache.status_counts, status_area.width),
+        status_area,
+    );
 }
 
 fn alert_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
@@ -183,7 +190,7 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
             working_count,
             ..
         } => {
-            let marker = if app.collapsed.contains(session_id) {
+            let marker = if app.session_is_collapsed(session_id) {
                 "▸"
             } else {
                 "▾"
@@ -280,7 +287,7 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
     })
 }
 
-fn status_bar(app: &AppState, counts: [usize; 6]) -> Paragraph<'static> {
+fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'static> {
     let mut pieces = [
         Status::NeedsInput,
         Status::Working,
@@ -296,12 +303,38 @@ fn status_bar(app: &AppState, counts: [usize; 6]) -> Paragraph<'static> {
     })
     .collect::<Vec<_>>();
     pieces.push(format!("{} panes", counts.iter().sum::<usize>()));
-    pieces.push(match app.mode {
-        Mode::Grouped => "[grouped]".into(),
-        Mode::Flat => "[flat]".into(),
-    });
+    let counts = pieces.join("  ");
+    let mode = match app.mode {
+        Mode::Grouped => "grouped",
+        Mode::Flat => "flat",
+    };
+    let input = match app.input_mode {
+        crate::app::InputMode::Filter => "FILTER",
+        crate::app::InputMode::Navigation => "NAV",
+    };
+    let prefix = format!("{mode} | {input}");
+    let suffix =
+        if app.input_mode == crate::app::InputMode::Navigation && !app.filter_query.is_empty() {
+            format!("{prefix} | filter: ")
+        } else if app.input_mode == crate::app::InputMode::Filter {
+            format!("{prefix}: ")
+        } else {
+            prefix
+        };
+    let separator = if counts.is_empty() { "" } else { "  " };
+    let available_query_width =
+        usize::from(width).saturating_sub(counts.width() + separator.width() + suffix.width());
+    let query = if app.input_mode == crate::app::InputMode::Filter || !app.filter_query.is_empty() {
+        truncate_to_width(&app.filter_query, available_query_width)
+    } else {
+        String::new()
+    };
+    pieces = vec![counts, separator.to_owned(), suffix, query]
+        .into_iter()
+        .filter(|piece| !piece.is_empty())
+        .collect();
     let spans = vec![Span::styled(
-        pieces.join("  "),
+        pieces.concat(),
         Style::default().fg(palette::STATUS_BAR),
     )];
     Paragraph::new(Line::from(spans))

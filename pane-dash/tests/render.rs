@@ -60,6 +60,32 @@ fn draw_at(app: &AppState, width: u16, height: u16, now: u64) -> String {
         .join("\n")
 }
 
+fn enter_query(app: &mut AppState, query: &str) {
+    reduce(
+        app,
+        Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+    );
+    for character in query.chars() {
+        reduce(
+            app,
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+        );
+    }
+}
+
+fn clear_query(app: &mut AppState) {
+    reduce(
+        app,
+        Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+    );
+    for _ in app.filter_query.chars().collect::<Vec<_>>() {
+        reduce(
+            app,
+            Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+        );
+    }
+}
+
 #[test]
 fn grouped_render_with_a_collapsed_session_at_80x24() {
     let mut state = app(vec![
@@ -273,6 +299,110 @@ fn needs_input_status_text_uses_the_status_color() {
 #[test]
 fn empty_dashboard_shows_centered_hint() {
     insta::assert_snapshot!(draw(&app(vec![]), 80, 24));
+}
+
+#[test]
+fn filter_input_and_retained_query_are_visible() {
+    let mut auth = record("dash", "%1", "working", "auth");
+    auth.pane_current_path = "/work/auth".into();
+    let mut state = app(vec![auth, record("dash", "%2", "idle", "worker")]);
+
+    enter_query(&mut state, "auth");
+    let editing = draw(&state, 80, 12);
+    assert!(editing.contains("FILTER: auth"));
+    insta::assert_snapshot!(editing);
+
+    reduce(
+        &mut state,
+        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    );
+    let retained = draw(&state, 80, 12);
+    assert!(retained.contains("NAV"));
+    assert!(retained.contains("filter: auth"));
+    insta::assert_snapshot!(retained);
+}
+
+#[test]
+fn no_matches_is_distinct_from_empty_dashboard() {
+    let mut populated = app(vec![record("dash", "%1", "working", "Work")]);
+    enter_query(&mut populated, "definitely-no-match");
+    assert!(draw(&populated, 80, 12).contains("no panes match filter"));
+
+    let mut empty = app(Vec::new());
+    enter_query(&mut empty, "retained-query");
+    assert!(draw(&empty, 80, 12).contains("no opencode panes found"));
+}
+
+#[test]
+fn grouped_filter_expands_a_stored_collapsed_session_until_query_is_cleared() {
+    let mut state = app(vec![record("web", "%1", "working", "auth")]);
+    state.collapsed.insert("$web".into());
+
+    enter_query(&mut state, "auth");
+    let filtered = draw(&state, 80, 12);
+    assert!(filtered.contains("▾ web (1)"));
+    assert!(filtered.contains("auth"));
+    insta::assert_snapshot!(filtered);
+
+    clear_query(&mut state);
+    let restored = draw(&state, 80, 12);
+    assert!(restored.contains("▸ web (1)"));
+    assert!(!restored.contains("auth"));
+    insta::assert_snapshot!(restored);
+}
+
+#[test]
+fn flat_filtered_results_render_in_fuzzy_score_order() {
+    let mut state = app(vec![
+        record("dash", "%1", "working", "a---b---c"),
+        record("dash", "%2", "idle", "abc"),
+    ]);
+    state.mode = Mode::Flat;
+    enter_query(&mut state, "abc");
+
+    let rendered = draw(&state, 80, 12);
+    assert!(rendered.find("sonnet  abc").unwrap() < rendered.find("a---b---c").unwrap());
+}
+
+#[test]
+fn filtering_keeps_canonical_counts_and_identifies_the_current_mode() {
+    let mut state = app(vec![
+        record("dash", "%1", "working", "auth"),
+        record("dash", "%2", "idle", "worker"),
+    ]);
+    enter_query(&mut state, "auth");
+    let grouped = draw(&state, 80, 12);
+    assert!(grouped.contains("working 1"));
+    assert!(grouped.contains("idle 1"));
+    assert!(grouped.contains("2 panes"));
+    assert!(grouped.contains("grouped | FILTER: auth"));
+
+    state.mode = Mode::Flat;
+    let flat = draw(&state, 80, 12);
+    assert!(flat.contains("flat | FILTER: auth"));
+}
+
+#[test]
+fn narrow_status_truncates_unicode_query_without_losing_failure_indicators() {
+    let mut state = app(vec![
+        record("dash", "%1", "needs_input", "Input"),
+        record("dash", "%2", "working", "Work"),
+        record("dash", "%3", "idle", "Idle"),
+        record("dash", "%4", "error", "Error"),
+        record("dash", "%5", "unknown", "Unknown"),
+        record("dash", "%6", "working", "Stale"),
+    ]);
+    state.consecutive_failures = 2;
+    state.dropped_records = 3;
+    state.banner = Some("snapshot failed (2): tmux unavailable".into());
+    enter_query(&mut state, "東京e\u{301}long-query");
+
+    let rendered = draw(&state, 40, 12);
+    assert!(rendered.contains("⚠ polling failures: 2"));
+    assert!(rendered.contains("dropped: 3"));
+    assert!(rendered.contains("snapshot failed (2): tmux unavailable"));
+    assert!(!rendered.contains('\u{fffd}'));
+    assert!(rendered.lines().all(|line| line.chars().count() <= 40));
 }
 
 #[test]

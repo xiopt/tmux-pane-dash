@@ -25,4 +25,4 @@ expression: "draw(&state, 80, 24)"
 
 
 
-working 1  1 panes  [flat]
+working 1  1 panes  flat | NAV

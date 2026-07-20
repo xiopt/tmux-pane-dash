@@ -51,4 +51,4 @@ expression: "draw(&state, 160, 50)"
 
 
 
-needs_input 1  working 1  2 panes  [grouped]
+needs_input 1  working 1  2 panes  grouped | NAV

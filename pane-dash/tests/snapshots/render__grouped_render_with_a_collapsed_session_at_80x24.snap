@@ -25,4 +25,4 @@ expression: "draw(&state, 80, 24)"
 
 
 
-needs_input 1  working 1  idle 1  3 panes  [grouped]
+needs_input 1  working 1  idle 1  3 panes  grouped | NAV

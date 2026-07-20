@@ -25,4 +25,4 @@ expression: "draw(&state, 80, 24)"
 
 ⚠ polling failures: 2
 dropped: 3
-error 1  1 panes  [grouped]
+error 1  1 panes  grouped | NAV

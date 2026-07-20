@@ -1,0 +1,16 @@
+---
+source: tests/render.rs
+expression: filtered
+---
+▾ web (1)                                                              1 working
+  ◐ working      2m    1.2  tmp          sonnet  auth
+
+
+
+
+
+
+
+
+
+working 1  1 panes  grouped | FILTER: auth

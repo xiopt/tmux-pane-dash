@@ -1,0 +1,16 @@
+---
+source: tests/render.rs
+expression: editing
+---
+▾ dash (2)                                                             1 working
+  ◐ working      2m    1.2  auth         sonnet  auth
+
+
+
+
+
+
+
+
+
+working 1  idle 1  2 panes  grouped | FILTER: auth
