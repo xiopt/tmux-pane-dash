@@ -1,3 +1,4 @@
+pub mod model;
 pub mod snapshot;
 pub mod tmux_arg;
 
