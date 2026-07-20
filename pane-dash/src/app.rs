@@ -424,6 +424,9 @@ fn reduce_preview_captured(
     {
         return ReduceResult::default();
     }
+    let old_frame = state.preview.frame.clone();
+    let old_error = state.preview.error.clone();
+    let old_offset = state.preview.lines_from_bottom;
     state.preview.in_flight = None;
     match result {
         Ok(frame) => {
@@ -438,7 +441,9 @@ fn reduce_preview_captured(
     }
     ReduceResult {
         actions: Vec::new(),
-        changed: true,
+        changed: state.preview.frame != old_frame
+            || state.preview.error != old_error
+            || state.preview.lines_from_bottom != old_offset,
     }
 }
 
@@ -942,6 +947,35 @@ mod tests {
         assert_eq!(app.preview.frame, None);
         assert_eq!(app.preview.error.as_deref(), Some("first line"));
         assert_eq!(app.preview.in_flight, None);
+    }
+
+    #[test]
+    fn identical_preview_results_clear_in_flight_without_redrawing() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        let (sequence, pane_id) = select_first_pane(&mut app);
+        let frame = parse_preview(pane_id.clone(), b"same".to_vec());
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id: pane_id.clone(),
+                result: Ok(frame.clone()),
+            },
+        );
+        let sequence = match reduce(&mut app, Event::PreviewTick).actions.as_slice() {
+            [Action::CapturePreview { sequence, .. }] => *sequence,
+            actions => panic!("expected capture, got {actions:?}"),
+        };
+        let result = reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id,
+                result: Ok(frame),
+            },
+        );
+        assert_eq!(app.preview.in_flight, None);
+        assert!(!result.changed);
     }
 
     #[test]
