@@ -37,6 +37,7 @@ pub fn parse(bytes: &[u8]) -> ParseOutcome {
 
     let mut outcome = ParseOutcome::default();
     for record in bytes[first_record + 1..].split(|byte| *byte == RS) {
+        let record = record.strip_suffix(b"\n").unwrap_or(record);
         match parse_record(record) {
             Some(record) => outcome.records.push(record),
             None => outcome.dropped += 1,
@@ -166,6 +167,26 @@ mod tests {
     }
 
     #[test]
+    fn strips_tmux_row_lf_without_changing_empty_final_fields() {
+        let mut empty_group = fields("empty-group");
+        empty_group[17].clear();
+        let mut zero_group = fields("zero-group");
+        zero_group[17] = b"0".to_vec();
+
+        let mut bytes = record(&empty_group);
+        bytes.push(b'\n');
+        bytes.extend(record(&zero_group));
+        bytes.push(b'\n');
+
+        let outcome = parse(&bytes);
+
+        assert_eq!(outcome.dropped, 0);
+        assert_eq!(outcome.records.len(), 2);
+        assert_eq!(outcome.records[0].group, "");
+        assert_eq!(outcome.records[1].group, "0");
+    }
+
+    #[test]
     fn keeps_newlines_as_field_data() {
         let mut values = fields("alpha\nbeta");
         values[14] = b"title\ncontinued".to_vec();
@@ -193,13 +214,19 @@ mod tests {
     }
 
     #[test]
-    fn hostile_rs_splits_and_drops_malformed_fragments() {
-        let mut values = fields("valid");
-        values[8] = b"command".to_vec();
-        values[8].extend([RS]);
-        values[8].extend(b"incomplete");
+    fn hostile_rs_splits_and_drops_semantically_invalid_synthetic_record() {
+        let prefix = fields("valid");
+        let mut invalid_synthetic = fields("synthetic");
+        invalid_synthetic[5] = b"pane-without-percent-prefix".to_vec();
 
-        let outcome = parse(&record(&values));
+        let mut bytes = record(&prefix[..8]);
+        bytes.push(US);
+        bytes.extend(b"command");
+        bytes.push(RS);
+        let synthetic = record(&invalid_synthetic);
+        bytes.extend(&synthetic[1..]);
+
+        let outcome = parse(&bytes);
 
         assert!(outcome.records.is_empty());
         assert_eq!(outcome.dropped, 2);
