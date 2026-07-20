@@ -166,7 +166,6 @@ async fn control_actor(
     let mut active: Option<Request> = None;
     let mut line = Vec::new();
     let mut terminated = None;
-    let mut child_exit_reason = None;
 
     loop {
         tokio::select! {
@@ -181,8 +180,6 @@ async fn control_actor(
                         "truncated tmux control line".into()
                     } else if malformed {
                         "malformed tmux control response".into()
-                    } else if let Some(reason) = child_exit_reason.take() {
-                        reason
                     } else {
                         "tmux control stdout closed".into()
                     });
@@ -217,16 +214,6 @@ async fn control_actor(
                 Err(error) => {
                     terminated = Some(format!("tmux control read failed: {error}"));
                     break;
-                }
-            },
-            status = child.wait(), if child_exit_reason.is_none() => {
-                child_exit_reason = Some(match status {
-                    Ok(status) => format!("tmux control child exited: {status}"),
-                    Err(error) => format!("tmux control child wait failed: {error}"),
-                });
-                requests.close();
-                while let Ok(request) = requests.try_recv() {
-                    request.fail(child_exit_reason.as_deref().unwrap());
                 }
             },
             request = requests.recv(), if active.is_none() => match request {
