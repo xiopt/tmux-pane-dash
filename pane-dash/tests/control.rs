@@ -512,6 +512,25 @@ mod actor_tests {
     }
 
     #[tokio::test]
+    async fn completes_a_valid_response_written_before_immediate_child_exit() {
+        let dir = TempDir::new().unwrap();
+        let fake = fake_tmux(
+            &dir,
+            "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\nprintf '%s\\n' '%begin 2 2 1'\nprintf '\\036$7\\037%%1\\n'\nprintf '%s\\n' '%end 2 2 1'\nexit 0",
+        );
+        let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
+
+        assert_eq!(handle.snapshot().await.unwrap(), b"\x1e$7\x1f%1\n");
+        assert!(matches!(
+            timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(ControlEvent::Terminated(_))
+        ));
+        assert_eq!(events.recv().await, None);
+    }
+
+    #[tokio::test]
     async fn dropping_all_handles_closes_stdin_and_reaps_the_child() {
         let dir = TempDir::new().unwrap();
         let exited = dir.path().join("exited");
