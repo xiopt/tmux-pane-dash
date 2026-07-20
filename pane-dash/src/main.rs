@@ -42,6 +42,52 @@ enum SnapshotSource {
 }
 
 #[derive(Default)]
+struct SnapshotInFlight {
+    seq: Option<u64>,
+}
+
+impl SnapshotInFlight {
+    fn spawned(&mut self, seq: u64) {
+        self.seq = Some(seq);
+    }
+    fn reset(&mut self) {
+        self.seq = None;
+    }
+    fn accepts(&mut self, seq: u64) -> bool {
+        if self.seq != Some(seq) {
+            return false;
+        }
+        self.seq = None;
+        true
+    }
+}
+
+fn classify_snapshot_payload(
+    source: SnapshotSource,
+    result: Result<Vec<u8>, String>,
+) -> (
+    SnapshotCompletion,
+    Result<pane_dash::snapshot::ParseOutcome, String>,
+) {
+    match result {
+        Err(error) => (SnapshotCompletion::Failed, Err(error)),
+        Ok(bytes) => {
+            let outcome = parse(&bytes);
+            if matches!(source, SnapshotSource::Channel { .. })
+                && (bytes.first() != Some(&0x1e) || outcome.records.is_empty())
+            {
+                (
+                    SnapshotCompletion::MalformedPayload,
+                    Err("malformed control snapshot payload".into()),
+                )
+            } else {
+                (SnapshotCompletion::Valid, Ok(outcome))
+            }
+        }
+    }
+}
+
+#[derive(Default)]
 struct SnapshotGeneration {
     current: u64,
     last_seq: u64,
@@ -125,6 +171,7 @@ async fn main() -> Result<()> {
     let mut next_connection_generation = 0_u64;
     let mut debounce_deadline = None;
     let mut next_snapshot_seq = 0_u64;
+    let mut in_flight_snapshot = SnapshotInFlight::default();
     let mut snapshot_generation = SnapshotGeneration::default();
     dispatch_directives(
         directives,
@@ -139,6 +186,7 @@ async fn main() -> Result<()> {
         &snapshot_tx,
         &mut next_snapshot_seq,
         &snapshot_generation,
+        &mut in_flight_snapshot,
     );
     while !app.should_quit {
         tokio::select! {
@@ -160,6 +208,7 @@ async fn main() -> Result<()> {
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
                     &mut next_snapshot_seq, &snapshot_generation,
+                    &mut in_flight_snapshot,
                 );
                 if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux, control.as_ref(), &client_tty).await? {
                     snapshot_generation.record_successful_mutation();
@@ -185,6 +234,8 @@ async fn main() -> Result<()> {
                             ControlEvent::Terminated(_) => {
                                 control = None;
                                 active_connection_generation = None;
+                                debounce_deadline = None;
+                                in_flight_snapshot.reset();
                                 coordinator.input(pane_dash::transport::TransportInput::ChannelEnded)
                             }
                         },
@@ -195,6 +246,7 @@ async fn main() -> Result<()> {
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
                     &mut next_snapshot_seq, &snapshot_generation,
+                    &mut in_flight_snapshot,
                 );
                 if sync_transport_degraded(&mut app, &coordinator) {
                     redraw(&mut terminal, &mut app)?;
@@ -214,24 +266,20 @@ async fn main() -> Result<()> {
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
                     &mut next_snapshot_seq, &snapshot_generation,
+                    &mut in_flight_snapshot,
                 );
             },
             response = snapshots.recv() => if let Some(response) = response {
                 if matches!(response.source, SnapshotSource::Channel { connection_generation } if active_connection_generation != Some(connection_generation)) {
                     continue;
                 }
-                let (completion, event) = match response.result {
-                    Ok(bytes) => {
-                        let outcome = parse(&bytes);
-                        let malformed = matches!(response.source, SnapshotSource::Channel { .. })
-                            && (bytes.first() != Some(&0x1e) || outcome.records.is_empty());
-                        if malformed {
-                            (SnapshotCompletion::MalformedPayload, Event::SnapshotFailed("malformed control snapshot payload".into()))
-                        } else {
-                            (SnapshotCompletion::Valid, Event::Snapshot { outcome, observed_at: response.observed_at })
-                        }
-                    }
-                    Err(error) => (SnapshotCompletion::Failed, Event::SnapshotFailed(error)),
+                if !in_flight_snapshot.accepts(response.seq) {
+                    continue;
+                }
+                let (completion, outcome) = classify_snapshot_payload(response.source, response.result);
+                let event = match outcome {
+                    Ok(outcome) => Event::Snapshot { outcome, observed_at: response.observed_at },
+                    Err(error) => Event::SnapshotFailed(error),
                 };
                 let directives = coordinator.snapshot_completed(completion);
                 dispatch_directives(
@@ -239,6 +287,7 @@ async fn main() -> Result<()> {
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
                     &mut next_snapshot_seq, &snapshot_generation,
+                    &mut in_flight_snapshot,
                 );
                 if snapshot_generation.accepts(response.seq, response.mutation_generation)
                     && apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty).await?
@@ -248,7 +297,6 @@ async fn main() -> Result<()> {
             },
         }
     }
-    let _ = client_tty;
     Ok(())
 }
 
@@ -270,6 +318,7 @@ fn dispatch_directives(
     snapshot_tx: &mpsc::UnboundedSender<SnapshotResponse>,
     next_snapshot_seq: &mut u64,
     snapshot_generation: &SnapshotGeneration,
+    in_flight_snapshot: &mut SnapshotInFlight,
 ) {
     for directive in directives {
         match directive {
@@ -292,7 +341,7 @@ fn dispatch_directives(
                 else {
                     continue;
                 };
-                spawn_snapshot(
+                in_flight_snapshot.spawned(spawn_snapshot(
                     snapshot_tx,
                     next_snapshot_seq,
                     snapshot_generation.current(),
@@ -300,17 +349,17 @@ fn dispatch_directives(
                         connection_generation,
                     },
                     async move { handle.snapshot().await.map_err(|error| error.to_string()) },
-                );
+                ));
             }
             TransportDirective::OneShotSnapshot => {
                 let tmux = tmux.clone();
-                spawn_snapshot(
+                in_flight_snapshot.spawned(spawn_snapshot(
                     snapshot_tx,
                     next_snapshot_seq,
                     snapshot_generation.current(),
                     SnapshotSource::OneShot,
                     async move { tmux.snapshot().await.map_err(|error| error.to_string()) },
-                );
+                ));
             }
             TransportDirective::StartDebounce => {
                 if debounce_deadline.is_none() {
@@ -328,7 +377,8 @@ fn spawn_snapshot<F>(
     mutation_generation: u64,
     source: SnapshotSource,
     snapshot: F,
-) where
+) -> u64
+where
     F: Future<Output = Result<Vec<u8>, String>> + Send + 'static,
 {
     *next_snapshot_seq = next_snapshot_seq.wrapping_add(1);
@@ -344,6 +394,7 @@ fn spawn_snapshot<F>(
             result,
         });
     });
+    seq
 }
 
 fn sync_transport_degraded(app: &mut AppState, coordinator: &TransportCoordinator) -> bool {
@@ -433,7 +484,63 @@ fn install_panic_cleanup() {
 
 #[cfg(test)]
 mod tests {
-    use super::{SnapshotGeneration, bench_first_frame_message};
+    use super::{
+        SnapshotGeneration, SnapshotInFlight, SnapshotSource, bench_first_frame_message,
+        classify_snapshot_payload,
+    };
+    use pane_dash::transport::SnapshotCompletion;
+
+    fn valid_record() -> Vec<u8> {
+        b"\x1e$1\x1fs\x1f@1\x1f0\x1fw\x1f%1\x1f0\x1f1\x1fc\x1f/\x1f0\x1fa\x1f\x1f\x1f\x1f\x1f\x1f"
+            .to_vec()
+    }
+
+    #[test]
+    fn classifies_only_completed_channel_payloads_as_malformed() {
+        for bytes in [vec![], b"noise".to_vec(), b"\x1ebad".to_vec()] {
+            assert_eq!(
+                classify_snapshot_payload(
+                    SnapshotSource::Channel {
+                        connection_generation: 1
+                    },
+                    Ok(bytes)
+                )
+                .0,
+                SnapshotCompletion::MalformedPayload
+            );
+        }
+        let mut hostile = b"\x1ebad".to_vec();
+        hostile.extend(valid_record());
+        assert_eq!(
+            classify_snapshot_payload(
+                SnapshotSource::Channel {
+                    connection_generation: 1
+                },
+                Ok(hostile)
+            )
+            .0,
+            SnapshotCompletion::Valid
+        );
+        assert_eq!(
+            classify_snapshot_payload(SnapshotSource::OneShot, Ok(vec![])).0,
+            SnapshotCompletion::Valid
+        );
+        assert_eq!(
+            classify_snapshot_payload(SnapshotSource::OneShot, Err("x".into())).0,
+            SnapshotCompletion::Failed
+        );
+    }
+
+    #[test]
+    fn ignores_old_snapshot_after_channel_reset_until_current_seq_completes() {
+        let mut in_flight = SnapshotInFlight::default();
+        in_flight.spawned(1);
+        in_flight.reset();
+        in_flight.spawned(2);
+        assert!(!in_flight.accepts(1));
+        assert!(in_flight.accepts(2));
+        assert_eq!(in_flight.seq, None);
+    }
 
     #[test]
     fn discards_snapshot_launched_before_a_successful_local_mutation() {
