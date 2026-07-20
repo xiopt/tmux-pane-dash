@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event as CrosstermEvent, EventStream};
+use crossterm::event::{
+    DisableFocusChange, EnableFocusChange, Event as CrosstermEvent, EventStream,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -15,6 +17,7 @@ use pane_dash::app::{Action, AppState, Event, reduce};
 use pane_dash::control::{ControlEvent, ControlHandle};
 use pane_dash::model::{Model, ModelConfig};
 use pane_dash::options::parse_show_options;
+use pane_dash::preview::parse_preview;
 use pane_dash::snapshot::parse;
 use pane_dash::tmux_exec::TmuxExec;
 use pane_dash::transport::{
@@ -26,6 +29,12 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
 struct TerminalGuard;
+
+struct PreviewResponse {
+    sequence: u64,
+    pane_id: pane_dash::model::PaneId,
+    result: Result<pane_dash::preview::PreviewFrame, String>,
+}
 
 struct SnapshotResponse {
     seq: u64,
@@ -179,14 +188,20 @@ impl TerminalGuard {
             let _ = disable_raw_mode();
             return Err(error).context("enter alternate screen");
         }
+        if let Err(error) = execute!(io::stdout(), EnableFocusChange) {
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            return Err(error).context("enable terminal focus events");
+        }
         Ok(Self)
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), DisableFocusChange);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
     }
 }
 
@@ -223,7 +238,12 @@ async fn main() -> Result<()> {
 
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut preview_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_millis(500),
+        Duration::from_millis(500),
+    );
     let (snapshot_tx, mut snapshots) = mpsc::unbounded_channel();
+    let (preview_tx, mut preview_responses) = mpsc::unbounded_channel();
     let (connection_tx, mut connection_messages) = mpsc::unbounded_channel();
     let (mut coordinator, directives) = TransportCoordinator::new();
     let mut control = None;
@@ -250,13 +270,29 @@ async fn main() -> Result<()> {
         &snapshot_generation,
         &mut in_flight_snapshot,
     );
+    let _ = apply_event(
+        &mut terminal,
+        &mut app,
+        Event::PreviewTick,
+        &tmux,
+        control.as_ref(),
+        &client_tty,
+        &preview_tx,
+    )
+    .await?;
     while !app.should_quit {
         tokio::select! {
             event = input.next() => match event {
                 Some(Ok(CrosstermEvent::Key(key))) => {
-                    if apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty).await? {
+                    if apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty, &preview_tx).await? {
                         snapshot_generation.record_successful_mutation();
                     }
+                },
+                Some(Ok(CrosstermEvent::FocusGained)) => {
+                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(true), &tmux, control.as_ref(), &client_tty, &preview_tx).await?;
+                },
+                Some(Ok(CrosstermEvent::FocusLost)) => {
+                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(false), &tmux, control.as_ref(), &client_tty, &preview_tx).await?;
                 },
                 Some(Ok(CrosstermEvent::Resize(_, _))) => redraw(&mut terminal, &mut app)?,
                 Some(Ok(_)) => {},
@@ -273,9 +309,12 @@ async fn main() -> Result<()> {
                     &mut next_snapshot_seq, &snapshot_generation,
                     &mut in_flight_snapshot,
                 );
-                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux, control.as_ref(), &client_tty).await? {
+                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux, control.as_ref(), &client_tty, &preview_tx).await? {
                     snapshot_generation.record_successful_mutation();
                 }
+            },
+            _ = preview_tick.tick() => {
+                let _ = apply_event(&mut terminal, &mut app, Event::PreviewTick, &tmux, control.as_ref(), &client_tty, &preview_tx).await?;
             },
             message = connection_messages.recv() => if let Some(message) = message {
                 let (kind, generation) = match &message {
@@ -373,10 +412,25 @@ async fn main() -> Result<()> {
                     &mut in_flight_snapshot,
                 );
                 if snapshot_generation.accepts(response.seq, response.mutation_generation)
-                    && apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty).await?
+                    && apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty, &preview_tx).await?
                 {
                     snapshot_generation.record_successful_mutation();
                 }
+            },
+            response = preview_responses.recv() => if let Some(response) = response {
+                let _ = apply_event(
+                    &mut terminal,
+                    &mut app,
+                    Event::PreviewCaptured {
+                        sequence: response.sequence,
+                        pane_id: response.pane_id,
+                        result: response.result,
+                    },
+                    &tmux,
+                    control.as_ref(),
+                    &client_tty,
+                    &preview_tx,
+                ).await?;
             },
         }
     }
@@ -499,6 +553,7 @@ async fn apply_event(
     tmux: &TmuxExec,
     control: Option<&ControlHandle>,
     client_tty: &str,
+    preview_tx: &mpsc::UnboundedSender<PreviewResponse>,
 ) -> Result<bool> {
     let result = reduce(app, event);
     let mut mutated = false;
@@ -514,6 +569,9 @@ async fn apply_event(
                     mutated = true;
                 }
             }
+            Action::CapturePreview { sequence, pane_id } => {
+                spawn_preview_capture(preview_tx, tmux.clone(), sequence, pane_id);
+            }
             Action::Quit => {}
         }
     }
@@ -521,6 +579,27 @@ async fn apply_event(
         redraw(terminal, app)?;
     }
     Ok(mutated)
+}
+
+fn spawn_preview_capture(
+    tx: &mpsc::UnboundedSender<PreviewResponse>,
+    tmux: TmuxExec,
+    sequence: u64,
+    pane_id: pane_dash::model::PaneId,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = tmux
+            .capture_pane(&pane_id)
+            .await
+            .map(|bytes| parse_preview(pane_id.clone(), bytes))
+            .map_err(|error| error.to_string());
+        let _ = tx.send(PreviewResponse {
+            sequence,
+            pane_id,
+            result,
+        });
+    });
 }
 
 fn redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut AppState) -> Result<()> {
@@ -561,8 +640,9 @@ fn now_secs() -> u64 {
 fn install_panic_cleanup() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), DisableFocusChange);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
         previous(info);
     }));
 }
@@ -573,11 +653,13 @@ mod tests {
         ConnectionMessageKind, ConnectionRoute, SnapshotGeneration, SnapshotInFlight,
         SnapshotSource, bench_first_frame_message, classify_connection_message,
         classify_snapshot_payload, clear_terminated_connection_state, dispatch_directives,
-        sync_transport_degraded,
+        spawn_preview_capture, sync_transport_degraded,
     };
-    use pane_dash::app::{AppState, Event, reduce};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use pane_dash::app::{Action, AppState, Event, reduce};
     use pane_dash::model::{Model, ModelConfig};
     use pane_dash::options::DashConfig;
+    use pane_dash::preview::parse_preview;
     use pane_dash::tmux_exec::{SNAPSHOT_FORMAT, TmuxExec};
     use pane_dash::transport::{
         SnapshotCompletion, TransportCoordinator, TransportDirective, TransportInput, TransportMode,
@@ -609,6 +691,107 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&executable, permissions).unwrap();
         (TmuxExec::new(executable), log)
+    }
+
+    fn preview_app() -> AppState {
+        let outcome = pane_dash::snapshot::parse(&valid_record());
+        let mut app = AppState::new(
+            Model::build(&outcome.records, &ModelConfig::default(), 0),
+            DashConfig::default(),
+        );
+        reduce(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+        );
+        reduce(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+        );
+        app
+    }
+
+    #[tokio::test(start_paused = true, flavor = "current_thread")]
+    async fn preview_scheduler_starts_at_500ms_and_pauses_for_inspect_or_focus_loss() {
+        let mut scheduler = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_millis(500),
+            Duration::from_millis(500),
+        );
+        tokio::time::advance(Duration::from_millis(499)).await;
+        assert!(
+            tokio::time::timeout(Duration::ZERO, scheduler.tick())
+                .await
+                .is_err(),
+            "preview tick fired before 500ms"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        scheduler.tick().await;
+
+        let mut app = preview_app();
+        let (sequence, pane_id) = app.preview.in_flight.clone().expect("initial request");
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id: pane_id.clone(),
+                result: Ok(parse_preview(pane_id, b"frame".to_vec())),
+            },
+        );
+        assert!(matches!(
+            reduce(&mut app, Event::PreviewTick).actions.as_slice(),
+            [Action::CapturePreview { .. }]
+        ));
+        reduce(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert!(reduce(&mut app, Event::PreviewTick).actions.is_empty());
+        reduce(&mut app, Event::TerminalFocus(false));
+        assert!(reduce(&mut app, Event::PreviewTick).actions.is_empty());
+        assert!(matches!(
+            reduce(&mut app, Event::TerminalFocus(true))
+                .actions
+                .as_slice(),
+            [Action::CapturePreview { .. }]
+        ));
+    }
+
+    #[test]
+    fn snapshot_transport_ticks_remain_independent_of_preview_inspect_mode() {
+        let mut app = preview_app();
+        reduce(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert!(app.preview.inspect);
+
+        let (mut coordinator, _) = TransportCoordinator::new();
+        coordinator.input(TransportInput::ConnectionFailed);
+        coordinator.input(TransportInput::ConnectionFailed);
+        assert_eq!(coordinator.mode(), TransportMode::Degraded);
+        assert_eq!(
+            coordinator.input(TransportInput::FallbackTick),
+            vec![TransportDirective::OneShotSnapshot]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preview_capture_executor_returns_success_or_nonfatal_failure() {
+        let dir = TempDir::new().unwrap();
+        let executable = dir.path().join("fake-tmux");
+        fs::write(&executable, "#!/bin/sh\nprintf 'captured\\n'\n").unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let (tx, mut responses) = mpsc::unbounded_channel();
+        spawn_preview_capture(&tx, TmuxExec::new(executable), 7, "%7".into());
+        let response = responses.recv().await.expect("capture response");
+        assert_eq!(response.sequence, 7);
+        assert!(response.result.is_ok());
+
+        spawn_preview_capture(&tx, TmuxExec::new("/missing/tmux"), 8, "%8".into());
+        let response = responses.recv().await.expect("failure response");
+        assert_eq!(response.sequence, 8);
+        assert!(response.result.is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::filter::ranked_row_indices;
 use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, WindowId};
 use crate::options::DashConfig;
+use crate::preview::PreviewFrame;
 use crate::snapshot::ParseOutcome;
 
 type Selection = (SessionId, WindowId, PaneId);
@@ -26,6 +27,7 @@ pub enum InputMode {
 pub enum Action {
     Jump { target: JumpTarget, zoom: bool },
     ToggleGroup(bool),
+    CapturePreview { sequence: u64, pane_id: PaneId },
     Quit,
 }
 
@@ -46,6 +48,14 @@ pub enum Event {
     Tick {
         now: u64,
     },
+    PreviewTick,
+    PreviewViewport(u16),
+    TerminalFocus(bool),
+    PreviewCaptured {
+        sequence: u64,
+        pane_id: PaneId,
+        result: Result<PreviewFrame, String>,
+    },
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -58,6 +68,35 @@ pub struct ReduceResult {
 pub(crate) enum Focus {
     Header(SessionId),
     Pane(Selection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewState {
+    pub target: Option<PaneId>,
+    pub frame: Option<PreviewFrame>,
+    pub error: Option<String>,
+    pub inspect: bool,
+    pub lines_from_bottom: usize,
+    pub viewport_height: u16,
+    pub terminal_focused: bool,
+    pub next_sequence: u64,
+    pub in_flight: Option<(u64, PaneId)>,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            target: None,
+            frame: None,
+            error: None,
+            inspect: false,
+            lines_from_bottom: 0,
+            viewport_height: 20,
+            terminal_focused: true,
+            next_sequence: 0,
+            in_flight: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -84,6 +123,7 @@ pub struct AppState {
     pub dropped_records: usize,
     pub banner: Option<String>,
     pub transport_degraded: bool,
+    pub preview: PreviewState,
     focus: Option<Focus>,
     pending_key: Option<KeyCode>,
     render_cache: RefCell<RenderCache>,
@@ -115,6 +155,7 @@ impl AppState {
             dropped_records: 0,
             banner: None,
             transport_degraded: false,
+            preview: PreviewState::default(),
             focus: None,
             pending_key: None,
             render_cache: RefCell::new(RenderCache::default()),
@@ -139,6 +180,13 @@ impl AppState {
 
     pub(crate) fn focus(&self) -> Option<&Focus> {
         self.focus.as_ref()
+    }
+
+    pub fn selected_pane(&self) -> Option<PaneId> {
+        match &self.focus {
+            Some(Focus::Pane((_, _, pane_id))) => Some(pane_id.clone()),
+            Some(Focus::Header(_)) | None => None,
+        }
     }
 
     pub(crate) fn render_cache(&self) -> RefMut<'_, RenderCache> {
@@ -268,7 +316,7 @@ impl AppState {
 }
 
 pub fn reduce(state: &mut AppState, event: Event) -> ReduceResult {
-    match event {
+    let mut result = match event {
         Event::Key(key) => reduce_key(state, key),
         Event::Snapshot {
             outcome,
@@ -276,7 +324,142 @@ pub fn reduce(state: &mut AppState, event: Event) -> ReduceResult {
         } => reduce_snapshot(state, outcome, observed_at),
         Event::SnapshotFailed(error) => reduce_snapshot_failure(state, error),
         Event::Tick { now } => reduce_tick(state, now),
+        Event::PreviewTick => reduce_preview_tick(state),
+        Event::PreviewViewport(height) => reduce_preview_viewport(state, height),
+        Event::TerminalFocus(focused) => reduce_terminal_focus(state, focused),
+        Event::PreviewCaptured {
+            sequence,
+            pane_id,
+            result,
+        } => reduce_preview_captured(state, sequence, pane_id, result),
+    };
+    sync_preview_target(state, &mut result);
+    result
+}
+
+fn sync_preview_target(state: &mut AppState, result: &mut ReduceResult) {
+    let target = state.selected_pane();
+    if state.preview.target == target {
+        return;
     }
+    state.preview.target = target;
+    state.preview.frame = None;
+    state.preview.error = None;
+    state.preview.inspect = false;
+    state.preview.lines_from_bottom = 0;
+    state.preview.in_flight = None;
+    if state.preview.target.is_some() {
+        request_preview(state, result);
+    }
+    result.changed = true;
+}
+
+fn request_preview(state: &mut AppState, result: &mut ReduceResult) {
+    let Some(pane_id) = state.preview.target.clone() else {
+        return;
+    };
+    state.preview.next_sequence = state.preview.next_sequence.wrapping_add(1);
+    let sequence = state.preview.next_sequence;
+    state.preview.in_flight = Some((sequence, pane_id.clone()));
+    if state.preview.terminal_focused {
+        result
+            .actions
+            .push(Action::CapturePreview { sequence, pane_id });
+    }
+}
+
+fn reduce_preview_tick(state: &mut AppState) -> ReduceResult {
+    let mut result = ReduceResult::default();
+    if state.preview.target.is_some()
+        && !state.preview.inspect
+        && state.preview.terminal_focused
+        && state.preview.in_flight.is_none()
+    {
+        request_preview(state, &mut result);
+    }
+    result
+}
+
+fn reduce_preview_viewport(state: &mut AppState, height: u16) -> ReduceResult {
+    let old_height = state.preview.viewport_height;
+    let old_offset = state.preview.lines_from_bottom;
+    state.preview.viewport_height = height;
+    clamp_preview_offset(state);
+    ReduceResult {
+        actions: Vec::new(),
+        changed: old_height != height || old_offset != state.preview.lines_from_bottom,
+    }
+}
+
+fn reduce_terminal_focus(state: &mut AppState, focused: bool) -> ReduceResult {
+    if state.preview.terminal_focused == focused {
+        return ReduceResult::default();
+    }
+    state.preview.terminal_focused = focused;
+    if !focused {
+        state.preview.in_flight = None;
+        return ReduceResult {
+            actions: Vec::new(),
+            changed: true,
+        };
+    }
+    let mut result = ReduceResult {
+        actions: Vec::new(),
+        changed: true,
+    };
+    if state.preview.target.is_some() {
+        request_preview(state, &mut result);
+    }
+    result
+}
+
+fn reduce_preview_captured(
+    state: &mut AppState,
+    sequence: u64,
+    pane_id: PaneId,
+    result: Result<PreviewFrame, String>,
+) -> ReduceResult {
+    if state.preview.target.as_ref() != Some(&pane_id)
+        || state.preview.in_flight.as_ref() != Some(&(sequence, pane_id.clone()))
+    {
+        return ReduceResult::default();
+    }
+    state.preview.in_flight = None;
+    match result {
+        Ok(frame) => {
+            state.preview.frame = Some(frame);
+            state.preview.error = None;
+            state.preview.lines_from_bottom = 0;
+        }
+        Err(error) => {
+            state.preview.frame = None;
+            state.preview.error = Some(short_preview_error(error));
+        }
+    }
+    ReduceResult {
+        actions: Vec::new(),
+        changed: true,
+    }
+}
+
+fn short_preview_error(error: String) -> String {
+    let error = error.lines().next().unwrap_or_default().trim();
+    let short = error.chars().take(160).collect::<String>();
+    if short.is_empty() {
+        "preview capture failed".into()
+    } else {
+        short
+    }
+}
+
+fn clamp_preview_offset(state: &mut AppState) {
+    let line_count = state
+        .preview
+        .frame
+        .as_ref()
+        .map_or(0, |frame| frame.lines.len());
+    let max_offset = line_count.saturating_sub(usize::from(state.preview.viewport_height));
+    state.preview.lines_from_bottom = state.preview.lines_from_bottom.min(max_offset);
 }
 
 fn reduce_tick(state: &mut AppState, now: u64) -> ReduceResult {
@@ -335,6 +518,39 @@ pub(crate) fn status_index(status: crate::model::Status) -> usize {
 
 fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
     let mut result = ReduceResult::default();
+    if key.modifiers == KeyModifiers::CONTROL {
+        match key.code {
+            KeyCode::Char('u') => {
+                result.changed = inspect_preview(state, true);
+                return result;
+            }
+            KeyCode::Char('d') => {
+                result.changed = inspect_preview(state, false);
+                return result;
+            }
+            KeyCode::Char('r') => {
+                let changed = state.preview.inspect || state.preview.lines_from_bottom != 0;
+                state.preview.inspect = false;
+                state.preview.lines_from_bottom = 0;
+                if state.preview.target.is_some() && state.preview.terminal_focused {
+                    request_preview(state, &mut result);
+                    result.changed = true;
+                } else {
+                    result.changed = changed;
+                }
+                return result;
+            }
+            _ => {}
+        }
+    }
+    if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE {
+        if !state.preview.inspect || state.preview.in_flight.is_some() {
+            state.preview.inspect = true;
+            state.preview.in_flight = None;
+            result.changed = true;
+        }
+        return result;
+    }
     if state.input_mode == InputMode::Filter {
         match key.code {
             KeyCode::Esc => {
@@ -415,7 +631,6 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
             result.actions.push(Action::ToggleGroup(state.grouped()));
             result.changed = true;
         }
-        KeyCode::Enter => emit_jump(state, false, &mut result),
         KeyCode::Char('z') if key.modifiers == KeyModifiers::CONTROL => {
             emit_jump(state, true, &mut result)
         }
@@ -427,6 +642,33 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
         _ => {}
     }
     result
+}
+
+fn inspect_preview(state: &mut AppState, up: bool) -> bool {
+    let old_inspect = state.preview.inspect;
+    let old_in_flight = state.preview.in_flight.clone();
+    let old_offset = state.preview.lines_from_bottom;
+    state.preview.inspect = true;
+    state.preview.in_flight = None;
+    let half_page = usize::from(state.preview.viewport_height / 2).max(1);
+    if up {
+        let line_count = state
+            .preview
+            .frame
+            .as_ref()
+            .map_or(0, |frame| frame.lines.len());
+        let max_offset = line_count.saturating_sub(usize::from(state.preview.viewport_height));
+        state.preview.lines_from_bottom = state
+            .preview
+            .lines_from_bottom
+            .saturating_add(half_page)
+            .min(max_offset);
+    } else {
+        state.preview.lines_from_bottom = state.preview.lines_from_bottom.saturating_sub(half_page);
+    }
+    state.preview.inspect != old_inspect
+        || state.preview.in_flight != old_in_flight
+        || state.preview.lines_from_bottom != old_offset
 }
 
 fn set_focus(state: &mut AppState, index: usize, result: &mut ReduceResult) {
@@ -557,6 +799,7 @@ mod tests {
 
     use crate::app::{Action, AppState, Event, Focus, InputMode, JumpTarget, Mode, reduce};
     use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, Status, WindowId};
+    use crate::preview::parse_preview;
     use crate::snapshot::{ParseOutcome, RawRecord};
 
     fn record(session: &str, window: &str, pane: &str, pane_index: u32) -> RawRecord {
@@ -610,6 +853,193 @@ mod tests {
         for character in query.chars() {
             reduce(app, key(KeyCode::Char(character)));
         }
+    }
+
+    #[test]
+    fn focusing_a_pane_starts_an_immediate_preview_capture() {
+        let mut app = state(vec![record("$1", "@1", "%1", 0)]);
+
+        reduce(&mut app, key(KeyCode::Char('j')));
+        let result = reduce(&mut app, key(KeyCode::Char('j')));
+
+        assert_eq!(app.selected_pane(), Some(PaneId("%1".into())));
+        assert_eq!(app.preview.target, Some(PaneId("%1".into())));
+        assert_eq!(
+            result.actions,
+            vec![Action::CapturePreview {
+                sequence: 1,
+                pane_id: PaneId("%1".into()),
+            }]
+        );
+    }
+
+    fn select_first_pane(app: &mut AppState) -> (u64, PaneId) {
+        reduce(app, key(KeyCode::Char('j')));
+        let result = reduce(app, key(KeyCode::Char('j')));
+        match result.actions.as_slice() {
+            [Action::CapturePreview { sequence, pane_id }] => (*sequence, pane_id.clone()),
+            actions => panic!("expected one capture action, got {actions:?}"),
+        }
+    }
+
+    #[test]
+    fn header_focus_clears_preview_and_stale_results_are_ignored_after_target_change() {
+        let mut app = state(vec![
+            record("$a", "@a", "%a", 0),
+            record("$a", "@a", "%b", 1),
+        ]);
+        let (first_sequence, first_pane) = select_first_pane(&mut app);
+        let result = reduce(&mut app, key(KeyCode::Char('j')));
+        let (second_sequence, second_pane) = match result.actions.as_slice() {
+            [Action::CapturePreview { sequence, pane_id }] => (*sequence, pane_id.clone()),
+            actions => panic!("expected replacement capture, got {actions:?}"),
+        };
+        assert!(second_sequence > first_sequence);
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence: first_sequence,
+                pane_id: first_pane,
+                result: Ok(parse_preview(PaneId::from("%a"), b"stale".to_vec())),
+            },
+        );
+        assert_eq!(app.preview.frame, None);
+        assert_eq!(app.preview.in_flight, Some((second_sequence, second_pane)));
+
+        reduce(&mut app, key(KeyCode::Char('k')));
+        reduce(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.selected_pane(), None);
+        assert_eq!(app.preview.target, None);
+        assert_eq!(app.preview.frame, None);
+        assert_eq!(app.preview.error, None);
+        assert_eq!(app.preview.in_flight, None);
+    }
+
+    #[test]
+    fn current_preview_results_follow_bottom_and_store_short_errors() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        let (sequence, pane_id) = select_first_pane(&mut app);
+        let frame = parse_preview(pane_id.clone(), b"one\ntwo\nthree".to_vec());
+        app.preview.lines_from_bottom = 2;
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id: pane_id.clone(),
+                result: Ok(frame.clone()),
+            },
+        );
+        assert_eq!(app.preview.frame, Some(frame));
+        assert_eq!(app.preview.lines_from_bottom, 0);
+        assert_eq!(app.preview.in_flight, None);
+
+        let result = reduce(&mut app, Event::PreviewTick);
+        let sequence = match result.actions.as_slice() {
+            [Action::CapturePreview { sequence, .. }] => *sequence,
+            actions => panic!("expected periodic capture, got {actions:?}"),
+        };
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id,
+                result: Err(format!("first line\n{}", "x".repeat(300))),
+            },
+        );
+        assert_eq!(app.preview.frame, None);
+        assert_eq!(app.preview.error.as_deref(), Some("first line"));
+        assert_eq!(app.preview.in_flight, None);
+    }
+
+    #[test]
+    fn inspect_controls_clamp_half_pages_even_while_filtering() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        let (sequence, pane_id) = select_first_pane(&mut app);
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id,
+                result: Ok(parse_preview(
+                    PaneId::from("%a"),
+                    b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10".to_vec(),
+                )),
+            },
+        );
+        reduce(&mut app, Event::PreviewViewport(4));
+        enter_query(&mut app, "a");
+        reduce(&mut app, control_key(KeyCode::Char('u')));
+        assert!(app.preview.inspect);
+        assert_eq!(app.preview.lines_from_bottom, 2);
+        reduce(&mut app, control_key(KeyCode::Char('u')));
+        assert_eq!(app.preview.lines_from_bottom, 4);
+        reduce(&mut app, control_key(KeyCode::Char('u')));
+        assert_eq!(app.preview.lines_from_bottom, 6);
+        reduce(&mut app, control_key(KeyCode::Char('d')));
+        assert_eq!(app.preview.lines_from_bottom, 4);
+        let result = reduce(&mut app, control_key(KeyCode::Char('r')));
+        assert!(!app.preview.inspect);
+        assert_eq!(app.preview.lines_from_bottom, 0);
+        assert!(matches!(
+            result.actions.as_slice(),
+            [Action::CapturePreview { .. }]
+        ));
+    }
+
+    #[test]
+    fn focus_pause_resume_and_same_target_do_not_duplicate_requests() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        let (sequence, pane_id) = select_first_pane(&mut app);
+        assert!(reduce(&mut app, Event::PreviewTick).actions.is_empty());
+        reduce(&mut app, Event::TerminalFocus(false));
+        assert_eq!(app.preview.in_flight, None);
+        assert!(reduce(&mut app, Event::PreviewTick).actions.is_empty());
+        let resumed = reduce(&mut app, Event::TerminalFocus(true));
+        let resumed_sequence = match resumed.actions.as_slice() {
+            [Action::CapturePreview { sequence, .. }] => *sequence,
+            actions => panic!("expected resume capture, got {actions:?}"),
+        };
+        assert!(resumed_sequence > sequence);
+        assert!(
+            reduce(&mut app, Event::TerminalFocus(true))
+                .actions
+                .is_empty()
+        );
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence: resumed_sequence,
+                pane_id,
+                result: Ok(parse_preview(PaneId::from("%a"), b"frame".to_vec())),
+            },
+        );
+        reduce(&mut app, key(KeyCode::Enter));
+        assert!(app.preview.inspect);
+        assert!(reduce(&mut app, Event::PreviewTick).actions.is_empty());
+    }
+
+    #[test]
+    fn snapshots_preserve_inspect_for_same_pane_and_clear_vanished_selection() {
+        let record = record("$a", "@a", "%a", 0);
+        let mut app = state(vec![record.clone()]);
+        let (sequence, pane_id) = select_first_pane(&mut app);
+        reduce(
+            &mut app,
+            Event::PreviewCaptured {
+                sequence,
+                pane_id,
+                result: Ok(parse_preview(PaneId::from("%a"), b"frame".to_vec())),
+            },
+        );
+        reduce(&mut app, key(KeyCode::Enter));
+        reduce(&mut app, snapshot(vec![record], 11));
+        assert!(app.preview.inspect);
+        assert_eq!(app.preview.target, Some(PaneId::from("%a")));
+
+        reduce(&mut app, snapshot(vec![], 12));
+        assert_eq!(app.preview.target, None);
+        assert_eq!(app.preview.frame, None);
+        assert!(!app.preview.inspect);
     }
 
     fn visible_pane_ids(app: &AppState) -> Vec<String> {
@@ -763,7 +1193,16 @@ mod tests {
         let mut app = state(vec![record("$a", "@a", "%a", 0)]);
         assert!(matches!(app.model.rows(true)[0], Row::SessionHeader { .. }));
         let result = reduce(&mut app, key(KeyCode::Char('s')));
-        assert_eq!(result.actions, vec![Action::ToggleGroup(false)]);
+        assert_eq!(
+            result.actions,
+            vec![
+                Action::ToggleGroup(false),
+                Action::CapturePreview {
+                    sequence: 1,
+                    pane_id: PaneId::from("%a"),
+                },
+            ]
+        );
         assert_eq!(app.mode, Mode::Flat);
         assert!(matches!(app.model.rows(false)[0], Row::Pane { .. }));
     }
@@ -779,39 +1218,32 @@ mod tests {
     }
 
     #[test]
-    fn enter_and_ctrl_z_target_session_headers_without_zoom() {
-        for event in [key(KeyCode::Enter), control_key(KeyCode::Char('z'))] {
-            let mut app = state(vec![record("$a", "@a", "%a", 0)]);
-            reduce(&mut app, key(KeyCode::Char('j')));
-            let result = reduce(&mut app, event);
-            assert_eq!(
-                result.actions,
-                vec![Action::Jump {
-                    target: JumpTarget::Session(SessionId::from("$a")),
-                    zoom: false,
-                }]
-            );
-        }
+    fn ctrl_z_targets_session_headers_without_zoom() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        reduce(&mut app, key(KeyCode::Char('j')));
+        let result = reduce(&mut app, control_key(KeyCode::Char('z')));
+        assert_eq!(
+            result.actions,
+            vec![Action::Jump {
+                target: JumpTarget::Session(SessionId::from("$a")),
+                zoom: false,
+            }]
+        );
     }
 
     #[test]
-    fn enter_and_ctrl_z_target_panes_with_expected_zoom() {
-        for (event, zoom) in [
-            (key(KeyCode::Enter), false),
-            (control_key(KeyCode::Char('z')), true),
-        ] {
-            let mut app = state(vec![record("$a", "@a", "%a", 0)]);
-            reduce(&mut app, key(KeyCode::Char('j')));
-            reduce(&mut app, key(KeyCode::Char('j')));
-            let result = reduce(&mut app, event);
-            assert_eq!(
-                result.actions,
-                vec![Action::Jump {
-                    target: JumpTarget::Pane(PaneId::from("%a")),
-                    zoom,
-                }]
-            );
-        }
+    fn ctrl_z_targets_panes_with_zoom() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Char('j')));
+        let result = reduce(&mut app, control_key(KeyCode::Char('z')));
+        assert_eq!(
+            result.actions,
+            vec![Action::Jump {
+                target: JumpTarget::Pane(PaneId::from("%a")),
+                zoom: true,
+            }]
+        );
     }
 
     #[test]
