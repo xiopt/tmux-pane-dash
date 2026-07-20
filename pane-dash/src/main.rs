@@ -697,6 +697,8 @@ mod tests {
     use pane_dash::app::{Action, AppState, Event, reduce};
     use pane_dash::model::{Model, ModelConfig};
     use pane_dash::options::DashConfig;
+    use pane_dash::preview::parse_preview;
+    use pane_dash::snapshot::parse;
     use pane_dash::tmux_exec::{SNAPSHOT_FORMAT, TmuxExec};
     use pane_dash::transport::{
         SnapshotCompletion, TransportCoordinator, TransportDirective, TransportInput, TransportMode,
@@ -708,7 +710,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn valid_record() -> Vec<u8> {
-        b"\x1e$1\x1fs\x1f@1\x1f0\x1fw\x1f%1\x1f0\x1f1\x1fc\x1f/\x1f0\x1fa\x1f\x1f\x1f\x1f\x1f\x1f"
+        b"\x1e$1\x1fsession\x1f@1\x1f0\x1fwindow\x1f%1\x1f0\x1f1\x1fopencode\x1f/tmp\x1f0\x1fworking\x1f1\x1f1\x1f\x1f\x1f\x1f1\n"
             .to_vec()
     }
 
@@ -718,7 +720,7 @@ mod tests {
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nprintf '%s\\0' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nif [ \"$1\" = list-panes ]; then\n    printf '%b' '\\036$1\\037s\\037@1\\0370\\037w\\037%1\\0370\\0371\\037c\\037/\\0370\\037a\\037\\037\\037\\037\\037\\037\\n'\nfi\n",
+                "#!/bin/sh\nprintf '%s\\0' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nif [ \"$1\" = list-panes ]; then\n    printf '%b' '\\0036$1\\0037session\\0037@1\\00370\\0037window\\0037%1\\00370\\00371\\0037opencode\\0037/tmp\\00370\\0037working\\00371\\00371\\0037\\0037\\0037\\00371\\n'\nfi\n",
                 log.display(),
                 log.display(),
             ),
@@ -859,6 +861,9 @@ mod tests {
             &mut app,
             Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
         );
+        let frame = parse_preview("%1".into(), b"one\ntwo\nthree".to_vec());
+        app.preview.frame = Some(frame.clone());
+        app.preview.lines_from_bottom = 1;
         assert!(reduce(&mut app, Event::PreviewTick).actions.is_empty());
         reduce(&mut app, Event::TerminalFocus(false));
         assert!(reduce(&mut app, Event::PreviewTick).actions.is_empty());
@@ -938,6 +943,9 @@ mod tests {
         let mut next_snapshot_seq = 0;
         let snapshot_generation = SnapshotGeneration::default();
         let mut in_flight_snapshot = SnapshotInFlight::default();
+        let frame = parse_preview("%1".into(), b"one\ntwo\nthree".to_vec());
+        app.preview.frame = Some(frame.clone());
+        app.preview.lines_from_bottom = 1;
 
         tokio::time::advance(Duration::from_millis(999)).await;
         assert!(
@@ -967,6 +975,11 @@ mod tests {
                 &mut in_flight_snapshot,
             );
             let response = snapshots.recv().await.expect("one-shot snapshot response");
+            let bytes = response.result.as_ref().expect("fake snapshot bytes");
+            assert_eq!(bytes, &valid_record());
+            let parsed = parse(bytes);
+            assert_eq!(parsed.records.len(), 1);
+            assert_eq!(parsed.dropped, 0);
             assert!(in_flight_snapshot.accepts(response.seq));
             let (completion, outcome) = classify_snapshot_payload(response.source, response.result);
             assert!(coordinator.snapshot_completed(completion).is_empty());
@@ -977,7 +990,11 @@ mod tests {
                     observed_at: response.observed_at,
                 },
             );
-            assert!(app.preview.inspect || app.preview.target.is_none());
+            assert_eq!(app.selected_pane(), Some("%1".into()));
+            assert_eq!(app.preview.target, Some("%1".into()));
+            assert!(app.preview.inspect);
+            assert_eq!(app.preview.frame, Some(frame.clone()));
+            assert_eq!(app.preview.lines_from_bottom, 1);
         }
         let log_bytes = fs::read(log).unwrap();
         assert_eq!(
