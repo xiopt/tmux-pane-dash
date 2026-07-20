@@ -179,6 +179,31 @@ fn ignores_malformed_numeric_guards() {
 }
 
 #[test]
+fn ignores_begins_with_missing_or_nonnumeric_flags() {
+    for line in [b"%begin 10 20\n".as_slice(), b"%begin 10 20 invalid\n"] {
+        let mut parser = ProtocolParser::default();
+        assert!(parser.push_line(line).is_empty());
+        assert!(parser.finish().is_empty());
+    }
+}
+
+#[test]
+fn preserves_matching_closes_with_missing_or_nonnumeric_flags_as_data() {
+    for (close, ok) in [("%end", true), ("%error", false)] {
+        for flags in ["", " invalid"] {
+            let mut parser = ProtocolParser::default();
+            parser.push_line(b"%begin 10 20 0\n");
+            let malformed = format!("{close} 10 20{flags}\n");
+            assert!(parser.push_line(malformed.as_bytes()).is_empty());
+            assert_eq!(
+                parser.push_line(format!("{close} 10 20 0\n").as_bytes()),
+                vec![response(guard(10, 20), ok, malformed.as_bytes())]
+            );
+        }
+    }
+}
+
+#[test]
 fn builds_the_exact_control_snapshot_command() {
     assert_eq!(
         CONTROL_SNAPSHOT_COMMAND,

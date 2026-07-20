@@ -103,6 +103,7 @@ fn parse_guard(line: &[u8]) -> Option<(GuardKind, GuardId)> {
     };
     let timestamp = parse_ascii_u64(fields.next()?)?;
     let command_number = parse_ascii_u64(fields.next()?)?;
+    parse_ascii_u64(fields.next()?)?;
     Some((
         kind,
         GuardId {
