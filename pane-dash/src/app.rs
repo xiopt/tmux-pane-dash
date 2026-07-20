@@ -16,15 +16,25 @@ pub enum Mode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    Jump { pane_id: PaneId, zoom: bool },
+    Jump { target: JumpTarget, zoom: bool },
     ToggleGroup(bool),
     Quit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JumpTarget {
+    Session(SessionId),
+    Pane(PaneId),
 }
 
 #[derive(Debug)]
 pub enum Event {
     Key(KeyEvent),
-    Snapshot(ParseOutcome),
+    Snapshot {
+        outcome: ParseOutcome,
+        observed_at: u64,
+    },
+    SnapshotFailed(String),
     Tick,
 }
 
@@ -48,7 +58,10 @@ pub struct AppState {
     pub collapsed: HashSet<SessionId>,
     pub should_quit: bool,
     pub pending_action: Option<Action>,
+    pub consecutive_failures: u32,
+    pub banner: Option<String>,
     focus: Option<Focus>,
+    pending_key: Option<KeyCode>,
 }
 
 impl AppState {
@@ -65,7 +78,10 @@ impl AppState {
             collapsed: HashSet::new(),
             should_quit: false,
             pending_action: None,
+            consecutive_failures: 0,
+            banner: None,
             focus: None,
+            pending_key: None,
         }
     }
 
@@ -105,43 +121,28 @@ impl AppState {
             Some(Focus::Header(_)) | None => None,
         };
     }
-
-    fn target_for_session(&self, session_id: &SessionId) -> Option<PaneId> {
-        self.model
-            .rows(true)
-            .iter()
-            .find_map(|row| match row {
-                Row::Pane {
-                    session_id: row_session,
-                    pane_id,
-                    pane_active: true,
-                    ..
-                } if row_session == session_id => Some(pane_id.clone()),
-                _ => None,
-            })
-            .or_else(|| {
-                self.model.rows(true).iter().find_map(|row| match row {
-                    Row::Pane {
-                        session_id: row_session,
-                        pane_id,
-                        ..
-                    } if row_session == session_id => Some(pane_id.clone()),
-                    _ => None,
-                })
-            })
-    }
 }
 
 pub fn reduce(state: &mut AppState, event: Event) -> ReduceResult {
     match event {
         Event::Key(key) => reduce_key(state, key),
-        Event::Snapshot(outcome) => reduce_snapshot(state, outcome),
+        Event::Snapshot {
+            outcome,
+            observed_at,
+        } => reduce_snapshot(state, outcome, observed_at),
+        Event::SnapshotFailed(error) => reduce_snapshot_failure(state, error),
         Event::Tick => ReduceResult::default(),
     }
 }
 
 fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
     let mut result = ReduceResult::default();
+    if state.pending_key.take().is_some() {
+        if key.code == KeyCode::Char('a') && key.modifiers == KeyModifiers::NONE {
+            toggle_collapsed(state, &mut result);
+        }
+        return result;
+    }
     let mut move_focus = |offset: isize| {
         let visible = state.visible_rows();
         if visible.is_empty() {
@@ -176,7 +177,7 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
         KeyCode::Char('h') => set_collapsed(state, true, &mut result),
         KeyCode::Char('l') => set_collapsed(state, false, &mut result),
         KeyCode::Char('z') if key.modifiers == KeyModifiers::NONE => {
-            toggle_collapsed(state, &mut result)
+            state.pending_key = Some(KeyCode::Char('z'))
         }
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => {
             state.mode = if state.grouped() {
@@ -185,6 +186,7 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
                 Mode::Grouped
             };
             state.collapsed.clear();
+            state.pending_key = None;
             state.focus = state.selection.clone().map(Focus::Pane);
             result.actions.push(Action::ToggleGroup(state.grouped()));
             result.changed = true;
@@ -252,27 +254,36 @@ fn toggle_collapsed(state: &mut AppState, result: &mut ReduceResult) {
 }
 
 fn emit_jump(state: &mut AppState, zoom: bool, result: &mut ReduceResult) {
-    let pane_id = match &state.focus {
-        Some(Focus::Pane((_, _, pane_id))) => Some(pane_id.clone()),
-        Some(Focus::Header(session_id)) => state.target_for_session(session_id),
-        None => None,
+    let (target, zoom) = match &state.focus {
+        Some(Focus::Pane((_, _, pane_id))) => (Some(JumpTarget::Pane(pane_id.clone())), zoom),
+        Some(Focus::Header(session_id)) => (Some(JumpTarget::Session(session_id.clone())), false),
+        None => (None, false),
     };
-    if let Some(pane_id) = pane_id {
-        let action = Action::Jump { pane_id, zoom };
+    if let Some(target) = target {
+        let action = Action::Jump { target, zoom };
         state.pending_action = Some(action.clone());
         result.actions.push(action);
         result.changed = true;
     }
 }
 
-fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome) -> ReduceResult {
+fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64) -> ReduceResult {
     let old_visible = state.visible_rows();
     let old_focus = state.focus.clone();
-    let model = Model::build(&outcome.records, &state.model_config(), now_secs());
-    if model.content_hash() == state.model.content_hash() {
+    let model = Model::build(&outcome.records, &state.model_config(), observed_at);
+    let mode = if model.grouped() {
+        Mode::Grouped
+    } else {
+        Mode::Flat
+    };
+    let recovered = state.consecutive_failures != 0 || state.banner.is_some();
+    if model.content_hash() == state.model.content_hash() && mode == state.mode && !recovered {
         return ReduceResult::default();
     }
     state.model = model;
+    state.mode = mode;
+    state.consecutive_failures = 0;
+    state.banner = None;
     state
         .collapsed
         .retain(|session_id| state.model.sessions().contains_key(session_id));
@@ -295,19 +306,24 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome) -> ReduceResult 
     }
 }
 
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn reduce_snapshot_failure(state: &mut AppState, error: String) -> ReduceResult {
+    state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+    state.banner = Some(format!(
+        "snapshot failed ({}): {error}",
+        state.consecutive_failures
+    ));
+    ReduceResult {
+        actions: Vec::new(),
+        changed: true,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::app::{Action, AppState, Event, Mode, reduce};
-    use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, WindowId};
+    use crate::app::{Action, AppState, Event, JumpTarget, Mode, reduce};
+    use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, Status, WindowId};
     use crate::snapshot::{ParseOutcome, RawRecord};
 
     fn record(session: &str, window: &str, pane: &str, pane_index: u32) -> RawRecord {
@@ -342,6 +358,20 @@ mod tests {
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn control_key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
+    }
+
+    fn snapshot(records: Vec<RawRecord>, observed_at: u64) -> Event {
+        Event::Snapshot {
+            outcome: ParseOutcome {
+                records,
+                dropped: 0,
+            },
+            observed_at,
+        }
     }
 
     #[test]
@@ -411,10 +441,10 @@ mod tests {
         reduce(&mut app, key(KeyCode::Char('G')));
         reduce(
             &mut app,
-            Event::Snapshot(ParseOutcome {
-                records: vec![record("$b", "@b", "%b", 0), record("$a", "@a", "%a", 0)],
-                dropped: 0,
-            }),
+            snapshot(
+                vec![record("$b", "@b", "%b", 0), record("$a", "@a", "%a", 0)],
+                10,
+            ),
         );
         assert_eq!(
             app.selection,
@@ -438,10 +468,10 @@ mod tests {
         reduce(&mut app, key(KeyCode::Char('j')));
         reduce(
             &mut app,
-            Event::Snapshot(ParseOutcome {
-                records: vec![record("$a", "@a", "%a", 0), record("$a", "@a", "%c", 2)],
-                dropped: 0,
-            }),
+            snapshot(
+                vec![record("$a", "@a", "%a", 0), record("$a", "@a", "%c", 2)],
+                10,
+            ),
         );
         assert_eq!(
             app.selection,
@@ -471,5 +501,90 @@ mod tests {
             assert_eq!(result.actions, vec![Action::Quit]);
             assert!(app.should_quit);
         }
+    }
+
+    #[test]
+    fn enter_and_ctrl_z_target_session_headers_without_zoom() {
+        for event in [key(KeyCode::Enter), control_key(KeyCode::Char('z'))] {
+            let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+            reduce(&mut app, key(KeyCode::Char('j')));
+            let result = reduce(&mut app, event);
+            assert_eq!(
+                result.actions,
+                vec![Action::Jump {
+                    target: JumpTarget::Session(SessionId::from("$a")),
+                    zoom: false,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn enter_and_ctrl_z_target_panes_with_expected_zoom() {
+        for (event, zoom) in [
+            (key(KeyCode::Enter), false),
+            (control_key(KeyCode::Char('z')), true),
+        ] {
+            let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+            reduce(&mut app, key(KeyCode::Char('j')));
+            reduce(&mut app, key(KeyCode::Char('j')));
+            let result = reduce(&mut app, event);
+            assert_eq!(
+                result.actions,
+                vec![Action::Jump {
+                    target: JumpTarget::Pane(PaneId::from("%a")),
+                    zoom,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_observation_time_controls_staleness_deterministically() {
+        let mut record = record("$a", "@a", "%a", 0);
+        record.heartbeat = Some(50);
+        let mut app = state(vec![record.clone()]);
+        reduce(&mut app, snapshot(vec![record], 111));
+        assert!(matches!(
+            app.model.rows(true)[1],
+            Row::Pane {
+                status: Status::Stale,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn snapshot_reconciles_live_group_mode_without_losing_selection() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Char('j')));
+        let mut flat = record("$a", "@a", "%a", 0);
+        flat.group = "0".into();
+        reduce(&mut app, snapshot(vec![flat], 10));
+        assert_eq!(app.mode, Mode::Flat);
+        assert_eq!(
+            app.selection,
+            Some((
+                SessionId::from("$a"),
+                WindowId::from("@a"),
+                PaneId::from("%a")
+            ))
+        );
+    }
+
+    #[test]
+    fn za_toggles_and_other_second_keys_cancel_the_sequence() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Char('z')));
+        reduce(&mut app, key(KeyCode::Char('a')));
+        assert!(app.collapsed.contains(&SessionId::from("$a")));
+        reduce(&mut app, key(KeyCode::Char('l')));
+        reduce(&mut app, key(KeyCode::Char('z')));
+        reduce(&mut app, key(KeyCode::Char('x')));
+        reduce(&mut app, key(KeyCode::Char('a')));
+        assert!(!app.collapsed.contains(&SessionId::from("$a")));
     }
 }

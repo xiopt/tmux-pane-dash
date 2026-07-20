@@ -9,6 +9,7 @@ use std::io::{self, Write};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use crossterm::cursor::MoveTo;
 use crossterm::event::{Event as CrosstermEvent, EventStream};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -24,6 +25,12 @@ use snapshot::parse;
 use tmux_exec::TmuxExec;
 
 struct TerminalGuard;
+
+struct SnapshotResponse {
+    seq: u64,
+    observed_at: u64,
+    result: Result<Vec<u8>>,
+}
 
 impl TerminalGuard {
     fn enter() -> Result<Self> {
@@ -69,23 +76,42 @@ async fn main() -> Result<()> {
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let (snapshot_tx, mut snapshots) = mpsc::unbounded_channel();
+    let mut snapshot_pending = false;
+    let mut next_snapshot_seq = 0_u64;
+    let mut last_snapshot_seq = 0_u64;
     while !app.should_quit {
         tokio::select! {
-            event = input.next() => if let Some(Ok(CrosstermEvent::Key(key))) = event {
-                apply_event(&mut app, Event::Key(key), &tmux).await?;
+            event = input.next() => match event {
+                Some(Ok(CrosstermEvent::Key(key))) => apply_event(&mut app, Event::Key(key), &tmux).await?,
+                Some(Ok(CrosstermEvent::Resize(_, _))) => redraw(&app)?,
+                Some(Ok(_)) => {},
+                Some(Err(error)) => return Err(error).context("read terminal event"),
+                None => app.should_quit = true,
             },
             _ = tick.tick() => {
-                let snapshot_tmux = tmux.clone();
-                let tx = snapshot_tx.clone();
-                tokio::spawn(async move {
-                    if let Ok(bytes) = snapshot_tmux.snapshot().await {
-                        let _ = tx.send(parse(&bytes));
-                    }
-                });
+                if !snapshot_pending {
+                    next_snapshot_seq = next_snapshot_seq.wrapping_add(1);
+                    snapshot_pending = true;
+                    let snapshot_tmux = tmux.clone();
+                    let tx = snapshot_tx.clone();
+                    let seq = next_snapshot_seq;
+                    tokio::spawn(async move {
+                        let result = snapshot_tmux.snapshot().await;
+                        let _ = tx.send(SnapshotResponse { seq, observed_at: now_secs(), result });
+                    });
+                }
                 apply_event(&mut app, Event::Tick, &tmux).await?;
             },
-            outcome = snapshots.recv() => if let Some(outcome) = outcome {
-                apply_event(&mut app, Event::Snapshot(outcome), &tmux).await?;
+            response = snapshots.recv() => if let Some(response) = response {
+                snapshot_pending = false;
+                if response.seq > last_snapshot_seq {
+                    last_snapshot_seq = response.seq;
+                    let event = match response.result {
+                        Ok(bytes) => Event::Snapshot { outcome: parse(&bytes), observed_at: response.observed_at },
+                        Err(error) => Event::SnapshotFailed(error.to_string()),
+                    };
+                    apply_event(&mut app, event, &tmux).await?;
+                }
             },
         }
     }
@@ -111,8 +137,15 @@ fn redraw(app: &AppState) -> Result<()> {
     let mut stdout = io::stdout();
     queue!(
         stdout,
+        MoveTo(0, 0),
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
     )?;
+    let mut line = 0_u16;
+    if let Some(banner) = &app.banner {
+        queue!(stdout, MoveTo(0, line))?;
+        write!(stdout, "{banner}")?;
+        line = line.saturating_add(1);
+    }
     for row in app.model.rows(matches!(app.mode, app::Mode::Grouped)) {
         let label = match row {
             model::Row::SessionHeader { name, .. } => format!("{name}:"),
@@ -126,7 +159,9 @@ fn redraw(app: &AppState) -> Result<()> {
                 format!("  {} {label}", pane_id.0)
             }
         };
-        writeln!(stdout, "{label}")?;
+        queue!(stdout, MoveTo(0, line))?;
+        write!(stdout, "{label}")?;
+        line = line.saturating_add(1);
     }
     stdout.flush()?;
     Ok(())
