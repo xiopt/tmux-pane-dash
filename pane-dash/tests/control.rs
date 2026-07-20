@@ -203,6 +203,47 @@ mod actor_tests {
     }
 
     #[tokio::test]
+    async fn malformed_eof_fails_active_and_queued_requests_as_one_termination() {
+        let dir = TempDir::new().unwrap();
+        let ready = dir.path().join("ready");
+        let release = dir.path().join("release");
+        let commands = dir.path().join("commands");
+        std::process::Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .unwrap();
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r command\nprintf '%s\\n' \"$command\" > '{}'\necho ready > '{}'\nIFS= read -r _ < '{}'\nprintf '%s\\n' '%begin 2 2 1' 'partial response'\nexit 0",
+                commands.display(),
+                ready.display(),
+                release.display()
+            ),
+        );
+        let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
+        let first_handle = handle.clone();
+        let first = tokio::spawn(async move { first_handle.snapshot().await });
+        marker(&ready).await;
+        let second_handle = handle.clone();
+        let second = tokio::spawn(async move { second_handle.jump("/dev/ttys001", "%2").await });
+        tokio::task::yield_now().await;
+        fs::write(&release, "go\n").unwrap();
+
+        let first = first.await.unwrap().unwrap_err().to_string();
+        let second = second.await.unwrap().unwrap_err().to_string();
+        assert_eq!(first, second);
+        assert!(matches!(
+            timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(ControlEvent::Terminated(_))
+        ));
+        assert_eq!(events.recv().await, None);
+        assert_eq!(marker(&commands).await, CONTROL_SNAPSHOT_COMMAND);
+    }
+
+    #[tokio::test]
     async fn dropping_all_handles_closes_stdin_and_reaps_the_child() {
         let dir = TempDir::new().unwrap();
         let exited = dir.path().join("exited");

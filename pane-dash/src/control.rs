@@ -189,14 +189,15 @@ async fn control_actor(
             },
             read = stdout.read_until(b'\n', &mut line) => match read {
                 Ok(0) => {
-                    for event in parser.finish() {
-                        if matches!(event, ProtocolEvent::MalformedResponse)
-                            && let Some(request) = active.take()
-                        {
-                            request.fail("malformed tmux control response");
-                        }
-                    }
-                    terminated = Some("tmux control stdout closed".into());
+                    let malformed = parser
+                        .finish()
+                        .into_iter()
+                        .any(|event| matches!(event, ProtocolEvent::MalformedResponse));
+                    terminated = Some(if malformed {
+                        "malformed tmux control response".into()
+                    } else {
+                        "tmux control stdout closed".into()
+                    });
                     break;
                 }
                 Ok(_) => {
@@ -215,9 +216,8 @@ async fn control_actor(
                                 break;
                             }
                             ProtocolEvent::MalformedResponse => {
-                                if let Some(request) = active.take() {
-                                    request.fail("malformed tmux control response");
-                                }
+                                terminated = Some("malformed tmux control response".into());
+                                break;
                             }
                         }
                     }
