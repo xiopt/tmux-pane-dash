@@ -1,0 +1,46 @@
+# probe: 50_encoding_roundtrip.txt  tmux: tmux 3.4  date: 2026-07-20T16:00:07Z
+FINDING: new-session -s leading-dash probe: ROUNDTRIP_OK
+expanded/plain: ROUNDTRIP_OK
+plain/plain: ROUNDTRIP_OK
+expanded/interior-semi: ROUNDTRIP_OK
+plain/interior-semi: ROUNDTRIP_OK
+expanded/trailing-semi: ROUNDTRIP_OK
+plain/trailing-semi: ROUNDTRIP_OK
+expanded/double-trailing: ROUNDTRIP_OK
+plain/double-trailing: ROUNDTRIP_OK
+expanded/hash: ROUNDTRIP_OK
+plain/hash: ROUNDTRIP_OK
+expanded/hash-brace: ROUNDTRIP_OK
+plain/hash-brace: ROUNDTRIP_OK
+expanded/unmatched-open: ROUNDTRIP_OK
+plain/unmatched-open: ROUNDTRIP_OK
+expanded/raw-close: ROUNDTRIP_OK
+plain/raw-close: ROUNDTRIP_OK
+expanded/hash-close: ROUNDTRIP_OK
+plain/hash-close: ROUNDTRIP_OK
+expanded/hash-paren: ROUNDTRIP_OK
+plain/hash-paren: ROUNDTRIP_OK
+expanded/cross-product: ROUNDTRIP_OK
+plain/cross-product: ROUNDTRIP_OK
+expanded/unicode: ROUNDTRIP_OK
+plain/unicode: ROUNDTRIP_OK
+expanded/leading-dash: ROUNDTRIP_OK
+plain/leading-dash: ROUNDTRIP_OK
+expanded/spaces: ROUNDTRIP_OK
+plain/spaces: ROUNDTRIP_OK
+expanded/quotes: ROUNDTRIP_OK
+plain/quotes: ROUNDTRIP_OK
+FINDING: backslash mangled in expanded name field on tmux_3.4: pre-backslashed: MANGLED raw=[a\;] got=[a\\;]
+plain/pre-backslashed: ROUNDTRIP_OK
+FINDING: backslash mangled in expanded name field on tmux_3.4: lone-backslash: MANGLED raw=[a\] got=[a\\]
+plain/lone-backslash: ROUNDTRIP_OK
+FINDING: backslash mangled in expanded name field on tmux_3.4: double-backslash-semi: MANGLED raw=[a\\;] got=[a\\\\;]
+plain/double-backslash-semi: ROUNDTRIP_OK
+FINDING: backslash mangled in expanded name field on tmux_3.4: interior-backslash: MANGLED raw=[a\b;] got=[a\\b;]
+plain/interior-backslash: ROUNDTRIP_OK
+style-marker: MANGLED raw=[#[fg=red]x] encoded=[##[fg=red]x] got=[##[fg=red]x]
+FINDING: sentinel/expanded counts before=(windows=1 sessions=1) created=(windows=2 sessions=2) after=(windows=1 sessions=1) name=[x; new-window] expected=[x; new-window]
+sentinel/expanded: NO_INJECTION
+FINDING: sentinel/plain counts before=(windows=1 sessions=1) after=(windows=1 sessions=1)
+sentinel/plain: NO_INJECTION
+FINDINGS: encoder rules validated = trailing-; escape + ## doubling + reject #[ + reject \ (expanded fields only)

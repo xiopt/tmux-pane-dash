@@ -1,0 +1,19 @@
+platform: Darwin arm64
+binary: /tmp/tmux-pane-dash-compat-macos-arm64/build/tmux-3.6/install/bin/tmux
+tmux 3.6
+== spike/run_all.sh ==
+== probes/10_popup_attach.sh
+   ok
+== probes/20_notify_scope.sh
+   ok
+== probes/30_wire_framing.sh
+   ok
+== probes/40_expansion_matrix.sh
+   ok
+== probes/50_encoding_roundtrip.sh
+   ok
+== probes/60_cwd_hatch.sh
+   ok
+== probes/70_lifecycle.sh
+   ok
+RUN_ALL_STATUS: PASS

@@ -205,7 +205,8 @@ printf 'switch-client -Z -c %s -t %s\n' "$ctty" "$target" >&3
 
 switch_state=""
 for _ in {1..40}; do
-  switch_state="$(tmux_cmd "$sock2" display-message -p -c "$ctty" \
+  # `-t` accepts a client tty across the tested tmux versions.
+  switch_state="$(tmux_cmd "$sock2" display-message -p -t "$ctty" \
     '#{session_name}:#{window_index}.#{pane_index}:#{pane_id}:zoom=#{window_zoomed_flag}' 2>/dev/null || true)"
   [[ "$switch_state" == *":$target:zoom="* ]] && break
   sleep 0.05

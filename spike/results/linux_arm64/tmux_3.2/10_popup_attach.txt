@@ -1,0 +1,12 @@
+# probe: 10_popup_attach.txt  tmux: tmux 3.2  date: 2026-07-20T15:58:03Z
+VERDICT: popup-interior control attach WORKS
+FINDING: control client emitted %exit on clean stdin EOF (tmux 3.2)
+--- raw inner output ---
+%begin 1784563083 275 0
+%end 1784563083 275 0
+%session-changed $0 base
+%begin 1784563083 279 1
+PROBE:%0
+%end 1784563083 279 1
+%exit
+FINDING: display-popup multi-argument argv preserves hostile args exactly (tmux 3.2)

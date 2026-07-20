@@ -1,0 +1,23 @@
+# probe: 40_expansion_matrix.txt  tmux: tmux 3.2  date: 2026-07-20T15:49:16Z
+new-session -s: EXPANDED_OR_MANGLED got=[base
+session-]
+new-session -s: DOUBLING_OK
+new-session -n: EXPANDED_OR_MANGLED got=[window-named-window]
+new-session -n: DOUBLING_OK
+new-window -n: EXPANDED_OR_MANGLED got=[window-base]
+new-window -n: DOUBLING_OK
+CONTROL cwd readback normalization: raw=[/var/folders/wj/762h1x9j1kg4kz4rpz28h42w0000gn/T//pd_spike_cwd.WIOoA0/pd_spike_cwd_#{session_name}] physical=[/private/var/folders/wj/762h1x9j1kg4kz4rpz28h42w0000gn/T/pd_spike_cwd.WIOoA0/pd_spike_cwd_#{session_name}]
+new-window -c: EXPANDED_OR_MANGLED got=[/private/var/folders/wj/762h1x9j1kg4kz4rpz28h42w0000gn/T/pd_spike_cwd.WIOoA0/pd_spike_cwd_base]
+new-window -c: DOUBLING_OK
+split-window -c: EXPANDED_OR_MANGLED got=[/private/var/folders/wj/762h1x9j1kg4kz4rpz28h42w0000gn/T/pd_spike_cwd.WIOoA0/pd_spike_cwd_base]
+split-window -c: DOUBLING_OK
+new-session -c: EXPANDED_OR_MANGLED got=[/private/var/folders/wj/762h1x9j1kg4kz4rpz28h42w0000gn/T/pd_spike_cwd.WIOoA0/pd_spike_cwd_base]
+new-session -c: DOUBLING_OK
+CONTROL set-option -p plain readback: EXACT
+set-option -p: NOT_EXPANDED
+SECOND_OPINION set-option -p show-options -v: got=[option-#{session_name}] (display-message readback is authoritative; show-options may quote or escape)
+send-keys -l: NOT_EXPANDED
+rename-session: EXPANDED_OR_MANGLED got=[rename-base]
+rename-session: DOUBLING_OK
+rename-window: EXPANDED_OR_MANGLED got=[rename-base]
+rename-window: DOUBLING_OK

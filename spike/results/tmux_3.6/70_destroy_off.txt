@@ -1,0 +1,8 @@
+%begin 1784562651 307 0
+%end 1784562651 307 0
+%session-changed $2 base-off
+%session-changed $1 survivor
+%sessions-changed
+%unlinked-window-close @2
+%window-renamed @1 fish
+%exit
