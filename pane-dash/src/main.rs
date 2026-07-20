@@ -238,7 +238,7 @@ async fn main() -> Result<()> {
     }
 
     let mut input = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = snapshot_interval();
     let mut preview_tick = preview_interval();
     let (snapshot_tx, mut snapshots) = mpsc::unbounded_channel();
     let (preview_tx, mut preview_responses) = mpsc::unbounded_channel();
@@ -275,6 +275,7 @@ async fn main() -> Result<()> {
         &tmux,
         control.as_ref(),
         &client_tty,
+        &mut preview_tick,
         &preview_tx,
     )
     .await?;
@@ -282,15 +283,15 @@ async fn main() -> Result<()> {
         tokio::select! {
             event = input.next() => match event {
                 Some(Ok(CrosstermEvent::Key(key))) => {
-                    if apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty, &preview_tx).await? {
+                    if apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await? {
                         snapshot_generation.record_successful_mutation();
                     }
                 },
                 Some(Ok(CrosstermEvent::FocusGained)) => {
-                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(true), &tmux, control.as_ref(), &client_tty, &preview_tx).await?;
+                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(true), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
                 },
                 Some(Ok(CrosstermEvent::FocusLost)) => {
-                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(false), &tmux, control.as_ref(), &client_tty, &preview_tx).await?;
+                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(false), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
                 },
                 Some(Ok(CrosstermEvent::Resize(_, _))) => redraw(&mut terminal, &mut app)?,
                 Some(Ok(_)) => {},
@@ -307,12 +308,12 @@ async fn main() -> Result<()> {
                     &mut next_snapshot_seq, &snapshot_generation,
                     &mut in_flight_snapshot,
                 );
-                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux, control.as_ref(), &client_tty, &preview_tx).await? {
+                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await? {
                     snapshot_generation.record_successful_mutation();
                 }
             },
             _ = preview_tick.tick() => {
-                let _ = apply_event(&mut terminal, &mut app, Event::PreviewTick, &tmux, control.as_ref(), &client_tty, &preview_tx).await?;
+                let _ = apply_event(&mut terminal, &mut app, Event::PreviewTick, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
             },
             message = connection_messages.recv() => if let Some(message) = message {
                 let (kind, generation) = match &message {
@@ -410,7 +411,7 @@ async fn main() -> Result<()> {
                     &mut in_flight_snapshot,
                 );
                 if snapshot_generation.accepts(response.seq, response.mutation_generation)
-                    && apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty, &preview_tx).await?
+                    && apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?
                 {
                     snapshot_generation.record_successful_mutation();
                 }
@@ -427,6 +428,7 @@ async fn main() -> Result<()> {
                     &tmux,
                     control.as_ref(),
                     &client_tty,
+                    &mut preview_tick,
                     &preview_tx,
                 ).await?;
             },
@@ -439,6 +441,15 @@ fn preview_interval() -> tokio::time::Interval {
     let mut interval = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_millis(500),
         Duration::from_millis(500),
+    );
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    interval
+}
+
+fn snapshot_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(1),
+        Duration::from_secs(1),
     );
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval
@@ -553,6 +564,7 @@ fn sync_transport_degraded(app: &mut AppState, coordinator: &TransportCoordinato
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_event(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut AppState,
@@ -560,6 +572,7 @@ async fn apply_event(
     tmux: &TmuxExec,
     control: Option<&ControlHandle>,
     client_tty: &str,
+    preview_interval: &mut tokio::time::Interval,
     preview_tx: &mpsc::UnboundedSender<PreviewResponse>,
 ) -> Result<bool> {
     let result = reduce(app, event);
@@ -577,7 +590,13 @@ async fn apply_event(
                 }
             }
             Action::CapturePreview { sequence, pane_id } => {
-                spawn_preview_capture(preview_tx, tmux.clone(), sequence, pane_id);
+                start_preview_capture(
+                    preview_interval,
+                    preview_tx,
+                    tmux.clone(),
+                    sequence,
+                    pane_id,
+                );
             }
             Action::Quit => {}
         }
@@ -586,6 +605,17 @@ async fn apply_event(
         redraw(terminal, app)?;
     }
     Ok(mutated)
+}
+
+fn start_preview_capture(
+    preview_interval: &mut tokio::time::Interval,
+    tx: &mpsc::UnboundedSender<PreviewResponse>,
+    tmux: TmuxExec,
+    sequence: u64,
+    pane_id: pane_dash::model::PaneId,
+) {
+    preview_interval.reset();
+    spawn_preview_capture(tx, tmux, sequence, pane_id);
 }
 
 fn spawn_preview_capture(
@@ -660,7 +690,8 @@ mod tests {
         ConnectionMessageKind, ConnectionRoute, SnapshotGeneration, SnapshotInFlight,
         SnapshotSource, bench_first_frame_message, classify_connection_message,
         classify_snapshot_payload, clear_terminated_connection_state, dispatch_directives,
-        preview_interval, spawn_preview_capture, sync_transport_degraded,
+        preview_interval, snapshot_interval, spawn_preview_capture, start_preview_capture,
+        sync_transport_degraded,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pane_dash::app::{Action, AppState, Event, reduce};
@@ -852,6 +883,60 @@ mod tests {
         )
         .await;
         assert!(app.preview.error.is_some());
+    }
+
+    #[tokio::test(start_paused = true, flavor = "current_thread")]
+    async fn immediate_preview_capture_rearms_the_interval_deadline() {
+        let mut scheduler = preview_interval();
+        let dir = TempDir::new().unwrap();
+        let (tmux, log) = fake_preview_tmux(&dir);
+        let (tx, mut responses) = mpsc::unbounded_channel();
+
+        tokio::time::advance(Duration::from_millis(490)).await;
+        start_preview_capture(&mut scheduler, &tx, tmux, 1, "%1".into());
+        tokio::time::advance(Duration::from_millis(10)).await;
+        assert!(
+            tokio::time::timeout(Duration::ZERO, scheduler.tick())
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_millis(490)).await;
+        scheduler.tick().await;
+        let _ = responses.recv().await.expect("immediate capture response");
+        let log_bytes = fs::read(log).unwrap();
+        assert_eq!(
+            log_bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|entry| !entry.is_empty())
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true, flavor = "current_thread")]
+    async fn snapshot_interval_waits_one_second_and_does_not_burst_while_inspecting() {
+        let mut interval = snapshot_interval();
+        let mut app = preview_app();
+        reduce(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+        );
+        assert!(app.preview.inspect);
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert!(
+            tokio::time::timeout(Duration::ZERO, interval.tick())
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        interval.tick().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        interval.tick().await;
+        assert!(
+            tokio::time::timeout(Duration::ZERO, interval.tick())
+                .await
+                .is_err()
+        );
     }
 
     #[test]
