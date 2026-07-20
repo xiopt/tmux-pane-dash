@@ -228,6 +228,54 @@ mod actor_tests {
     }
 
     #[tokio::test]
+    async fn termination_closes_retained_handle_before_event() {
+        let dir = TempDir::new().unwrap();
+        let pid = dir.path().join("pid");
+        let blocker = dir.path().join("blocker");
+        std::process::Command::new("mkfifo")
+            .arg(&blocker)
+            .status()
+            .unwrap();
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\necho $$ > '{}'\nexec 1>&-\nIFS= read -r _ < '{}'",
+                pid.display(),
+                blocker.display()
+            ),
+        );
+        let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
+        let child_pid = marker(&pid).await;
+
+        assert!(matches!(
+            timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(ControlEvent::Terminated(_))
+        ));
+        assert!(
+            timeout(Duration::from_secs(1), handle.snapshot())
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            timeout(Duration::from_secs(1), handle.jump("/dev/ttys001", "%2"))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(events.recv().await, None);
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", child_pid.trim()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[tokio::test]
     async fn exit_fails_active_and_queued_replies() {
         let dir = TempDir::new().unwrap();
         let ready = dir.path().join("ready");
