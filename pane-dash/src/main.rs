@@ -173,8 +173,8 @@ async fn apply_event(
 
 fn redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut AppState) -> Result<()> {
     let now = now_secs();
+    app.prepare_render(now);
     terminal.draw(|frame| ui::render(frame, app, now))?;
-    app.mark_rendered(now);
     Ok(())
 }
 

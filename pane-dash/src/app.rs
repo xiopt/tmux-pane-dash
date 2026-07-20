@@ -1,7 +1,6 @@
 use std::cell::{RefCell, RefMut};
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -57,17 +56,12 @@ pub(crate) enum Focus {
 
 #[derive(Default)]
 pub(crate) struct RenderCache {
-    key: Option<RenderCacheKey>,
+    revision: Option<u64>,
     pub visible_rows: Vec<usize>,
     pub focus_indices: HashMap<Focus, usize>,
     pub status_counts: [usize; 6],
-}
-
-#[derive(PartialEq, Eq)]
-struct RenderCacheKey {
-    content_hash: u64,
-    mode: Mode,
-    collapsed: HashSet<SessionId>,
+    #[cfg(test)]
+    rebuild_count: usize,
 }
 
 pub struct AppState {
@@ -83,8 +77,10 @@ pub struct AppState {
     pub banner: Option<String>,
     focus: Option<Focus>,
     pending_key: Option<KeyCode>,
-    last_age_hash: Option<u64>,
     render_cache: RefCell<RenderCache>,
+    render_revision: u64,
+    age_deadlines: BinaryHeap<Reverse<(u64, u64)>>,
+    age_deadline_revision: Option<u64>,
 }
 
 impl AppState {
@@ -106,8 +102,10 @@ impl AppState {
             banner: None,
             focus: None,
             pending_key: None,
-            last_age_hash: None,
             render_cache: RefCell::new(RenderCache::default()),
+            render_revision: 0,
+            age_deadlines: BinaryHeap::new(),
+            age_deadline_revision: None,
         }
     }
 
@@ -127,14 +125,13 @@ impl AppState {
     }
 
     pub(crate) fn render_cache(&self) -> RefMut<'_, RenderCache> {
-        let key = RenderCacheKey {
-            content_hash: self.model.content_hash(),
-            mode: self.mode,
-            collapsed: self.collapsed.clone(),
-        };
         let mut cache = self.render_cache.borrow_mut();
-        if cache.key.as_ref() != Some(&key) {
-            cache.key = Some(key);
+        if cache.revision != Some(self.render_revision) {
+            cache.revision = Some(self.render_revision);
+            #[cfg(test)]
+            {
+                cache.rebuild_count += 1;
+            }
             cache.visible_rows.clear();
             cache.focus_indices.clear();
             cache.status_counts = [0; 6];
@@ -169,8 +166,33 @@ impl AppState {
         cache
     }
 
-    pub fn mark_rendered(&mut self, now: u64) {
-        self.last_age_hash = Some(age_hash(&self.model, self.grouped(), &self.collapsed, now));
+    pub fn prepare_render(&mut self, now: u64) {
+        let cache = self.render_cache();
+        let visible_rows = if self.age_deadline_revision != Some(self.render_revision) {
+            cache.visible_rows.clone()
+        } else {
+            Vec::new()
+        };
+        drop(cache);
+        if self.age_deadline_revision != Some(self.render_revision) {
+            self.age_deadlines = visible_rows
+                .iter()
+                .filter_map(|index| match &self.model.rows(self.grouped())[*index] {
+                    Row::Pane {
+                        status_since: Some(since),
+                        ..
+                    } => Some(Reverse((next_age_boundary(*since, now), *since))),
+                    _ => None,
+                })
+                .collect();
+            self.age_deadline_revision = Some(self.render_revision);
+        }
+    }
+
+    fn invalidate_render_cache(&mut self) {
+        self.render_revision = self.render_revision.wrapping_add(1);
+        self.age_deadlines.clear();
+        self.age_deadline_revision = None;
     }
 
     fn visible_rows(&self) -> Vec<Focus> {
@@ -213,31 +235,34 @@ pub fn reduce(state: &mut AppState, event: Event) -> ReduceResult {
 }
 
 fn reduce_tick(state: &mut AppState, now: u64) -> ReduceResult {
-    let age_hash = age_hash(&state.model, state.grouped(), &state.collapsed, now);
-    if state.last_age_hash == Some(age_hash) {
-        return ReduceResult::default();
+    let mut changed = false;
+    while let Some(Reverse((deadline, since))) = state.age_deadlines.peek().copied()
+        && deadline <= now
+    {
+        state.age_deadlines.pop();
+        state
+            .age_deadlines
+            .push(Reverse((next_age_boundary(since, now), since)));
+        changed = true;
     }
-    state.last_age_hash = Some(age_hash);
     ReduceResult {
         actions: Vec::new(),
-        changed: true,
+        changed,
     }
 }
 
-fn age_hash(model: &Model, grouped: bool, collapsed: &HashSet<SessionId>, now: u64) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for row in model.rows(grouped) {
-        if let Row::Pane {
-            session_id,
-            status_since,
-            ..
-        } = row
-            && (!grouped || !collapsed.contains(session_id))
-        {
-            format_age(*status_since, now).hash(&mut hasher);
-        }
-    }
-    hasher.finish()
+fn next_age_boundary(since: u64, now: u64) -> u64 {
+    let age = now.saturating_sub(since);
+    let unit = if age < 60 {
+        1
+    } else if age < 3_600 {
+        60
+    } else if age < 86_400 {
+        3_600
+    } else {
+        86_400
+    };
+    since.saturating_add((age / unit + 1).saturating_mul(unit))
 }
 
 pub fn format_age(status_since: Option<u64>, now: u64) -> String {
@@ -320,6 +345,7 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
             state.collapsed.clear();
             state.pending_key = None;
             state.focus = state.selection.clone().map(Focus::Pane);
+            state.invalidate_render_cache();
             result.actions.push(Action::ToggleGroup(state.grouped()));
             result.changed = true;
         }
@@ -374,6 +400,7 @@ fn set_collapsed(state: &mut AppState, collapsed: bool, result: &mut ReduceResul
             state.focus = Some(Focus::Header(header_session));
             state.sync_selection();
         }
+        state.invalidate_render_cache();
         result.changed = true;
     }
 }
@@ -419,6 +446,7 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
     }
     state.model = model;
     state.mode = mode;
+    state.invalidate_render_cache();
     state.consecutive_failures = 0;
     state.dropped_records = outcome.dropped;
     state.banner = None;
@@ -731,7 +759,7 @@ mod tests {
         let mut record = record("$a", "@a", "%a", 0);
         record.status_since = Some(999);
         let mut app = state(vec![record]);
-        app.mark_rendered(1_000);
+        app.prepare_render(1_000);
 
         assert!(!reduce(&mut app, Event::Tick { now: 1_000 }).changed);
         assert!(reduce(&mut app, Event::Tick { now: 1_001 }).changed);
@@ -743,8 +771,9 @@ mod tests {
         let mut record = record("$a", "@a", "%a", 0);
         record.status_since = Some(999);
         let mut app = state(vec![record]);
-        app.collapsed.insert(SessionId::from("$a"));
-        app.mark_rendered(1_000);
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Char('h')));
+        app.prepare_render(1_000);
 
         assert!(!reduce(&mut app, Event::Tick { now: 1_001 }).changed);
     }
@@ -760,9 +789,22 @@ mod tests {
         assert_eq!(cache.status_counts[0], 1);
         drop(cache);
 
-        app.collapsed.insert(SessionId::from("$a"));
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Char('h')));
         let cache = app.render_cache();
         assert_eq!(cache.visible_rows.len(), 3);
         assert_eq!(cache.status_counts[0], 1);
+    }
+
+    #[test]
+    fn selection_move_does_not_rebuild_the_render_cache() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        app.prepare_render(1_000);
+        let rebuilds = app.render_cache.borrow().rebuild_count;
+
+        reduce(&mut app, key(KeyCode::Char('j')));
+        app.prepare_render(1_000);
+
+        assert_eq!(app.render_cache.borrow().rebuild_count, rebuilds);
     }
 }
