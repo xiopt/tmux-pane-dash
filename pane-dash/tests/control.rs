@@ -230,6 +230,79 @@ mod actor_tests {
         assert_eq!(events.recv().await, None);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_child_exit_with_retained_handle_emits_one_termination() {
+        let dir = TempDir::new().unwrap();
+        let fake = fake_tmux(
+            &dir,
+            "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nexit 0",
+        );
+        let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
+
+        timeout(Duration::from_secs(2), async {
+            assert!(matches!(events.recv().await, Some(ControlEvent::Terminated(_))));
+            assert_eq!(events.recv().await, None);
+            assert!(handle.snapshot().await.is_err());
+        })
+        .await
+        .expect("idle child exit did not close the retained handle");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plain_eof_after_valid_response_fails_accepted_queue_uniformly() {
+        let dir = TempDir::new().unwrap();
+        let first_read = dir.path().join("first-read");
+        let release = dir.path().join("release");
+        std::process::Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .unwrap();
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\necho first > '{}'\nIFS= read -r _ < '{}'\nprintf '%s\\n' '%begin 2 2 1'\nprintf '\\036$7\\037%%1\\n'\nprintf '%s\\n' '%end 2 2 1'\nexit 0",
+                first_read.display(),
+                release.display(),
+            ),
+        );
+        let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
+        let first_handle = handle.clone();
+        let first = tokio::spawn(async move { first_handle.snapshot().await });
+        marker(&first_read).await;
+        let (polled, mut polled_requests) = tokio::sync::mpsc::unbounded_channel();
+        let queued: Vec<_> = (0..8)
+            .map(|_| {
+                let handle = handle.clone();
+                let polled = polled.clone();
+                tokio::spawn(async move {
+                    let _ = polled.send(());
+                    handle.snapshot().await
+                })
+            })
+            .collect();
+        for _ in 0..8 {
+            polled_requests.recv().await.unwrap();
+        }
+
+        timeout(Duration::from_secs(2), async {
+            fs::write(&release, "go\n").unwrap();
+            assert_eq!(first.await.unwrap().unwrap(), b"\x1e$7\x1f%1\n");
+            for request in queued {
+                assert_eq!(
+                    request.await.unwrap().unwrap_err().to_string(),
+                    "tmux control stdout closed"
+                );
+            }
+            assert_eq!(
+                events.recv().await,
+                Some(ControlEvent::Terminated("tmux control stdout closed".into()))
+            );
+            assert_eq!(events.recv().await, None);
+        })
+        .await
+        .expect("plain EOF did not settle the accepted request queue");
+    }
+
     #[tokio::test]
     async fn eof_fails_active_buffered_and_blocked_request_senders() {
         let dir = TempDir::new().unwrap();
