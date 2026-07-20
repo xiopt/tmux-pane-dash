@@ -93,6 +93,7 @@ mod tests {
         beta.session_name = "beta".into();
         beta.session_id = "$2".into();
         beta.status = "working".into();
+        beta.heartbeat = Some(1_000);
         beta.window_index = 2;
         let mut alpha_later = beta.clone();
         alpha_later.session_name = "alpha".into();
@@ -138,6 +139,26 @@ mod tests {
     }
 
     #[test]
+    fn applies_heartbeat_freshness_only_to_status_publishing_panes() {
+        let mut missing_heartbeat = record();
+        missing_heartbeat.status = "working".into();
+        let mut command_only = record();
+        command_only.pane_id = "%2".into();
+        command_only.pane_current_command = "opencode".into();
+        command_only.heartbeat = Some(1);
+        let mut tag_only = command_only.clone();
+        tag_only.pane_id = "%3".into();
+        tag_only.pane_current_command = "shell".into();
+        tag_only.tag = "keep".into();
+
+        let built = model(&[missing_heartbeat, command_only, tag_only]);
+
+        assert_eq!(built.panes[&"%1".into()].status, Status::Stale);
+        assert_eq!(built.panes[&"%2".into()].status, Status::Unknown);
+        assert_eq!(built.panes[&"%3".into()].status, Status::Unknown);
+    }
+
+    #[test]
     fn derives_grouping_from_snapshot_option() {
         for (value, expected) in [("", true), ("0", false), ("1", true), ("other", true)] {
             let mut item = record();
@@ -168,6 +189,7 @@ mod tests {
             item.pane_id = pane_id.into();
             item.status = status.into();
             item.status_since = status_since;
+            item.heartbeat = Some(1_000);
             if pane_id == "%11" || pane_id == "%12" {
                 item.heartbeat = Some(1);
             }
@@ -191,9 +213,32 @@ mod tests {
     }
 
     #[test]
+    fn caches_rows_by_mode_and_starts_a_new_cache_for_changed_content() {
+        let mut item = record();
+        item.status = "idle".into();
+        item.heartbeat = Some(1_000);
+        let built = model(&[item.clone()]);
+
+        let first_grouped = built.rows(true);
+        assert_eq!(built.row_rebuild_count(), 1);
+        assert_eq!(built.rows(true), first_grouped);
+        assert_eq!(built.row_rebuild_count(), 1);
+        built.rows(false);
+        assert_eq!(built.row_rebuild_count(), 2);
+
+        item.status = "working".into();
+        let changed = model(&[item]);
+        assert_ne!(built.content_hash, changed.content_hash);
+        assert_eq!(changed.row_rebuild_count(), 0);
+        changed.rows(true);
+        assert_eq!(changed.row_rebuild_count(), 1);
+    }
+
+    #[test]
     fn content_hash_is_stable_and_reflects_status_changes() {
         let mut item = record();
         item.status = "idle".into();
+        item.heartbeat = Some(1_000);
         let same = model(&[item.clone()]);
         let identical = model(&[item.clone()]);
         let mut changed = item;
@@ -203,6 +248,7 @@ mod tests {
         assert_ne!(same.content_hash, model(&[changed]).content_hash);
     }
 }
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -290,7 +336,7 @@ impl Default for ModelConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Model {
     pub panes: HashMap<PaneId, Pane>,
     pub sessions: HashMap<SessionId, Session>,
@@ -298,6 +344,27 @@ pub struct Model {
     pub memberships: Vec<Membership>,
     pub grouped: bool,
     pub content_hash: u64,
+    row_cache: RefCell<RowCache>,
+}
+
+impl PartialEq for Model {
+    fn eq(&self, other: &Self) -> bool {
+        self.panes == other.panes
+            && self.sessions == other.sessions
+            && self.windows == other.windows
+            && self.memberships == other.memberships
+            && self.grouped == other.grouped
+            && self.content_hash == other.content_hash
+    }
+}
+
+impl Eq for Model {}
+
+#[derive(Debug, Clone, Default)]
+struct RowCache {
+    grouped: Option<Vec<Row>>,
+    flat: Option<Vec<Row>>,
+    rebuild_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,14 +452,41 @@ impl Model {
             memberships,
             grouped,
             content_hash,
+            row_cache: RefCell::new(RowCache::default()),
         }
     }
 
     pub fn rows(&self, grouped: bool) -> Vec<Row> {
-        if grouped {
+        if let Some(rows) = self.cached_rows(grouped) {
+            return rows;
+        }
+
+        let rows = if grouped {
             self.grouped_rows()
         } else {
             self.flat_rows()
+        };
+        let mut cache = self.row_cache.borrow_mut();
+        if grouped {
+            cache.grouped = Some(rows.clone());
+        } else {
+            cache.flat = Some(rows.clone());
+        }
+        cache.rebuild_count += 1;
+        rows
+    }
+
+    #[cfg(test)]
+    fn row_rebuild_count(&self) -> usize {
+        self.row_cache.borrow().rebuild_count
+    }
+
+    fn cached_rows(&self, grouped: bool) -> Option<Vec<Row>> {
+        let cache = self.row_cache.borrow();
+        if grouped {
+            cache.grouped.clone()
+        } else {
+            cache.flat.clone()
         }
     }
 
@@ -495,9 +589,10 @@ fn derive_status(record: &RawRecord, stale_secs: u64, now: u64) -> Status {
         "unknown" => Status::Unknown,
         _ => Status::Unknown,
     };
-    if record
-        .heartbeat
-        .is_some_and(|heartbeat| now.saturating_sub(heartbeat) > stale_secs)
+    if !record.status.is_empty()
+        && record
+            .heartbeat
+            .is_none_or(|heartbeat| now.saturating_sub(heartbeat) > stale_secs)
     {
         Status::Stale
     } else {
