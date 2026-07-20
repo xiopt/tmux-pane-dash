@@ -11,8 +11,14 @@ sock="$(pd_server popup)"
 outer_pid=""
 inner="$RESULTS_DIR/10_inner.sh"
 out="$RESULTS_DIR/10_inner_out.txt"
+temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/tmux-pane-dash-popup.XXXXXX")"
+argv_inner="$temp_dir/argv_inner.sh"
+argv_out="$temp_dir/argv_out.txt"
+argv_expected="$temp_dir/argv_expected.txt"
+argv_form_passed=0
 
 cleanup() {
+  rm -rf "$temp_dir"
   TMUX='' pd_kill_server "$sock"
   if [[ -n "$outer_pid" ]]; then
     kill "$outer_pid" 2>/dev/null || true
@@ -59,6 +65,7 @@ parser_self_test || { echo "popup control-frame parser self-test failed" >&2; ex
 
 TMUX='' pd_new_server "$sock"
 : > "$out"
+: > "$argv_out"
 sid="$(TMUX='' "$TMUX_BIN" -L "$sock" display-message -p -t base '#{session_id}')"
 
 # This script is launched by display-popup, not by the outer attached client.
@@ -70,6 +77,15 @@ cat > "$inner" <<EOF
 } | TMUX='' "$TMUX_BIN" -L "$sock" -C attach-session -f no-output,ignore-size -t '$sid' > "$out" 2>&1
 EOF
 chmod +x "$inner"
+
+# This script receives argv directly from display-popup's multi-argument
+# launcher form. Its output verifies that tmux does not route these values
+# through a shell or expand their format-looking contents.
+cat > "$argv_inner" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$argv_out"
+EOF
+chmod +x "$argv_inner"
 
 # display-popup must target a real attached client. BSD script supplies its PTY.
 { sleep 8; } | TMUX='' script -q /dev/null "$TMUX_BIN" -L "$sock" attach-session -t base \
@@ -114,4 +130,31 @@ fi
 pd_record "$A" "--- raw inner output ---"
 cat "$out" >> "$(pd_artifact "$A")"
 
-grep -q 'VERDICT: popup-interior control attach WORKS' "$(pd_artifact "$A")"
+arg_space='value with spaces'
+arg_format='#{session_name}'
+arg_quotes=$'quotes: "double" and \'single\''
+printf '%s\n' "$arg_space" "$arg_format" "$arg_quotes" > "$argv_expected"
+
+TMUX='' "$TMUX_BIN" -L "$sock" display-popup -c "$client_tty" -E \
+  "$argv_inner" "$arg_space" "$arg_format" "$arg_quotes" || true
+
+for _ in {1..20}; do
+  if cmp -s "$argv_expected" "$argv_out"; then
+    argv_form_passed=1
+    break
+  fi
+  sleep 0.1
+done
+
+if (( argv_form_passed )); then
+  pd_record "$A" "FINDING: display-popup multi-argument argv preserves hostile args exactly ($tmux_version)"
+else
+  pd_record "$A" "FINDING: display-popup multi-argument argv FAILED to preserve hostile args ($tmux_version)"
+  pd_record "$A" "--- expected popup argv ---"
+  cat "$argv_expected" >> "$(pd_artifact "$A")"
+  pd_record "$A" "--- actual popup argv ---"
+  cat "$argv_out" >> "$(pd_artifact "$A")"
+fi
+
+grep -q 'VERDICT: popup-interior control attach WORKS' "$(pd_artifact "$A")" &&
+  (( argv_form_passed == 1 ))
