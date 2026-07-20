@@ -34,6 +34,7 @@ pub enum SnapshotCompletion {
 #[derive(Debug)]
 pub struct TransportCoordinator {
     mode: TransportMode,
+    connection_attempts: u8,
     reconnect_consumed: bool,
     snapshot_in_flight: bool,
     follow_up_snapshot: bool,
@@ -46,6 +47,7 @@ impl TransportCoordinator {
         (
             Self {
                 mode: TransportMode::Connecting,
+                connection_attempts: 1,
                 reconnect_consumed: false,
                 snapshot_in_flight: false,
                 follow_up_snapshot: false,
@@ -78,6 +80,7 @@ impl TransportCoordinator {
             TransportInput::Connected => {
                 if self.mode == TransportMode::Connecting {
                     self.mode = TransportMode::Healthy;
+                    self.connection_attempts = 0;
                 }
                 Vec::new()
             }
@@ -85,14 +88,14 @@ impl TransportCoordinator {
                 if self.mode != TransportMode::Connecting {
                     return Vec::new();
                 }
-                self.retry_or_degrade()
+                self.connection_failed()
             }
             TransportInput::ChannelEnded => {
                 if self.mode != TransportMode::Healthy {
                     return Vec::new();
                 }
                 self.clear_transient_state();
-                self.retry_or_degrade()
+                self.start_reconnect_or_degrade()
             }
         }
     }
@@ -132,7 +135,20 @@ impl TransportCoordinator {
         self.mode
     }
 
-    fn retry_or_degrade(&mut self) -> Vec<TransportDirective> {
+    fn connection_failed(&mut self) -> Vec<TransportDirective> {
+        if self.reconnect_consumed {
+            self.mode = TransportMode::Degraded;
+            Vec::new()
+        } else if self.connection_attempts < 2 {
+            self.connection_attempts = self.connection_attempts.saturating_add(1);
+            vec![TransportDirective::Connect]
+        } else {
+            self.mode = TransportMode::Degraded;
+            Vec::new()
+        }
+    }
+
+    fn start_reconnect_or_degrade(&mut self) -> Vec<TransportDirective> {
         if self.reconnect_consumed {
             self.mode = TransportMode::Degraded;
             Vec::new()
@@ -203,6 +219,44 @@ mod tests {
         assert_eq!(coordinator.mode(), TransportMode::Connecting);
         assert!(directives(&mut coordinator, TransportInput::ConnectionFailed).is_empty());
         assert_eq!(coordinator.mode(), TransportMode::Degraded);
+    }
+
+    #[test]
+    fn successful_startup_retry_preserves_the_post_healthy_reconnect_allowance() {
+        let (mut reconnect_fails, _) = TransportCoordinator::new();
+        assert_eq!(
+            directives(&mut reconnect_fails, TransportInput::ConnectionFailed),
+            vec![TransportDirective::Connect]
+        );
+        directives(&mut reconnect_fails, TransportInput::Connected);
+        assert_eq!(
+            directives(&mut reconnect_fails, TransportInput::ChannelEnded),
+            vec![TransportDirective::Connect]
+        );
+        assert!(directives(&mut reconnect_fails, TransportInput::ConnectionFailed).is_empty());
+        assert_eq!(reconnect_fails.mode(), TransportMode::Degraded);
+
+        let (mut reconnect_succeeds, _) = TransportCoordinator::new();
+        assert_eq!(
+            directives(&mut reconnect_succeeds, TransportInput::ConnectionFailed),
+            vec![TransportDirective::Connect]
+        );
+        directives(&mut reconnect_succeeds, TransportInput::Connected);
+        assert_eq!(
+            directives(&mut reconnect_succeeds, TransportInput::ChannelEnded),
+            vec![TransportDirective::Connect]
+        );
+        directives(&mut reconnect_succeeds, TransportInput::Connected);
+        assert!(directives(&mut reconnect_succeeds, TransportInput::ChannelEnded).is_empty());
+        assert_eq!(reconnect_succeeds.mode(), TransportMode::Degraded);
+
+        let (mut startup_fails_twice, _) = TransportCoordinator::new();
+        assert_eq!(
+            directives(&mut startup_fails_twice, TransportInput::ConnectionFailed),
+            vec![TransportDirective::Connect]
+        );
+        assert!(directives(&mut startup_fails_twice, TransportInput::ConnectionFailed).is_empty());
+        assert_eq!(startup_fails_twice.mode(), TransportMode::Degraded);
     }
 
     #[test]
