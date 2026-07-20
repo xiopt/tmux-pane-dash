@@ -220,7 +220,35 @@ mod tests {
             items.push(item);
         }
 
-        let built = model(&items);
+        let mut same_status_later_pane = record();
+        same_status_later_pane.pane_id = "%14".into();
+        same_status_later_pane.pane_index = 2;
+        same_status_later_pane.status = "working".into();
+        same_status_later_pane.status_since = Some(30);
+        same_status_later_pane.heartbeat = Some(1_000);
+        items.push(same_status_later_pane);
+
+        let mut same_status_other_session = record();
+        same_status_other_session.pane_id = "%13".into();
+        same_status_other_session.session_id = "$2".into();
+        same_status_other_session.session_name = "beta".into();
+        same_status_other_session.status = "working".into();
+        same_status_other_session.status_since = Some(30);
+        same_status_other_session.heartbeat = Some(1_000);
+        items.push(same_status_other_session);
+
+        let input_order = [10, 3, 13, 7, 1, 12, 5, 9, 0, 11, 4, 8, 6, 2];
+        let input: Vec<_> = input_order
+            .into_iter()
+            .map(|index| items[index].clone())
+            .collect();
+        let expected = [
+            "%1", "%2", "%3", "%4", "%5", "%14", "%13", "%6", "%7", "%8", "%9", "%10", "%11", "%12",
+        ];
+        let input_ids: Vec<_> = input.iter().map(|item| item.pane_id.clone()).collect();
+        assert_ne!(input_ids, expected);
+
+        let built = model(&input);
         let ids: Vec<_> = built
             .rows(false)
             .into_iter()
@@ -229,12 +257,7 @@ mod tests {
                 _ => unreachable!(),
             })
             .collect();
-        assert_eq!(
-            ids,
-            [
-                "%1", "%2", "%3", "%4", "%5", "%6", "%7", "%8", "%9", "%10", "%11", "%12"
-            ]
-        );
+        assert_eq!(ids, expected);
     }
 
     #[test]
