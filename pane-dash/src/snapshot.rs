@@ -36,15 +36,37 @@ pub fn parse(bytes: &[u8]) -> ParseOutcome {
     };
 
     let mut outcome = ParseOutcome::default();
-    for record in bytes[first_record + 1..].split(|byte| *byte == RS) {
-        let record = record.strip_suffix(b"\n").unwrap_or(record);
-        match parse_record(record) {
-            Some(record) => outcome.records.push(record),
-            None => outcome.dropped += 1,
+    let mut open_record = None;
+    let response = bytes[first_record..]
+        .strip_suffix(b"\n")
+        .unwrap_or(&bytes[first_record..]);
+    for line in response.split(|byte| *byte == b'\n') {
+        if line.starts_with(&[RS]) {
+            for record in line[1..].split(|byte| *byte == RS) {
+                flush_record(&mut outcome, open_record.take());
+                open_record = Some((record, false));
+            }
+        } else if let Some((_, invalid)) = open_record.as_mut() {
+            *invalid = true;
         }
     }
+    flush_record(&mut outcome, open_record);
 
     outcome
+}
+
+fn flush_record(outcome: &mut ParseOutcome, record: Option<(&[u8], bool)>) {
+    let Some((record, invalid)) = record else {
+        return;
+    };
+
+    if invalid {
+        outcome.dropped += 1;
+    } else if let Some(record) = parse_record(record) {
+        outcome.records.push(record);
+    } else {
+        outcome.dropped += 1;
+    }
 }
 
 fn parse_record(record: &[u8]) -> Option<RawRecord> {
@@ -187,15 +209,30 @@ mod tests {
     }
 
     #[test]
-    fn keeps_newlines_as_field_data() {
-        let mut values = fields("alpha\nbeta");
-        values[14] = b"title\ncontinued".to_vec();
+    fn drops_records_with_newline_continuations_in_any_field() {
+        let mut bytes = Vec::new();
+        for field_index in [0, 8, 17] {
+            let mut values = fields("valid");
+            values[field_index].extend(b"\ncontinuation");
+            bytes.extend(record(&values));
+            bytes.push(b'\n');
+        }
+
+        let outcome = parse(&bytes);
+
+        assert!(outcome.records.is_empty());
+        assert_eq!(outcome.dropped, 3);
+    }
+
+    #[test]
+    fn drops_notification_looking_continuation_lines() {
+        let mut values = fields("valid");
+        values[8] = b"command\n%window-add @9".to_vec();
 
         let outcome = parse(&record(&values));
 
-        assert_eq!(outcome.dropped, 0);
-        assert_eq!(outcome.records[0].session_name, "alpha\nbeta");
-        assert_eq!(outcome.records[0].title, "title\ncontinued");
+        assert!(outcome.records.is_empty());
+        assert_eq!(outcome.dropped, 1);
     }
 
     #[test]
