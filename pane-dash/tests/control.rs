@@ -22,8 +22,10 @@ mod actor_tests {
     async fn marker(path: &Path) -> String {
         timeout(Duration::from_secs(2), async {
             loop {
-                if path.exists() {
-                    return fs::read_to_string(path).unwrap();
+                if let Ok(contents) = fs::read_to_string(path)
+                    && !contents.is_empty()
+                {
+                    return contents;
                 }
                 tokio::task::yield_now().await;
             }
@@ -244,7 +246,10 @@ mod actor_tests {
         let _server = Server(socket.clone());
         let bin_dir = TempDir::new().unwrap();
         let tmux_bin = fake_tmux(&bin_dir, &format!("exec tmux -L '{}' \"$@\"", socket));
-        tmux(&socket, &["new-session", "-d", "-s", "first"]);
+        tmux(
+            &socket,
+            &["-f", "/dev/null", "new-session", "-d", "-s", "first"],
+        );
         tmux(&socket, &["new-session", "-d", "-s", "second"]);
         let first_id = tmux(
             &socket,
