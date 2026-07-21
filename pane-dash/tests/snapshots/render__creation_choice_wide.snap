@@ -1,0 +1,54 @@
+---
+source: tests/render.rs
+expression: "draw(&state, 160, 50)"
+---
+▾ dash (1)                                                     1 working│select a pane to preview
+  ◐ working      2m    1.2  tmp          sonnet  Task                   │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                             ┌Create──────────────────────────────────────────────────────────────┐
+                                             │split right                                                         │
+                                             │new session                                                         │
+                                             │↑↓ select | Enter choose | Esc cancel                               │
+                                             │                                                                    │
+                                             └────────────────────────────────────────────────────────────────────┘
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+working 1  1 panes  grouped | NAV

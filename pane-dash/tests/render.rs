@@ -839,6 +839,7 @@ fn creation_choice_form_and_pending_overlay_render_safely() {
     let choice = draw(&state, 80, 24);
     assert!(choice.contains("split right"));
     assert!(choice.contains("new session"));
+    insta::assert_snapshot!("creation_choice_wide", draw(&state, 160, 50));
 
     state.modal = Some(Modal::Create(CreateModal::Form(CreateForm {
         kind: CreateContext::Split {
@@ -889,6 +890,70 @@ fn creation_choice_form_and_pending_overlay_render_safely() {
 }
 
 #[test]
+fn creation_header_empty_and_flat_pending_contexts_render() {
+    let mut header = app(vec![record("dash", "%1", "working", "Task")]);
+    header.modal = Some(Modal::Create(CreateModal::Form(CreateForm {
+        kind: CreateContext::NewWindow {
+            target: "$dash".into(),
+        },
+        field: CreateField::Cwd,
+        draft: CreateDraft {
+            name: "window".into(),
+            cwd: "/tmp/project".into(),
+            command: "opencode".into(),
+        },
+        submitting: false,
+        error: None,
+        linked_session_count: 0,
+    })));
+    insta::assert_snapshot!("creation_header_new_window", draw(&header, 80, 24));
+
+    let mut empty = app(Vec::new());
+    empty.modal = Some(Modal::Create(CreateModal::Form(CreateForm {
+        kind: CreateContext::NewSession,
+        field: CreateField::Name,
+        draft: CreateDraft {
+            name: "new-session".into(),
+            cwd: String::new(),
+            command: String::new(),
+        },
+        submitting: false,
+        error: None,
+        linked_session_count: 0,
+    })));
+    insta::assert_snapshot!("creation_empty_new_session", draw(&empty, 80, 24));
+
+    let mut flat = app(vec![record("dash", "%1", "working", "Task")]);
+    flat.mode = Mode::Flat;
+    flat.pending_creation = Some(PendingCreation {
+        id: CreationId(11),
+        initiating_session: None,
+        state: PendingCreationState::Creating,
+    });
+    let rendered = draw_at(&flat, 80, 24, 1_000);
+    assert!(rendered.contains("creating..."));
+    insta::assert_snapshot!("creation_pending_flat", rendered);
+}
+
+#[test]
+fn creation_form_overflow_scrolls_rows_vertically() {
+    let mut state = app(Vec::new());
+    state.modal = Some(Modal::Create(CreateModal::Form(CreateForm {
+        kind: CreateContext::NewSession,
+        field: CreateField::Name,
+        draft: CreateDraft {
+            name: "session".into(),
+            cwd: "/tmp".into(),
+            command: "opencode".into(),
+        },
+        submitting: false,
+        error: None,
+        linked_session_count: 0,
+    })));
+    assert!(draw(&state, 20, 4).contains("command:"));
+}
+
+#[test]
 fn creation_pending_stages_and_modal_sizes_are_deterministic() {
     let mut state = app(Vec::new());
     state.pending_creation = Some(PendingCreation {
@@ -899,6 +964,9 @@ fn creation_pending_stages_and_modal_sizes_are_deterministic() {
     let stages = [
         PendingCreationState::Creating,
         PendingCreationState::Created {
+            pane_id: "%9".into(),
+        },
+        PendingCreationState::Tagging {
             pane_id: "%9".into(),
         },
         PendingCreationState::Sending {
@@ -962,7 +1030,9 @@ fn creation_pending_stages_and_modal_sizes_are_deterministic() {
         linked_session_count: 0,
     })));
     insta::assert_snapshot!("creation_form_wide", draw(&state, 160, 50));
-    insta::assert_snapshot!("creation_form_narrow", draw(&state, 20, 4));
+    let narrow = draw(&state, 20, 4);
+    assert!(narrow.contains("command:"));
+    insta::assert_snapshot!("creation_form_narrow", narrow);
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { draw(&state, 0, 0) })).is_ok()
     );

@@ -1,8 +1,8 @@
 ---
 source: tests/render.rs
-expression: "draw(&state, 20, 4)"
+expression: narrow
 ---
 ┌Create session────┐
-│me: 東 京 é␛東 京 é␛  │
-│d: /tmp           │
+│command: echo 東 京 │
+│Tab/↑↓ field | Ent│
 └──────────────────┘

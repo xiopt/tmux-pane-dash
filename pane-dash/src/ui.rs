@@ -357,7 +357,7 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
         Style::default().fg(palette::DIM),
     ));
     let scroll = lines.len().saturating_sub(inner.height as usize) as u16;
-    frame.render_widget(Paragraph::new(lines).scroll((0, scroll)), inner);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
 fn pending_line(pending: &crate::app::PendingCreation, now: u64, width: u16) -> Line<'static> {

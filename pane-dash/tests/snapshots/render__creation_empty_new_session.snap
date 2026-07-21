@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: "draw(&empty, 80, 24)"
+---
+
+
+
+
+
+                             no opencode panes found
+
+     ┌Create session──────────────────────────────────────────────────────┐
+     │name: new-session                                                   │
+     │cwd:                                                                │
+─────│command:                                                            │─────
+selec│Tab/↑↓ field | Enter submit | Esc cancel                            │
+     │                                                                    │
+     │                                                                    │
+     │                                                                    │
+     │                                                                    │
+     └────────────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+0 panes  grouped | NAV

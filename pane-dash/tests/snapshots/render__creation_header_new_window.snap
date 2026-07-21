@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: "draw(&header, 80, 24)"
+---
+▾ dash (1)                                                             1 working
+  ◐ working      2m    1.2  tmp          sonnet  Task
+
+
+
+
+
+     ┌Create window───────────────────────────────────────────────────────┐
+     │name: window                                                        │
+     │cwd: /tmp/project                                                   │
+─────│command: opencode                                                   │─────
+selec│Tab/↑↓ field | Enter submit | Esc cancel                            │
+     │                                                                    │
+     │                                                                    │
+     │                                                                    │
+     │                                                                    │
+     └────────────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+working 1  1 panes  grouped | NAV
