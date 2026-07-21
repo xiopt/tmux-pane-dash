@@ -29,7 +29,18 @@ T -f /dev/null new-session -d -s alpha -x 120 -y 30
 
 pane="$(T display-message -p -t alpha '#{pane_id}')"
 
-# 1. pane options: set, read via display-message format, unset
+# 1. Plugin setup keeps user terminal features and owns one stable focus entry.
+T set-option -s 'terminal-features[7]' 'user*:RGB'
+T run-shell "$ROOT/pane_dash.tmux"
+T run-shell "$ROOT/pane_dash.tmux"
+terminal_features="$(T show-options -s terminal-features)"
+[ "$(printf '%s\n' "$terminal_features" | grep -Fxc 'terminal-features[31337] *:focus')" = "1" ] \
+  || fail "plugin focus terminal feature count"
+printf '%s\n' "$terminal_features" | grep -Fxq 'terminal-features[7] user*:RGB' \
+  || fail "plugin replaced user terminal feature"
+pass "plugin terminal features are indexed and idempotent"
+
+# 2. pane options: set, read via display-message format, unset
 T set-option -p -t "$pane" @pane_dash_status working
 [ "$(T display-message -p -t "$pane" '#{@pane_dash_status}')" = "working" ] \
   || fail "pane option roundtrip"
@@ -38,7 +49,7 @@ T set-option -pu -t "$pane" @pane_dash_status
   || fail "pane option unset"
 pass "pane user options"
 
-# 2. list.sh against the real server: default grouping emits a session header and child row
+# 3. list.sh against the real server: default grouping emits a session header and child row
 T set-option -p -t "$pane" @pane_dash_tag itest
 row="$(TMUX='' PATH="$PATH" bash -c "cd '$ROOT' && tmux() { command tmux -L '$SOCK' \"\$@\"; }; export -f tmux; scripts/list.sh")"
 [ "$(printf '%s\n' "$row" | wc -l | tr -d ' ')" = "2" ] || fail "list.sh grouped row count"
@@ -46,14 +57,14 @@ printf '%s\n' "$row" | sed -n '1p' | grep -Eq '^\$[0-9]+\t' || fail "list.sh ses
 printf '%s\n' "$row" | sed -n '2p' | grep -q "^$pane	" || fail "list.sh pane id field"
 pass "list.sh against real server"
 
-# 3. capture: normal vs alternate screen
+# 4. capture: normal vs alternate screen
 T send-keys -t "$pane" 'printf NORMALMARKER; sleep 0.2' Enter
 sleep 1
 T capture-pane -ep -t "$pane" | grep -q NORMALMARKER || fail "normal capture"
 [ "$(T display-message -p -t "$pane" '#{alternate_on}')" = "0" ] || fail "alternate_on flag 0"
 pass "capture normal screen"
 
-# 4. switch-client requires a client. A script(1)-backed PTY is not reliable
+# 5. switch-client requires a client. A script(1)-backed PTY is not reliable
 #    here because this non-interactive test runner closes its stdin, so assert
 #    tmux's documented detached-server failure precisely instead.
 # Use an unconfigured shell so this timing gate measures tmux delivery, not
@@ -70,7 +81,7 @@ case "$switch_error" in
 esac
 pass "switch-client detached failure"
 
-# 5. send-keys -l literal: C-c must arrive as text, not as a key
+# 6. send-keys -l literal: C-c must arrive as text, not as a key
 T send-keys -t "$pane_b" cat Enter
 wait_for "cat did not start" "$pane_b" pane_has_command "$pane_b" cat
 T send-keys -l -t "$pane_b" -- 'C-c'

@@ -23,11 +23,7 @@ tmux set-hook -g 'client-focus-in[31337]' 'set-option -gF "@pane_dash_focus_#{ho
 tmux set-hook -g 'client-focus-out[31337]' 'set-option -gF "@pane_dash_focus_#{hook_client}" "0"'
 
 tmux set-option -g focus-events on
-terminal_features="$(tmux show-options -sv terminal-features 2>/dev/null || true)"
-case ",$terminal_features," in
-  *',*:focus,'*) ;;
-  *) tmux set-option -as terminal-features ',*:focus' ;;
-esac
+tmux set-option -s 'terminal-features[31337]' '*:focus'
 
 if [ "$engine" = rust ]; then
   binary="$DIR/bin/pane-dash"

@@ -136,34 +136,37 @@ assert_notification() {
   [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[31337]")" = 'set-option -gF "@pane_dash_focus_#{hook_client}" "1"' ]
 }
 
-@test "default focus setup enables both tmux focus options" {
+@test "default focus setup enables focus events and a stable server feature index" {
   run "$SCRIPT"
 
   [ "$status" -eq 0 ]
   assert_call 3 set-option -g focus-events on
-  assert_call 4 set-option -as terminal-features ',*:focus'
+  assert_call 4 set-option -s 'terminal-features[31337]' '*:focus'
   [ "$(<"$TMUX_STUB_DIR/global/focus-events")" = on ]
-  [ "$(<"$TMUX_STUB_DIR/global/terminal-features")" = ',*:focus' ]
+  [ "$(<"$TMUX_STUB_DIR/server-options/terminal-features/31337")" = '*:focus' ]
 }
 
-@test "enables focus delivery idempotently without replacing user hooks or terminal features" {
+@test "enables focus delivery idempotently without replacing user hooks or indexed terminal features" {
   mkdir -p "$TMUX_STUB_DIR/hooks"
   printf '%s' 'display-message user-focus-hook' > "$TMUX_STUB_DIR/hooks/client-focus-in[0]"
-  printf '%s' 'screen*:RGB' > "$TMUX_STUB_DIR/global/terminal-features"
+  mkdir -p "$TMUX_STUB_DIR/server-options/terminal-features"
+  printf '%s' 'screen*:RGB' > "$TMUX_STUB_DIR/server-options/terminal-features/7"
 
   run "$SCRIPT"
 
   [ "$status" -eq 0 ]
   assert_call 3 set-option -g focus-events on
-  assert_call 4 set-option -as terminal-features ',*:focus'
+  assert_call 4 set-option -s 'terminal-features[31337]' '*:focus'
   [ "$(<"$TMUX_STUB_DIR/global/focus-events")" = on ]
-  [ "$(<"$TMUX_STUB_DIR/global/terminal-features")" = 'screen*:RGB,*:focus' ]
+  [ "$(<"$TMUX_STUB_DIR/server-options/terminal-features/7")" = 'screen*:RGB' ]
+  [ "$(<"$TMUX_STUB_DIR/server-options/terminal-features/31337")" = '*:focus' ]
   [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[0]")" = 'display-message user-focus-hook' ]
 
   run "$SCRIPT"
 
   [ "$status" -eq 0 ]
-  [ "$(grep -oF '*:focus' "$TMUX_STUB_DIR/global/terminal-features" | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(find "$TMUX_STUB_DIR/server-options/terminal-features" -type f -exec grep -lFx '*:focus' {} + | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(<"$TMUX_STUB_DIR/server-options/terminal-features/7")" = 'screen*:RGB' ]
   [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[0]")" = 'display-message user-focus-hook' ]
 }
 

@@ -3,6 +3,7 @@
 # Data layout under $TMUX_STUB_DIR:
 #   panes                      one pane id per line (%0, %1, ...)
 #   global/<option-name>       value of a global option (show-option -gqv)
+#   server-options/<name>/<i>  indexed server option entries (show-options -s)
 #   panes.d/<pane>/<key>       value for format '#{key}' (display-message -p -t)
 # Mutations are appended to calls.log as unit-separator-delimited argv records.
 # Query invocations are kept in invocations.log; notifications are separate.
@@ -44,12 +45,18 @@ case "$cmd" in
       done
       printf '%s%s\n' "$rendered" "$rest"
     done < "$TMUX_STUB_DIR/panes" ;;
-  show-option | show-options) # show-option(s) -gqv <name> | show-options -sv <name> | show-option -pqv -t <pane> <name>
+  show-option | show-options) # show-option -gqv <name> | show-options -s <name> | show-option -pqv -t <pane> <name>
     log_args invocations.log "$@"
     if [ "$2" = "-gqv" ]; then
       cat "$TMUX_STUB_DIR/global/$3" 2>/dev/null || true
-    elif [ "$2" = "-sv" ]; then
-      cat "$TMUX_STUB_DIR/global/$3" 2>/dev/null || true
+    elif [ "$2" = "-s" ]; then
+      option_dir="$TMUX_STUB_DIR/server-options/$3"
+      if [ -d "$option_dir" ]; then
+        for entry in "$option_dir"/*; do
+          [ -f "$entry" ] || continue
+          printf '%s[%s] %s\n' "$3" "$(basename "$entry")" "$(<"$entry")"
+        done
+      fi
     else                     # -pqv -t <pane> <name>
       cat "$TMUX_STUB_DIR/panes.d/$4/$5" 2>/dev/null || true
     fi ;;
@@ -79,6 +86,12 @@ case "$cmd" in
         mkdir -p "$(dirname "$TMUX_STUB_DIR/global/$3")"
         current="$(cat "$TMUX_STUB_DIR/global/$3" 2>/dev/null || true)"
         printf '%s%s' "$current" "$4" > "$TMUX_STUB_DIR/global/$3" ;;
+      -s)
+        option="${3%%\[*}"
+        index="${3#*\[}"
+        index="${index%\]}"
+        mkdir -p "$TMUX_STUB_DIR/server-options/$option"
+        printf '%s' "$4" > "$TMUX_STUB_DIR/server-options/$option/$index" ;;
     esac ;;
   *)
     log_args calls.log "$@" ;;
