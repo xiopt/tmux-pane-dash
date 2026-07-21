@@ -1605,7 +1605,22 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
     let old_visible = state.visible_rows();
     let old_focus = state.focus.clone();
     let dropped_changed = state.dropped_records != outcome.dropped;
-    let model = Model::build(&outcome.records, &state.model_config(), observed_at);
+    let awaiting_snapshot = matches!(
+        state
+            .pending_creation
+            .as_ref()
+            .map(|pending| &pending.state),
+        Some(PendingCreationState::AwaitingSnapshot { .. })
+    );
+    let canonical = Model::build(&outcome.records, &state.model_config(), observed_at);
+    let selection = reconcile_snapshot_presence(state, &outcome, &canonical);
+    let creation_resolved = awaiting_snapshot && state.pending_creation.is_none();
+    let model = Model::build_with_ephemeral(
+        &outcome.records,
+        &state.model_config(),
+        observed_at,
+        &state.ephemeral_panes,
+    );
     let mode = if model.grouped() {
         Mode::Grouped
     } else {
@@ -1616,6 +1631,8 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
         && mode == state.mode
         && !recovered
         && !dropped_changed
+        && selection.is_none()
+        && !creation_resolved
     {
         return ReduceResult::default();
     }
@@ -1624,27 +1641,165 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
     state.invalidate_render_cache();
     state.consecutive_failures = 0;
     state.dropped_records = outcome.dropped;
-    state.banner = None;
+    if !creation_resolved {
+        state.banner = None;
+    }
     state
         .collapsed
         .retain(|session_id| state.model.sessions().contains_key(session_id));
-    let visible = state.visible_rows();
-    state.focus = old_focus
-        .clone()
-        .filter(|focus| visible.contains(focus))
-        .or_else(|| {
-            let old_index =
-                old_focus.and_then(|focus| old_visible.iter().position(|row| row == &focus))?;
-            visible
-                .get(old_index)
-                .cloned()
-                .or_else(|| visible.last().cloned())
-        })
-        .or_else(|| visible.first().cloned());
+    if let Some((initiating_session, pane_id)) = selection {
+        state.filter_query.clear();
+        state.input_mode = InputMode::Navigation;
+        if let Some(session_id) = initiating_session.as_ref() {
+            state.collapsed.remove(session_id);
+        }
+        state.focus = selection_focus(&state.model, initiating_session.as_ref(), &pane_id);
+    } else {
+        let visible = state.visible_rows();
+        state.focus = old_focus
+            .clone()
+            .filter(|focus| visible.contains(focus))
+            .or_else(|| {
+                let old_index =
+                    old_focus.and_then(|focus| old_visible.iter().position(|row| row == &focus))?;
+                visible
+                    .get(old_index)
+                    .cloned()
+                    .or_else(|| visible.last().cloned())
+            })
+            .or_else(|| visible.first().cloned());
+    }
     state.sync_selection();
     ReduceResult {
         actions: Vec::new(),
         changed: true,
+    }
+}
+
+fn reconcile_snapshot_presence(
+    state: &mut AppState,
+    outcome: &ParseOutcome,
+    canonical: &Model,
+) -> Option<(Option<SessionId>, PaneId)> {
+    state.ephemeral_panes.retain(|pane_id| {
+        let raw_present = outcome.raw_panes.contains(&pane_id.0);
+        let records: Vec<_> = outcome
+            .records
+            .iter()
+            .filter(|record| record.pane_id == pane_id.0)
+            .collect();
+        if records.iter().any(|record| !record.pane_dead) {
+            return !canonical.panes().contains_key(pane_id);
+        }
+        if raw_present {
+            return false;
+        }
+        outcome.dropped != 0
+    });
+
+    let pending = state.pending_creation.clone()?;
+    let PendingCreationState::AwaitingSnapshot {
+        pane_id,
+        resolution,
+    } = pending.state
+    else {
+        return None;
+    };
+    let records: Vec<_> = outcome
+        .records
+        .iter()
+        .filter(|record| record.pane_id == pane_id.0)
+        .collect();
+    let live = records.iter().any(|record| !record.pane_dead);
+    let known_dead = records.iter().any(|record| record.pane_dead);
+
+    if live {
+        if matches!(resolution, CreationResolution::TagFailed(_))
+            && !canonical.panes().contains_key(&pane_id)
+        {
+            state.ephemeral_panes.insert(pane_id.clone());
+        }
+        state.pending_creation = None;
+        state.banner = creation_snapshot_banner(&pane_id, &resolution, false);
+        return Some((pending.initiating_session, pane_id));
+    }
+    if known_dead || (!outcome.raw_panes.contains(&pane_id.0) && outcome.dropped == 0) {
+        state.ephemeral_panes.remove(&pane_id);
+        state.pending_creation = None;
+        state.banner = creation_snapshot_banner(&pane_id, &resolution, true);
+    }
+    None
+}
+
+fn selection_focus(
+    model: &Model,
+    initiating_session: Option<&SessionId>,
+    pane_id: &PaneId,
+) -> Option<Focus> {
+    let memberships: Vec<_> = model
+        .memberships()
+        .iter()
+        .filter(|membership| membership.pane_id == *pane_id)
+        .collect();
+    let membership = initiating_session
+        .and_then(|session_id| {
+            memberships
+                .iter()
+                .find(|membership| membership.session_id == *session_id)
+        })
+        .or_else(|| memberships.first())?;
+    Some(Focus::Pane((
+        membership.session_id.clone(),
+        membership.window_id.clone(),
+        membership.pane_id.clone(),
+    )))
+}
+
+fn creation_snapshot_banner(
+    pane_id: &PaneId,
+    resolution: &CreationResolution,
+    gone: bool,
+) -> Option<String> {
+    if gone {
+        return Some(match resolution {
+            CreationResolution::Success | CreationResolution::TagFailed(_) => {
+                "pane exited before tagging".to_owned()
+            }
+            CreationResolution::CommandFailed { stage, .. }
+            | CreationResolution::TimedOut { stage } => {
+                format!(
+                    "pane {} exited before {}",
+                    pane_id.0,
+                    creation_stage_name(*stage)
+                )
+            }
+        });
+    }
+    match resolution {
+        CreationResolution::Success => None,
+        CreationResolution::TagFailed(error) => Some(format!(
+            "pane {} created, tagging failed: {error}",
+            pane_id.0
+        )),
+        CreationResolution::CommandFailed { stage, error } => Some(format!(
+            "pane {} created, {} failed: {error}",
+            pane_id.0,
+            creation_stage_name(*stage)
+        )),
+        CreationResolution::TimedOut { stage } => Some(format!(
+            "pane {} created, {} timed out",
+            pane_id.0,
+            creation_stage_name(*stage)
+        )),
+    }
+}
+
+fn creation_stage_name(stage: CreateStage) -> &'static str {
+    match stage {
+        CreateStage::Create => "creation",
+        CreateStage::Tag => "tagging",
+        CreateStage::SendCommand => "command send",
+        CreateStage::SendEnter => "Enter",
     }
 }
 
@@ -2662,11 +2817,219 @@ mod tests {
     fn snapshot(records: Vec<RawRecord>, observed_at: u64) -> Event {
         Event::Snapshot {
             outcome: ParseOutcome {
+                raw_panes: records
+                    .iter()
+                    .map(|record| record.pane_id.clone())
+                    .collect(),
                 records,
                 dropped: 0,
             },
             observed_at,
         }
+    }
+
+    #[test]
+    fn tag_failure_reconciles_live_undiscovered_pane_as_ephemeral_in_initiating_membership() {
+        let mut app = state(vec![record("$other", "@other", "%other", 0)]);
+        app.pending_creation = Some(PendingCreation {
+            id: CreationId(1),
+            initiating_session: Some("$start".into()),
+            state: PendingCreationState::AwaitingSnapshot {
+                pane_id: "%new".into(),
+                resolution: CreationResolution::TagFailed("tag bad".into()),
+            },
+        });
+        let mut created = record("$start", "@start", "%new", 1);
+        created.pane_current_command = "shell".into();
+        created.status.clear();
+        created.tag.clear();
+
+        let result = reduce(&mut app, snapshot(vec![created], 11));
+
+        assert!(result.changed);
+        assert!(app.pending_creation.is_none());
+        assert!(app.ephemeral_panes.contains(&PaneId::from("%new")));
+        assert!(app.model.panes().contains_key(&PaneId::from("%new")));
+        assert_eq!(
+            app.focus(),
+            Some(&Focus::Pane((
+                SessionId::from("$start"),
+                WindowId::from("@start"),
+                PaneId::from("%new"),
+            )))
+        );
+        assert_eq!(
+            app.banner.as_deref(),
+            Some("pane %new created, tagging failed: tag bad")
+        );
+    }
+
+    #[test]
+    fn ephemeral_created_pane_is_pruned_by_the_next_trustworthy_absent_snapshot() {
+        let mut app = state(Vec::new());
+        app.ephemeral_panes.insert(PaneId::from("%new"));
+        let mut created = record("$start", "@start", "%new", 0);
+        created.pane_current_command = "shell".into();
+        created.status.clear();
+        created.tag.clear();
+        reduce(&mut app, snapshot(vec![created], 11));
+        assert!(app.model.panes().contains_key(&PaneId::from("%new")));
+
+        reduce(&mut app, snapshot(Vec::new(), 12));
+
+        assert!(!app.ephemeral_panes.contains(&PaneId::from("%new")));
+        assert!(!app.model.panes().contains_key(&PaneId::from("%new")));
+    }
+
+    #[test]
+    fn discovered_created_pane_selects_the_initiating_link_without_ephemeral_membership() {
+        let mut app = state(Vec::new());
+        app.pending_creation = Some(PendingCreation {
+            id: CreationId(1),
+            initiating_session: Some("$start".into()),
+            state: PendingCreationState::AwaitingSnapshot {
+                pane_id: "%new".into(),
+                resolution: CreationResolution::Success,
+            },
+        });
+        let mut other = record("$other", "@other", "%new", 0);
+        other.tag = "dash-created".into();
+        let mut initiator = other.clone();
+        initiator.session_id = "$start".into();
+        initiator.window_id = "@start".into();
+
+        reduce(&mut app, snapshot(vec![other, initiator], 11));
+
+        assert!(app.ephemeral_panes.is_empty());
+        assert_eq!(app.model.memberships().len(), 2);
+        assert_eq!(
+            app.focus(),
+            Some(&Focus::Pane((
+                SessionId::from("$start"),
+                WindowId::from("@start"),
+                PaneId::from("%new"),
+            )))
+        );
+    }
+
+    #[test]
+    fn dead_pane_after_tag_failure_clears_pending_without_ephemeral_membership() {
+        let mut app = state(Vec::new());
+        app.pending_creation = Some(PendingCreation {
+            id: CreationId(1),
+            initiating_session: Some("$start".into()),
+            state: PendingCreationState::AwaitingSnapshot {
+                pane_id: "%new".into(),
+                resolution: CreationResolution::TagFailed("tag bad".into()),
+            },
+        });
+        let mut dead = record("$start", "@start", "%new", 0);
+        dead.pane_dead = true;
+        dead.pane_current_command = "shell".into();
+        dead.status.clear();
+        dead.tag.clear();
+
+        reduce(&mut app, snapshot(vec![dead], 11));
+
+        assert!(app.pending_creation.is_none());
+        assert!(app.ephemeral_panes.is_empty());
+        assert_eq!(app.banner.as_deref(), Some("pane exited before tagging"));
+    }
+
+    #[test]
+    fn dropped_snapshot_does_not_clear_awaiting_or_ephemeral_created_pane() {
+        let mut app = state(Vec::new());
+        app.ephemeral_panes.insert(PaneId::from("%old"));
+        app.pending_creation = Some(PendingCreation {
+            id: CreationId(1),
+            initiating_session: None,
+            state: PendingCreationState::AwaitingSnapshot {
+                pane_id: "%new".into(),
+                resolution: CreationResolution::Success,
+            },
+        });
+
+        reduce(
+            &mut app,
+            Event::Snapshot {
+                outcome: ParseOutcome {
+                    records: Vec::new(),
+                    raw_panes: Default::default(),
+                    dropped: 1,
+                },
+                observed_at: 11,
+            },
+        );
+
+        assert!(app.pending_creation.is_some());
+        assert!(app.ephemeral_panes.contains(&PaneId::from("%old")));
+    }
+
+    #[test]
+    fn ephemeral_membership_invalidates_cache_and_counts_linked_pane_once() {
+        let mut app = state(Vec::new());
+        let _ = app.render_cache();
+        let initial_rebuilds = app.render_cache.borrow().rebuild_count;
+        app.ephemeral_panes.insert(PaneId::from("%new"));
+        let mut first = record("$first", "@first", "%new", 0);
+        first.pane_current_command = "shell".into();
+        first.status.clear();
+        first.tag.clear();
+        let mut linked = first.clone();
+        linked.session_id = "$second".into();
+        linked.window_id = "@second".into();
+
+        reduce(&mut app, snapshot(vec![first, linked], 11));
+        let cache = app.render_cache();
+        assert_eq!(cache.rebuild_count, initial_rebuilds + 1);
+        assert_eq!(cache.status_counts[4], 1);
+        drop(cache);
+        enter_query(&mut app, "new");
+        assert_eq!(visible_pane_ids(&app), vec!["%new", "%new"]);
+        let rebuilds_before_removal = app.render_cache.borrow().rebuild_count;
+
+        reduce(&mut app, snapshot(Vec::new(), 12));
+        let cache = app.render_cache();
+        assert_eq!(cache.rebuild_count, rebuilds_before_removal + 1);
+        assert!(cache.visible_rows.is_empty());
+    }
+
+    #[test]
+    fn successful_tag_does_not_protect_a_pane_after_ordinary_discovery_stops() {
+        let mut app = state(Vec::new());
+        app.pending_creation = Some(PendingCreation {
+            id: CreationId(1),
+            initiating_session: None,
+            state: PendingCreationState::AwaitingSnapshot {
+                pane_id: "%new".into(),
+                resolution: CreationResolution::Success,
+            },
+        });
+        let mut tagged = record("$start", "@start", "%new", 0);
+        tagged.tag = "dash-created".into();
+        reduce(&mut app, snapshot(vec![tagged.clone()], 11));
+        assert!(app.model.panes().contains_key(&PaneId::from("%new")));
+
+        tagged.tag.clear();
+        tagged.status.clear();
+        tagged.pane_current_command = "shell".into();
+        reduce(&mut app, snapshot(vec![tagged], 12));
+
+        assert!(app.ephemeral_panes.is_empty());
+        assert!(!app.model.panes().contains_key(&PaneId::from("%new")));
+    }
+
+    #[test]
+    fn repeated_ephemeral_snapshot_is_idempotent_after_initial_reconciliation() {
+        let mut app = state(Vec::new());
+        app.ephemeral_panes.insert(PaneId::from("%new"));
+        let mut created = record("$start", "@start", "%new", 0);
+        created.status.clear();
+        created.tag.clear();
+        created.pane_current_command = "shell".into();
+
+        assert!(reduce(&mut app, snapshot(vec![created.clone()], 11)).changed);
+        assert!(!reduce(&mut app, snapshot(vec![created], 12)).changed);
     }
 
     #[test]

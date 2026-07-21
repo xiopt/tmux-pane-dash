@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::{Model, ModelConfig, Row, Status};
     use crate::snapshot::RawRecord;
 
@@ -85,6 +87,33 @@ mod tests {
         assert_eq!(built.panes().len(), 1);
         assert_eq!(built.memberships().len(), 2);
         assert_eq!(built.panes()[&"%1".into()].title, "newest");
+    }
+
+    #[test]
+    fn includes_only_requested_live_undiscovered_panes_without_fabricating_tags() {
+        let mut raw = record();
+        raw.pane_id = "%created".into();
+        raw.tag.clear();
+        raw.status.clear();
+        raw.pane_current_command = "shell".into();
+        let mut linked = raw.clone();
+        linked.session_id = "$2".into();
+        linked.window_id = "@2".into();
+        let mut dead = raw.clone();
+        dead.pane_id = "%dead".into();
+        dead.pane_dead = true;
+
+        let built = Model::build_with_ephemeral(
+            &[raw, linked, dead],
+            &ModelConfig::default(),
+            1_000,
+            &HashSet::from(["%created".into(), "%dead".into()]),
+        );
+
+        assert_eq!(built.panes().len(), 1);
+        assert_eq!(built.memberships().len(), 2);
+        assert_eq!(built.panes()[&"%created".into()].tag, "");
+        assert!(!built.panes().contains_key(&"%dead".into()));
     }
 
     #[test]
@@ -303,8 +332,8 @@ mod tests {
     }
 }
 use std::cell::{Cell, OnceCell};
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use crate::snapshot::RawRecord;
@@ -449,13 +478,25 @@ pub enum Row {
 
 impl Model {
     pub fn build(records: &[RawRecord], cfg: &ModelConfig, now: u64) -> Self {
+        Self::build_with_ephemeral(records, cfg, now, &HashSet::new())
+    }
+
+    pub fn build_with_ephemeral(
+        records: &[RawRecord],
+        cfg: &ModelConfig,
+        now: u64,
+        ephemeral: &HashSet<PaneId>,
+    ) -> Self {
         let grouped = !records.iter().any(|record| record.group == "0");
         let mut panes = HashMap::new();
         let mut sessions = HashMap::new();
         let mut windows = HashMap::new();
         let mut memberships = Vec::new();
 
-        for record in records.iter().filter(|record| is_discovered(record, cfg)) {
+        for record in records.iter().filter(|record| {
+            is_discovered(record, cfg)
+                || (!record.pane_dead && ephemeral.contains(&PaneId(record.pane_id.clone())))
+        }) {
             let session_id = SessionId(record.session_id.clone());
             let window_id = WindowId(record.window_id.clone());
             let pane_id = PaneId(record.pane_id.clone());

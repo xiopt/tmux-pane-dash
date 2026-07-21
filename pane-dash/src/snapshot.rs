@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 const RS: u8 = 0x1e;
 const US: u8 = 0x1f;
 const FIELD_COUNT: usize = 18;
@@ -27,6 +29,7 @@ pub struct RawRecord {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ParseOutcome {
     pub records: Vec<RawRecord>,
+    pub raw_panes: HashSet<String>,
     pub dropped: usize,
 }
 
@@ -57,6 +60,7 @@ fn flush_record(outcome: &mut ParseOutcome, record: Option<(&[u8], bool)>) {
     if invalid {
         outcome.dropped += 1;
     } else if let Some(record) = parse_record(record) {
+        outcome.raw_panes.insert(record.pane_id.clone());
         outcome.records.push(record);
     } else {
         outcome.dropped += 1;
@@ -180,6 +184,32 @@ mod tests {
         assert!(!outcome.records[2].pane_dead);
         assert_eq!(outcome.records[2].status_since, Some(1_700_000_000));
         assert_eq!(outcome.records[2].heartbeat, Some(1_700_000_001));
+    }
+
+    #[test]
+    fn tracks_every_semantically_valid_raw_pane_before_discovery_filtering() {
+        let mut undiscovered = fields("undiscovered");
+        undiscovered[5] = b"%undiscovered".to_vec();
+        undiscovered[8] = b"shell".to_vec();
+        for field in &mut undiscovered[11..17] {
+            field.clear();
+        }
+        let mut linked = undiscovered.clone();
+        linked[0] = b"$linked".to_vec();
+        linked[2] = b"@linked".to_vec();
+        let mut malformed = fields("malformed");
+        malformed[5] = b"not-a-pane".to_vec();
+
+        let mut bytes = record(&undiscovered);
+        bytes.extend(record(&linked));
+        bytes.extend(record(&malformed));
+        let outcome = parse(&bytes);
+
+        assert_eq!(outcome.dropped, 1);
+        assert_eq!(outcome.records.len(), 2);
+        assert!(outcome.raw_panes.contains("%undiscovered"));
+        assert_eq!(outcome.raw_panes.len(), 1);
+        assert!(!outcome.raw_panes.contains("not-a-pane"));
     }
 
     #[test]
