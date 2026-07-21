@@ -204,6 +204,90 @@ fn inspect_status_survives_narrow_status_truncation_with_all_counts() {
 }
 
 #[test]
+fn inspect_filter_status_keeps_prompt_adjacent_to_the_query_at_boundaries() {
+    let mut statuses = Vec::new();
+    for width in 43..=46 {
+        let mut stale = record("dash", "%6", "working", "Stale");
+        stale.heartbeat = Some(0);
+        let mut state = app(vec![
+            record("dash", "%1", "needs_input", "Input"),
+            record("dash", "%2", "working", "Work"),
+            record("dash", "%3", "idle", "Idle"),
+            record("dash", "%4", "error", "Error"),
+            record("dash", "%5", "unknown", "Unknown"),
+            stale,
+        ]);
+        enter_query(&mut state, "東京e\u{301}query");
+        state.preview.inspect = true;
+
+        let status = draw(&state, width, 12).lines().last().unwrap().to_owned();
+        assert!(status.contains("FILTER: 東"), "{width}: {status}");
+        assert!(status.find("grouped").unwrap() < status.find("INSPECT").unwrap());
+        assert!(status.find("INSPECT").unwrap() < status.find("FILTER:").unwrap());
+        assert!(!status.contains("INSPECT東"), "{width}: {status}");
+        assert!(
+            buffer_line_widths(&state, width, 12)
+                .into_iter()
+                .all(|line_width| line_width <= usize::from(width))
+        );
+        statuses.push(status);
+    }
+    insta::assert_snapshot!("inspect_filter_status_boundaries", statuses.join("\n"));
+}
+
+#[test]
+fn inspect_navigation_status_keeps_retained_prompt_adjacent_at_boundaries() {
+    let mut statuses = Vec::new();
+    for width in 43..=46 {
+        let mut stale = record("dash", "%6", "working", "Stale");
+        stale.heartbeat = Some(0);
+        let mut state = app(vec![
+            record("dash", "%1", "needs_input", "Input"),
+            record("dash", "%2", "working", "Work"),
+            record("dash", "%3", "idle", "Idle"),
+            record("dash", "%4", "error", "Error"),
+            record("dash", "%5", "unknown", "Unknown"),
+            stale,
+        ]);
+        enter_query(&mut state, "東京e\u{301}query");
+        reduce(
+            &mut state,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        state.preview.inspect = true;
+
+        let status = draw(&state, width, 12).lines().last().unwrap().to_owned();
+        assert!(status.contains("filter: 東"), "{width}: {status}");
+        let navigation = if width < 45 { " N " } else { "NAV" };
+        assert!(status.contains(navigation), "{width}: {status}");
+        assert!(status.find("grouped").unwrap() < status.find(navigation).unwrap());
+        assert!(status.find(navigation).unwrap() < status.find("INSPECT").unwrap());
+        assert!(status.find("INSPECT").unwrap() < status.find("filter:").unwrap());
+        assert!(!status.contains("INSPECT東"), "{width}: {status}");
+        assert!(
+            buffer_line_widths(&state, width, 12)
+                .into_iter()
+                .all(|line_width| line_width <= usize::from(width))
+        );
+        statuses.push(status);
+    }
+    insta::assert_snapshot!("inspect_navigation_status_boundaries", statuses.join("\n"));
+}
+
+#[test]
+fn inspect_navigation_without_a_query_keeps_the_full_metadata_order() {
+    let mut state = app(vec![record("dash", "%1", "working", "Work")]);
+    state.preview.inspect = true;
+    assert!(
+        draw(&state, 80, 12)
+            .lines()
+            .last()
+            .unwrap()
+            .contains("grouped | NAV | INSPECT")
+    );
+}
+
+#[test]
 fn tiny_dashboard_dimensions_never_panic() {
     let state = with_preview(
         app(vec![record("dash", "%1", "working", "Task")]),

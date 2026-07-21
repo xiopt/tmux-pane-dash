@@ -421,24 +421,6 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
         Mode::Grouped => "grouped",
         Mode::Flat => "flat",
     };
-    let input = match app.input_mode {
-        crate::app::InputMode::Filter => "FILTER",
-        crate::app::InputMode::Navigation => "NAV",
-    };
-    let prefix = format!("{mode} | {input}");
-    let suffix =
-        if app.input_mode == crate::app::InputMode::Navigation && !app.filter_query.is_empty() {
-            format!("{prefix} | filter: ")
-        } else if app.input_mode == crate::app::InputMode::Filter {
-            format!("{prefix}: ")
-        } else {
-            prefix
-        };
-    let suffix = if app.preview.inspect {
-        format!("{suffix} | INSPECT")
-    } else {
-        suffix
-    };
     let query_is_visible =
         app.input_mode == crate::app::InputMode::Filter || !app.filter_query.is_empty();
     let minimum_query_width = app
@@ -447,23 +429,20 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
         .filter_map(|character| character.width())
         .find(|width| *width > 0)
         .unwrap_or(0);
-    let counts = if verbose_counts.width() + 2 + suffix.width() + minimum_query_width
-        <= usize::from(width)
-    {
-        verbose_counts
-    } else {
-        compact_counts
-    };
-    let compact_suffix = if app.preview.inspect {
-        format!("{mode} {input} INSPECT")
-    } else {
-        suffix.clone()
-    };
-    let (suffix, separator) = if counts.width() + 2 + suffix.width() <= usize::from(width) {
-        (suffix, "  ")
-    } else {
-        (compact_suffix, " ")
-    };
+    let (full_suffix, compact_suffix, narrow_suffix) = status_suffixes(app, mode, query_is_visible);
+    let options = [
+        (&verbose_counts, "  ", &full_suffix),
+        (&compact_counts, "  ", &full_suffix),
+        (&compact_counts, " ", &compact_suffix),
+        (&compact_counts, " ", &narrow_suffix),
+    ];
+    let (counts, separator, suffix) = options
+        .into_iter()
+        .find(|(counts, separator, suffix)| {
+            counts.width() + separator.width() + suffix.width() + minimum_query_width
+                <= usize::from(width)
+        })
+        .unwrap_or((&compact_counts, " ", &compact_suffix));
     let available_query_width =
         usize::from(width).saturating_sub(counts.width() + separator.width() + suffix.width());
     let query = if query_is_visible {
@@ -476,6 +455,38 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
         Style::default().fg(palette::STATUS_BAR),
     )];
     Paragraph::new(Line::from(spans))
+}
+
+fn status_suffixes(app: &AppState, mode: &str, query_is_visible: bool) -> (String, String, String) {
+    let (mut parts, prompt) = match app.input_mode {
+        crate::app::InputMode::Filter => (vec![mode], Some("FILTER:")),
+        crate::app::InputMode::Navigation if query_is_visible => {
+            (vec![mode, "NAV"], Some("filter:"))
+        }
+        crate::app::InputMode::Navigation => (vec![mode, "NAV"], None),
+    };
+    if app.preview.inspect {
+        parts.push("INSPECT");
+    }
+    if let Some(prompt) = prompt {
+        parts.push(prompt);
+    }
+    let full = parts.join(" | ");
+    let compact = parts.join(" ");
+    let narrow = parts
+        .iter()
+        .map(|part| if *part == "NAV" { "N" } else { part })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if prompt.is_some() {
+        (
+            format!("{full} "),
+            format!("{compact} "),
+            format!("{narrow} "),
+        )
+    } else {
+        (full, compact, narrow)
+    }
 }
 
 fn compact_status_token(status: Status) -> char {

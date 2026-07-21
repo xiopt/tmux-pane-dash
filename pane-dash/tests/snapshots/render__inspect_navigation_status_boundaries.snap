@@ -1,0 +1,8 @@
+---
+source: tests/render.rs
+expression: "statuses.join(\"\\n\")"
+---
+N1W1I1E1U1S1P6 grouped N INSPECT filter: 東
+N1W1I1E1U1S1P6 grouped N INSPECT filter: 東
+N1W1I1E1U1S1P6 grouped NAV INSPECT filter: 東
+N1W1I1E1U1S1P6 grouped NAV INSPECT filter: 東
