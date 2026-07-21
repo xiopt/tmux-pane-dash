@@ -1,5 +1,5 @@
 use crate::app::{ActionOutcome, JumpTarget};
-use crate::control::ControlHandle;
+use crate::control::{ControlHandle, is_safe_client_tty};
 use crate::model::PaneId;
 use crate::tmux_arg::{Field, encode};
 use crate::tmux_exec::TmuxExec;
@@ -86,6 +86,10 @@ pub async fn execute_jump(
     target: &JumpTarget,
     zoom: bool,
 ) -> bool {
+    if !is_safe_client_tty(client_tty) {
+        return false;
+    }
+
     if zoom
         && let JumpTarget::Pane(pane_id) = target
         && !tmux
@@ -155,6 +159,33 @@ mod tests {
             jump_commands("/dev/ttys001", &JumpTarget::Session("$3".into()), true),
             vec![args(&["switch-client", "-c", "/dev/ttys001", "-t", "$3"])]
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unsafe_client_tty_does_not_run_one_shot_jump() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let invoked = dir.path().join("invoked");
+        let fake = dir.path().join("fake-tmux");
+        fs::write(&fake, format!("#!/bin/sh\ntouch '{}'", invoked.display())).unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            !execute_jump(
+                &TmuxExec::new(&fake),
+                None,
+                "/dev/tty:1",
+                &JumpTarget::Pane("%42".into()),
+                false,
+            )
+            .await
+        );
+        assert!(!invoked.exists());
     }
 
     #[cfg(unix)]
@@ -555,7 +586,7 @@ mod tests {
             !execute_jump(
                 &TmuxExec::new(wrapper),
                 None,
-                "/definitely-not-a-tmux-client",
+                "/dev/tty1",
                 &JumpTarget::Pane(pane_id.clone()),
                 true,
             )
@@ -812,7 +843,7 @@ mod tests {
                 execute_jump(
                     &tmux,
                     None,
-                    "/dev/tty;touch-pwned",
+                    "/dev/tty1",
                     &JumpTarget::Pane("%42;touch-pwned".into()),
                     false,
                 )
@@ -820,7 +851,7 @@ mod tests {
             );
             assert_eq!(
                 marker(&log).await,
-                "<switch-client>\n<-Z>\n<-c>\n</dev/tty;touch-pwned>\n<-t>\n<%42;touch-pwned>\n"
+                "<switch-client>\n<-Z>\n<-c>\n</dev/tty1>\n<-t>\n<%42;touch-pwned>\n"
             );
             assert!(!dir.path().join("pwned").exists());
         }

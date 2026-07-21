@@ -14,7 +14,7 @@ use crossterm::terminal::{
 use futures_util::StreamExt;
 use pane_dash::actions::{execute_jump, kill_pane, send_text};
 use pane_dash::app::{Action, ActionOutcome, AppState, CompletedAction, Event, reduce};
-use pane_dash::control::{ControlEvent, ControlHandle};
+use pane_dash::control::{ControlEvent, ControlHandle, is_safe_client_tty};
 use pane_dash::model::{Model, ModelConfig};
 use pane_dash::options::parse_show_options;
 use pane_dash::preview::parse_preview;
@@ -797,9 +797,15 @@ fn redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut AppSt
 }
 
 fn parse_args() -> Result<(String, String, String, bool)> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from(
+    args: impl IntoIterator<Item = String>,
+) -> Result<(String, String, String, bool)> {
     let mut positional = Vec::new();
     let mut bench_first_frame = false;
-    for arg in std::env::args().skip(1) {
+    for arg in args {
         if arg == "--bench-first-frame" {
             bench_first_frame = true;
         } else {
@@ -809,8 +815,12 @@ fn parse_args() -> Result<(String, String, String, bool)> {
     if positional.len() != 3 {
         anyhow::bail!("expected client_tty session_id pane_id");
     }
+    let client_tty = positional.remove(0);
+    if !is_safe_client_tty(&client_tty) {
+        anyhow::bail!("invalid client tty");
+    }
     Ok((
-        positional.remove(0),
+        client_tty,
         positional.remove(0),
         positional.remove(0),
         bench_first_frame,
@@ -840,9 +850,9 @@ mod tests {
         ActionEffects, ConnectionMessageKind, ConnectionRoute, SnapshotGeneration,
         SnapshotInFlight, SnapshotSource, bench_first_frame_message, classify_connection_message,
         classify_snapshot_payload, clear_terminated_connection_state, dispatch_directives,
-        preview_interval, process_action_effects, snapshot_interval, snapshot_keeps_launch_session,
-        source_session_changed_requires_quit, spawn_preview_capture, start_preview_capture,
-        sync_transport_degraded,
+        parse_args_from, preview_interval, process_action_effects, snapshot_interval,
+        snapshot_keeps_launch_session, source_session_changed_requires_quit, spawn_preview_capture,
+        start_preview_capture, sync_transport_degraded,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pane_dash::app::{Action, AppState, Event, reduce};
@@ -1464,6 +1474,32 @@ mod tests {
             bench_first_frame_message(12.345),
             "pane-dash coldframe_ms=12.345"
         );
+    }
+
+    #[test]
+    fn parses_safe_portable_client_tty_arguments() {
+        assert_eq!(
+            parse_args_from([
+                "/dev/cu.usbserial-1".to_owned(),
+                "$7".to_owned(),
+                "%3".to_owned(),
+            ])
+            .unwrap(),
+            (
+                "/dev/cu.usbserial-1".to_owned(),
+                "$7".to_owned(),
+                "%3".to_owned(),
+                false,
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_client_tty_arguments_before_one_shot_actions() {
+        let error = parse_args_from(["/dev/tty:1".to_owned(), "$7".to_owned(), "%3".to_owned()])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid client tty"));
     }
 
     #[test]

@@ -381,10 +381,10 @@ impl ProtocolParser {
 
 /// Builds a fixed control-channel jump command for a machine pane or session ID.
 pub fn jump_command(client_tty: &str, target: &str) -> Option<String> {
-    if !client_tty.starts_with('/') || !(target.starts_with('%') || target.starts_with('$')) {
+    if !is_safe_client_tty(client_tty) || !(target.starts_with('%') || target.starts_with('$')) {
         return None;
     }
-    if !is_safe_control_argument(client_tty) || !is_safe_control_argument(target) {
+    if !is_safe_control_argument(target) {
         return None;
     }
 
@@ -394,7 +394,7 @@ pub fn jump_command(client_tty: &str, target: &str) -> Option<String> {
 
 /// Builds the fixed control-mode subscription used to relay popup-owner focus.
 pub fn focus_subscription_command(client_tty: &str) -> Option<String> {
-    is_real_client_tty(client_tty).then(|| {
+    is_safe_client_tty(client_tty).then(|| {
         format!("refresh-client -B \"pane_dash_focus:1:#{{@pane_dash_focus_{client_tty}}}\"\n")
     })
 }
@@ -498,11 +498,31 @@ fn is_safe_control_argument(value: &str) -> bool {
     })
 }
 
-fn is_real_client_tty(value: &str) -> bool {
-    let suffix = value
-        .strip_prefix("/dev/ttys")
-        .or_else(|| value.strip_prefix("/dev/pts/"));
-    matches!(suffix, Some(suffix) if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+/// Returns whether `value` is a portable, syntactically safe Unix client TTY.
+///
+/// The value is embedded in fixed tmux control commands, so this permits only
+/// a normalized-looking `/dev/` path made from an intentionally small ASCII
+/// alphabet. It does not inspect the filesystem or require a particular
+/// platform's device-name family.
+pub fn is_safe_client_tty(value: &str) -> bool {
+    const DEV_PREFIX: &str = "/dev/";
+    const MAX_CLIENT_TTY_LEN: usize = 255;
+
+    let Some(tail) = value.strip_prefix(DEV_PREFIX) else {
+        return false;
+    };
+    if tail.is_empty() || value.len() > MAX_CLIENT_TTY_LEN {
+        return false;
+    }
+
+    tail.split('/').all(|component| {
+        !component.is_empty()
+            && component != "."
+            && component != ".."
+            && component.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
+            })
+    })
 }
 
 fn is_machine_session_id(value: &str) -> bool {

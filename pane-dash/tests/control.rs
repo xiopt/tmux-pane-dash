@@ -1,6 +1,6 @@
 use pane_dash::control::{
     CONTROL_SNAPSHOT_COMMAND, GuardId, ProtocolEvent, ProtocolParser, focus_subscription_command,
-    jump_command,
+    is_safe_client_tty, jump_command,
 };
 
 #[cfg(unix)]
@@ -1028,27 +1028,77 @@ fn builds_the_exact_control_snapshot_command() {
 }
 
 #[test]
-fn builds_exact_focus_subscription_commands_for_real_client_ttys() {
+fn accepts_portable_unix_client_tty_families() {
+    let max_length = format!("/dev/{}", "a".repeat(250));
+    for tty in [
+        "/dev/tty1",
+        "/dev/console",
+        "/dev/ttyS0",
+        "/dev/ttyUSB0",
+        "/dev/ttyp0",
+        "/dev/ptyq1",
+        "/dev/vc/1",
+        "/dev/cu.usbserial-1",
+        "/dev/ttys001",
+        "/dev/pts/42",
+        max_length.as_str(),
+    ] {
+        assert!(is_safe_client_tty(tty), "tty: {tty:?}");
+    }
+}
+
+#[test]
+fn rejects_unsafe_unix_client_tty_forms() {
+    let overlong = format!("/dev/{}", "a".repeat(251));
+    for tty in [
+        "",
+        "/dev/",
+        "/dev",
+        "dev/tty1",
+        "/tmp/tty1",
+        "//dev/tty1",
+        "/dev//tty1",
+        "/dev/tty1/",
+        "/dev/./tty1",
+        "/dev/../tty1",
+        "/dev/a/./b",
+        "/dev/a/../b",
+        "/dev/tty 1",
+        "/dev/tty\t1",
+        "/dev/tty\n1",
+        "/dev/tty\r1",
+        "/dev/tty\"1",
+        "/dev/tty'1",
+        "/dev/tty:1",
+        "/dev/tty\\1",
+        "/dev/tty#1",
+        "/dev/tty{1}",
+        "/dev/tty[1]",
+        "/dev/tty;1",
+        "/dev/tty,1",
+        "/dev/tty\0",
+        "/dev/tty\u{1f}",
+        "/dev/ttyé1",
+        overlong.as_str(),
+    ] {
+        assert!(!is_safe_client_tty(tty), "tty: {tty:?}");
+    }
+}
+
+#[test]
+fn builds_exact_focus_subscription_commands_for_safe_client_ttys() {
     assert_eq!(
-        focus_subscription_command("/dev/ttys001"),
-        Some("refresh-client -B \"pane_dash_focus:1:#{@pane_dash_focus_/dev/ttys001}\"\n".into())
+        focus_subscription_command("/dev/tty1"),
+        Some("refresh-client -B \"pane_dash_focus:1:#{@pane_dash_focus_/dev/tty1}\"\n".into())
+    );
+    assert_eq!(
+        focus_subscription_command("/dev/console"),
+        Some("refresh-client -B \"pane_dash_focus:1:#{@pane_dash_focus_/dev/console}\"\n".into())
     );
     assert_eq!(
         focus_subscription_command("/dev/pts/42"),
         Some("refresh-client -B \"pane_dash_focus:1:#{@pane_dash_focus_/dev/pts/42}\"\n".into())
     );
-    for tty in [
-        "tty",
-        "/dev/ttyS0",
-        "/dev/ttys 1",
-        "/dev/ttys:1",
-        "/dev/ttys{1}",
-        "/dev/ttys\\1",
-        "/dev/ttys#1",
-        "/dev/ttys\n1",
-    ] {
-        assert_eq!(focus_subscription_command(tty), None, "tty: {tty:?}");
-    }
 }
 
 #[test]
@@ -1102,31 +1152,27 @@ fn recognizes_only_exact_outside_focus_subscription_notifications() {
 #[test]
 fn builds_safe_pane_and_session_jump_commands() {
     assert_eq!(
-        jump_command("/dev/ttys001", "%42"),
-        Some("switch-client -Z -c /dev/ttys001 -t %42\n".into())
+        jump_command("/dev/tty1", "%42"),
+        Some("switch-client -Z -c /dev/tty1 -t %42\n".into())
     );
     assert_eq!(
-        jump_command("/dev/ttys001", "$3"),
-        Some("switch-client -c /dev/ttys001 -t $3\n".into())
+        jump_command("/dev/console", "$3"),
+        Some("switch-client -c /dev/console -t $3\n".into())
     );
 }
 
 #[test]
 fn rejects_invalid_jump_ttys_and_targets() {
     for tty in [
-        "tty",
-        " /dev/ttys001",
-        "/dev/tty 1",
-        "/dev/tty\t1",
-        "/dev/tty\n1",
-        "/dev/tty\r1",
-        "/dev/tty\u{b}1",
-        "/dev/tty\u{c}1",
+        "/dev/",
+        "/tmp/tty1",
+        "/dev/tty:1",
+        "/dev/tty1/",
+        "/dev/../tty1",
         "/dev/tty\\1",
         "/dev/tty\"1",
         "/dev/tty;1",
         "/dev/tty\0",
-        "/dev/tty\u{1f}",
     ] {
         assert_eq!(jump_command(tty, "%1"), None, "tty: {tty:?}");
     }

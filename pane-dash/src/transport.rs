@@ -300,6 +300,23 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn portable_tty_focus_subscription_reaches_connected() {
+            let dir = TempDir::new().unwrap();
+            let fake = fake_tmux(
+                &dir,
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\nprintf '%s\\n' '%begin 2 2 2' '%end 2 2 2'\nsleep 1",
+            );
+            let (tx, mut rx) = mpsc::unbounded_channel();
+
+            spawn_connection_attempt(fake, "$7".into(), "/dev/tty1".into(), 20, tx);
+
+            assert!(matches!(
+                timeout(Duration::from_secs(1), rx.recv()).await.unwrap(),
+                Some(ConnectionMessage::Connected { generation: 20, .. })
+            ));
+        }
+
+        #[tokio::test]
         async fn failed_handshake_hands_off_the_attempt_generation() {
             let dir = TempDir::new().unwrap();
             let fake = fake_tmux(&dir, "printf '%s\\n' '%begin 1 1 1' '%error 1 1 1'");
