@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/spike/lib.sh"
 REAL_TMUX="$(command -v "$TMUX_BIN")"
 BIN="$ROOT/bin/pane-dash"
-TMP='' SOCKET='' WRAP='' LOG='' REJECT='' TASK9_MARKER=''
+TMP='' SOCKET='' WRAP='' LOG='' REJECT='' TASK9_MARKER='' TASK9_DEGRADED_INDEX=''
 declare -a CLIENT_PIDS=() CLIENT_TTYS=() PRODUCER_PIDS=() WRITER_FDS=()
 declare -a TRANSCRIPTS=() SESSIONS=() LABELS=() POPUP_CONTROLS=()
 declare -a TASK9_SOURCE_SESSIONS=() TASK9_TARGET_SESSIONS=() TASK9_SOURCE_PANES=()
@@ -19,6 +19,9 @@ now() { perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%.9f",clock
 cleanup() {
   set +e
   local fd pid
+  if [[ -n "$TASK9_MARKER" ]]; then rm -f "$TASK9_MARKER"; TASK9_MARKER=''; fi
+  if [[ -n "$REJECT" ]]; then rm -f "$REJECT"; REJECT=''; fi
+  if [[ -n "$TASK9_DEGRADED_INDEX" ]]; then TASK9_DEGRADED_INDEX=''; fi
   for fd in "${WRITER_FDS[@]:-}"; do eval "exec ${fd}>&-"; done
   for pid in "${POPUP_CONTROLS[@]:-}" "${CLIENT_PIDS[@]:-}" "${PRODUCER_PIDS[@]:-}"; do kill "$pid" 2>/dev/null; done
   admin kill-server 2>/dev/null
@@ -146,6 +149,10 @@ log_target_time_since() {
   perl -e 'use strict;my($d,$after,$wanted,$target)=@ARGV;for my$f(glob "$d/*"){open my$h,"<",$f or die$!;binmode$h;local$/;my@v=split/\0/,<$h>,-1;my$t=shift@v;next if$t<$after;my$i=0;while($i<@v){if($v[$i]eq q(-S)||$v[$i]eq q(-f)){$i+=2;next}last}next unless($v[$i]//q())eq$wanted;for(;$i<@v-1;$i++){if($v[$i]eq q(-t)&&$v[$i+1]eq$target){print"$t\n";exit 0}}}exit 1' "$LOG" "$1" "$2" "$3"
 }
 log_has_target_since() { log_target_time_since "$@" >/dev/null; }
+log_exact_switch_client_since() {
+  local after="$1" tty="$2" pane="$3"
+  perl -e 'use strict;my($d,$after,$tty,$pane)=@ARGV;my$n=0;for my$f(glob "$d/*"){open my$h,"<",$f or die$!;binmode$h;local$/;my@v=split/\0/,<$h>,-1;my$t=shift@v;next if$t<$after;@v==7&&$v[0]eq q(switch-client)&&$v[1]eq q(-Z)&&$v[2]eq q(-c)&&$v[3]eq$tty&&$v[4]eq q(-t)&&$v[5]eq$pane&&$v[6]eq q() and $n++}print"$n\n"' "$LOG" "$after" "$tty" "$pane"
+}
 task9_write() { local fd="${WRITER_FDS[${TASK9_CLIENT_INDEXES[$1]}]}"; printf '%b' "$2" >&"$fd"; }
 task9_popup_open() { popup_open "${TASK9_CLIENT_INDEXES[$1]}"; }
 task9_popup_closed() { popup_closed "${TASK9_CLIENT_INDEXES[$1]}"; }
@@ -256,11 +263,39 @@ task9_killed_between_resize_and_switch() {
   printf 'task9 killed-between source-session=%s source-pane=%s target=%s gone control=%s open\n' "${TASK9_SOURCE_SESSIONS[index]}" "${TASK9_SOURCE_PANES[index]}" "${TASK9_TARGET_PANES[index]}" "$control"
   task9_close_popup "$index"; task9_teardown "$index"
 }
+task9_degraded_jump() {
+  local index client_index tty initial_control replacement_control reconnect_started degraded_started transcript_offset closed
+  [[ ! -e "$REJECT" ]] || die 'task9 degraded inherited global reject marker'
+  task9_setup degraded-jump; index="$TASK9_INDEX"; TASK9_DEGRADED_INDEX="$index"; client_index="${TASK9_CLIENT_INDEXES[index]}"; tty="${CLIENT_TTYS[client_index]}"; initial_control="${POPUP_CONTROLS[client_index]}"
+  reconnect_started="$(now)"
+  admin run-shell "kill -TERM $initial_control"
+  wait_for 'task9 degraded exactly one replacement control' 3 popup_replaced "$client_index" "$initial_control"
+  replacement_control="$(controls)"; POPUP_CONTROLS[client_index]="$replacement_control"
+  (( $(record_count "$reconnect_started" "$(now)" -C)==1 )) || die 'task9 degraded initial control did not get exactly one replacement spawn'
+  transcript_offset="$(ansi_size "$client_index")"; degraded_started="$(now)"; : > "$REJECT"
+  admin run-shell "kill -TERM $replacement_control"
+  wait_for 'task9 degraded new banner' 3 ansi_tail_has "$client_index" "$((transcript_offset+1))" 'live updates lost — polling'
+  wait_for 'task9 degraded no persistent control' 2 control_is_zero
+  task9_select_target "$index"; task9_write "$index" '\r'
+  wait_for 'task9 degraded exact normal client jump' 2 client_is "$tty" "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}"
+  (( $(log_exact_switch_client_since "$degraded_started" "$tty" "${TASK9_TARGET_PANES[index]}")==1 )) || die 'task9 degraded missing exact one-shot owner switch-client'
+  control_is_zero || die 'task9 degraded control returned after jump'
+  [[ "$(pane_zoom "${TASK9_TARGET_PANES[index]}")" == 0 ]] || die 'task9 degraded normal jump changed target zoom'
+  wait_for 'task9 degraded popup exit' 2 task9_popup_closed "$index"
+  closed="$(now)"; sleep .2
+  (( $(record_count "$closed" "$(now)" list-panes)==0 )) || die 'task9 degraded list-panes continued after close'
+  (( $(record_count "$closed" "$(now)" capture-pane)==0 )) || die 'task9 degraded capture-pane continued after close'
+  ! control_present "$replacement_control" || die 'task9 degraded replacement control survived'
+  rm -f "$REJECT" "$TASK9_MARKER"; REJECT=''; TASK9_MARKER=''; TASK9_DEGRADED_INDEX=''
+  printf 'task9 degraded-jump session=%s pane=%s owner=%s controls=0 reconnects=1+rejected1 closed runtime=0\n' "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}" "$tty"
+  task9_teardown "$index"
+}
 task9_scenarios() {
   task9_normal_enter
   task9_zoom_jump
   task9_killed_before_jump
   task9_killed_between_resize_and_switch
+  task9_degraded_jump
 }
 
 destroy_popup_setup() { # detach-on-destroy value label
