@@ -1,7 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
 
 use crate::model::{PaneId, SessionId};
 use crate::tmux_arg::{self, Field};
+use crate::tmux_exec::{TmuxCommandError, TmuxExec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CreationId(pub u64);
@@ -128,6 +133,189 @@ pub struct CreateRequest {
     pub argv: Vec<String>,
     pub cwd: Option<ValidatedCwd>,
     pub command: Option<String>,
+}
+
+pub const CREATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub async fn run_creation(
+    tmux: TmuxExec,
+    id: CreationId,
+    request: CreateRequest,
+    progress: mpsc::UnboundedSender<CreationProgress>,
+    mut cancellation: oneshot::Receiver<()>,
+) {
+    run_creation_until(
+        tmux,
+        id,
+        request,
+        progress,
+        Instant::now() + CREATION_TIMEOUT,
+        &mut cancellation,
+    )
+    .await;
+}
+
+async fn run_creation_until(
+    tmux: TmuxExec,
+    id: CreationId,
+    request: CreateRequest,
+    progress: mpsc::UnboundedSender<CreationProgress>,
+    deadline: Instant,
+    cancellation: &mut oneshot::Receiver<()>,
+) {
+    let send = |event| {
+        let _ = progress.send(event);
+    };
+    send(CreationProgress::Stage {
+        id,
+        stage: CreateStage::Create,
+        pane_id: None,
+    });
+    let output = match tmux
+        .run_argv_until(&request.argv, request.cwd.as_ref(), deadline, cancellation)
+        .await
+    {
+        Ok(output) => output,
+        Err(TmuxCommandError::TimedOut | TmuxCommandError::Cancelled) => {
+            send(CreationProgress::TimedOut { id });
+            return;
+        }
+        Err(error) => {
+            send(CreationProgress::CreateFailed {
+                id,
+                error: error.to_string(),
+            });
+            return;
+        }
+    };
+    let pane_id = match parse_pane_id(&output) {
+        Ok(pane_id) => pane_id,
+        Err(error) => {
+            send(CreationProgress::CreateFailed { id, error });
+            return;
+        }
+    };
+    send(CreationProgress::Created {
+        id,
+        pane_id: pane_id.clone(),
+    });
+    send(CreationProgress::Stage {
+        id,
+        stage: CreateStage::Tag,
+        pane_id: Some(pane_id.clone()),
+    });
+    let tag = vec![
+        "set-option".into(),
+        "-p".into(),
+        "-t".into(),
+        pane_id.0.clone(),
+        "@pane_dash_tag".into(),
+        "dash-created".into(),
+    ];
+    match tmux
+        .run_argv_until(&tag, None, deadline, cancellation)
+        .await
+    {
+        Ok(_) => {}
+        Err(TmuxCommandError::TimedOut | TmuxCommandError::Cancelled) => {
+            send(CreationProgress::TimedOut { id });
+            return;
+        }
+        Err(error) => {
+            send(CreationProgress::Finished {
+                id,
+                pane_id,
+                resolution: CreationResolution::TagFailed(error.to_string()),
+            });
+            return;
+        }
+    }
+    let Some(command) = request.command else {
+        send(CreationProgress::Finished {
+            id,
+            pane_id,
+            resolution: CreationResolution::Success,
+        });
+        return;
+    };
+    send(CreationProgress::Stage {
+        id,
+        stage: CreateStage::SendCommand,
+        pane_id: Some(pane_id.clone()),
+    });
+    let send_command = vec![
+        "send-keys".into(),
+        "-l".into(),
+        "-t".into(),
+        pane_id.0.clone(),
+        "--".into(),
+        command,
+    ];
+    if let Err(error) = tmux
+        .run_argv_until(&send_command, None, deadline, cancellation)
+        .await
+    {
+        let resolution = match error {
+            TmuxCommandError::TimedOut | TmuxCommandError::Cancelled => {
+                send(CreationProgress::TimedOut { id });
+                return;
+            }
+            error => CreationResolution::CommandFailed {
+                stage: CreateStage::SendCommand,
+                error: error.to_string(),
+            },
+        };
+        send(CreationProgress::Finished {
+            id,
+            pane_id,
+            resolution,
+        });
+        return;
+    }
+    send(CreationProgress::Stage {
+        id,
+        stage: CreateStage::SendEnter,
+        pane_id: Some(pane_id.clone()),
+    });
+    let enter = vec![
+        "send-keys".into(),
+        "-t".into(),
+        pane_id.0.clone(),
+        "Enter".into(),
+    ];
+    let resolution = match tmux
+        .run_argv_until(&enter, None, deadline, cancellation)
+        .await
+    {
+        Ok(_) => CreationResolution::Success,
+        Err(TmuxCommandError::TimedOut | TmuxCommandError::Cancelled) => {
+            send(CreationProgress::TimedOut { id });
+            return;
+        }
+        Err(error) => CreationResolution::CommandFailed {
+            stage: CreateStage::SendEnter,
+            error: error.to_string(),
+        },
+    };
+    send(CreationProgress::Finished {
+        id,
+        pane_id,
+        resolution,
+    });
+}
+
+fn parse_pane_id(output: &[u8]) -> Result<PaneId, String> {
+    let value =
+        std::str::from_utf8(output).map_err(|_| "create returned non-UTF-8 pane ID".to_owned())?;
+    let value = value.strip_suffix('\n').unwrap_or(value);
+    if value.starts_with('%')
+        && value.len() > 1
+        && value[1..].bytes().all(|byte| byte.is_ascii_digit())
+    {
+        Ok(PaneId::from(value))
+    } else {
+        Err("create returned an invalid pane ID".to_owned())
+    }
 }
 
 pub fn build_request(
@@ -273,13 +461,16 @@ fn validate_target(kind: &'static str, value: &str, prefix: char) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     use super::{
         CreateContext, CreateDraft, CreationError, CreationField, SplitDirection, ValidatedCwd,
-        build_request, display_error,
+        build_request, display_error, run_creation,
     };
     use crate::model::{PaneId, SessionId};
+    use crate::tmux_exec::TmuxExec;
 
     fn draft(name: &str, cwd: &str, command: &str) -> CreateDraft {
         CreateDraft {
@@ -543,6 +734,66 @@ mod tests {
         assert_eq!(
             display_error(&format!("{}\n", "x".repeat(511))),
             "x".repeat(511)
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_emits_the_four_stages_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            "#!/bin/sh\ncase \"$1\" in new-session) printf '%%44\\n' ;; esac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let request = build_request(CreateContext::NewSession, &draft("", "", "echo hi")).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_cancel, cancellation) = tokio::sync::oneshot::channel();
+
+        run_creation(
+            TmuxExec::new(executable),
+            super::CreationId(1),
+            request,
+            tx,
+            cancellation,
+        )
+        .await;
+
+        let progress: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(
+            progress,
+            vec![
+                super::CreationProgress::Stage {
+                    id: super::CreationId(1),
+                    stage: super::CreateStage::Create,
+                    pane_id: None,
+                },
+                super::CreationProgress::Created {
+                    id: super::CreationId(1),
+                    pane_id: PaneId::from("%44"),
+                },
+                super::CreationProgress::Stage {
+                    id: super::CreationId(1),
+                    stage: super::CreateStage::Tag,
+                    pane_id: Some(PaneId::from("%44")),
+                },
+                super::CreationProgress::Stage {
+                    id: super::CreationId(1),
+                    stage: super::CreateStage::SendCommand,
+                    pane_id: Some(PaneId::from("%44")),
+                },
+                super::CreationProgress::Stage {
+                    id: super::CreationId(1),
+                    stage: super::CreateStage::SendEnter,
+                    pane_id: Some(PaneId::from("%44")),
+                },
+                super::CreationProgress::Finished {
+                    id: super::CreationId(1),
+                    pane_id: PaneId::from("%44"),
+                    resolution: super::CreationResolution::Success,
+                },
+            ]
         );
     }
 }

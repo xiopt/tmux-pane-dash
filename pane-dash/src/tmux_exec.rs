@@ -1,8 +1,14 @@
+use std::io;
 use std::path::PathBuf;
+use std::process::{ExitStatus, Stdio};
 
 use anyhow::{Context, Result, bail};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::oneshot;
+use tokio::time::Instant;
 
+use crate::creation::{CreationError, ValidatedCwd};
 use crate::model::PaneId;
 
 pub const SNAPSHOT_FORMAT: &str = "\x1e#{session_id}\x1f#{session_name}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_dead}\x1f#{@pane_dash_status}\x1f#{@pane_dash_status_since}\x1f#{@pane_dash_heartbeat}\x1f#{@pane_dash_title}\x1f#{@pane_dash_model}\x1f#{@pane_dash_tag}\x1f#{@pane_dash_group}";
@@ -10,6 +16,36 @@ pub const SNAPSHOT_FORMAT: &str = "\x1e#{session_id}\x1f#{session_name}\x1f#{win
 #[derive(Debug, Clone)]
 pub struct TmuxExec {
     bin: PathBuf,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TmuxCommandError {
+    #[error("creation cwd validation failed: {0}")]
+    Cwd(#[from] CreationError),
+    #[error("failed to spawn {}: {source}", bin.display())]
+    Spawn {
+        bin: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to read creation {stream}: {source}")]
+    Read {
+        stream: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("creation {stream} reader task failed: {source}")]
+    ReaderJoin {
+        stream: &'static str,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("tmux exited {status}: {stderr}")]
+    Exit { status: ExitStatus, stderr: String },
+    #[error("creation timed out")]
+    TimedOut,
+    #[error("creation cancelled")]
+    Cancelled,
 }
 
 impl TmuxExec {
@@ -95,6 +131,74 @@ impl TmuxExec {
             .is_ok_and(|output| output.status.success())
     }
 
+    pub async fn run_argv_until(
+        &self,
+        args: &[String],
+        cwd: Option<&ValidatedCwd>,
+        deadline: Instant,
+        cancellation: &mut oneshot::Receiver<()>,
+    ) -> std::result::Result<Vec<u8>, TmuxCommandError> {
+        if let Some(cwd) = cwd {
+            cwd.revalidate()?;
+        }
+        let mut command = Command::new(self.bin());
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd.as_path());
+        }
+        let mut child = command.spawn().map_err(|source| TmuxCommandError::Spawn {
+            bin: self.bin.clone(),
+            source,
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| TmuxCommandError::Read {
+            stream: "stdout",
+            source: io::Error::other("stdout was not piped"),
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| TmuxCommandError::Read {
+            stream: "stderr",
+            source: io::Error::other("stderr was not piped"),
+        })?;
+        let stdout_reader = tokio::spawn(read_stream(stdout));
+        let stderr_reader = tokio::spawn(read_stream(stderr));
+        enum Completion {
+            Exited(std::result::Result<ExitStatus, io::Error>),
+            TimedOut,
+            Cancelled,
+        }
+        let completion = tokio::select! {
+            result = child.wait() => Completion::Exited(result),
+            _ = tokio::time::sleep_until(deadline) => Completion::TimedOut,
+            _ = &mut *cancellation => Completion::Cancelled,
+        };
+        if matches!(completion, Completion::TimedOut | Completion::Cancelled) {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        let (stdout, stderr) = tokio::join!(
+            collect_stream(stdout_reader, "stdout"),
+            collect_stream(stderr_reader, "stderr")
+        );
+        let stdout = stdout?;
+        let stderr = stderr?;
+        match completion {
+            Completion::Exited(Ok(status)) if status.success() => Ok(stdout),
+            Completion::Exited(Ok(status)) => Err(TmuxCommandError::Exit {
+                status,
+                stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
+            }),
+            Completion::Exited(Err(source)) => Err(TmuxCommandError::Read {
+                stream: "child",
+                source,
+            }),
+            Completion::TimedOut => Err(TmuxCommandError::TimedOut),
+            Completion::Cancelled => Err(TmuxCommandError::Cancelled),
+        }
+    }
+
     pub async fn startup(&self) -> Result<(Vec<u8>, Vec<u8>)> {
         let (snapshot, options) = tokio::join!(self.snapshot(), self.show_options());
         Ok((snapshot?, options?))
@@ -133,6 +237,22 @@ impl TmuxExec {
         }
         Ok(output.stdout)
     }
+}
+
+async fn read_stream<R: tokio::io::AsyncRead + Unpin>(mut stream: R) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).await?;
+    Ok(bytes)
+}
+
+async fn collect_stream(
+    reader: tokio::task::JoinHandle<io::Result<Vec<u8>>>,
+    stream: &'static str,
+) -> std::result::Result<Vec<u8>, TmuxCommandError> {
+    reader
+        .await
+        .map_err(|source| TmuxCommandError::ReaderJoin { stream, source })?
+        .map_err(|source| TmuxCommandError::Read { stream, source })
 }
 
 #[cfg(test)]

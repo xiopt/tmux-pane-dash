@@ -1464,6 +1464,16 @@ fn finish_creation(
     ) {
         return ReduceResult::default();
     }
+    let resolution = match resolution {
+        CreationResolution::TagFailed(error) => {
+            CreationResolution::TagFailed(display_error(&error))
+        }
+        CreationResolution::CommandFailed { stage, error } => CreationResolution::CommandFailed {
+            stage,
+            error: display_error(&error),
+        },
+        resolution => resolution,
+    };
     pending.state = PendingCreationState::AwaitingSnapshot {
         pane_id,
         resolution,

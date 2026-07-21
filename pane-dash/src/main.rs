@@ -15,6 +15,7 @@ use futures_util::StreamExt;
 use pane_dash::actions::{execute_jump, kill_pane, send_text};
 use pane_dash::app::{Action, ActionOutcome, AppState, CompletedAction, Event, reduce};
 use pane_dash::control::{ControlEvent, ControlHandle, is_safe_client_tty};
+use pane_dash::creation::{CreateRequest, CreationId, CreationProgress, run_creation};
 use pane_dash::model::{Model, ModelConfig};
 use pane_dash::options::parse_show_options;
 use pane_dash::preview::parse_preview;
@@ -26,7 +27,8 @@ use pane_dash::transport::{
 };
 use pane_dash::ui;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 struct TerminalGuard;
@@ -35,6 +37,11 @@ struct PreviewResponse {
     sequence: u64,
     pane_id: pane_dash::model::PaneId,
     result: Result<pane_dash::preview::PreviewFrame, String>,
+}
+
+struct CreationTask {
+    cancel: oneshot::Sender<()>,
+    join: JoinHandle<()>,
 }
 
 #[derive(Default)]
@@ -277,6 +284,8 @@ async fn main() -> Result<()> {
     let mut preview_tick = preview_interval();
     let (snapshot_tx, mut snapshots) = mpsc::unbounded_channel();
     let (preview_tx, mut preview_responses) = mpsc::unbounded_channel();
+    let (creation_tx, mut creation_progress) = mpsc::unbounded_channel();
+    let mut creation_task = None;
     let (connection_tx, mut connection_messages) = mpsc::unbounded_channel();
     let (mut coordinator, directives) = TransportCoordinator::new();
     let mut control = None;
@@ -313,13 +322,15 @@ async fn main() -> Result<()> {
         &client_tty,
         &mut preview_tick,
         &preview_tx,
+        &creation_tx,
+        &mut creation_task,
     )
     .await?;
     while !app.should_quit {
         tokio::select! {
             event = input.next() => match event {
                 Some(Ok(CrosstermEvent::Key(key))) => {
-                    let effects = apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
+                    let effects = apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
                     process_action_effects(
                         effects, &mut coordinator, &tmux, &session_id, &client_tty, &connection_tx,
                         &mut control, &mut pending_connection_generation,
@@ -329,10 +340,10 @@ async fn main() -> Result<()> {
                     );
                 },
                 Some(Ok(CrosstermEvent::FocusGained)) => {
-                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(true), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
+                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(true), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
                 },
                 Some(Ok(CrosstermEvent::FocusLost)) => {
-                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(false), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
+                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(false), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
                 },
                 Some(Ok(CrosstermEvent::Resize(_, _))) => redraw(&mut terminal, &mut app)?,
                 Some(Ok(_)) => {},
@@ -349,12 +360,12 @@ async fn main() -> Result<()> {
                     &mut next_snapshot_seq, &snapshot_generation,
                     &mut in_flight_snapshot,
                 );
-                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?.mutated {
+                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?.mutated {
                     snapshot_generation.record_successful_mutation();
                 }
             },
             _ = preview_tick.tick() => {
-                let _ = apply_event(&mut terminal, &mut app, Event::PreviewTick, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
+                let _ = apply_event(&mut terminal, &mut app, Event::PreviewTick, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
             },
             message = connection_messages.recv() => if let Some(message) = message {
                 let (kind, generation) = match &message {
@@ -398,7 +409,7 @@ async fn main() -> Result<()> {
                         coordinator.input(pane_dash::transport::TransportInput::TopologyChanged)
                     }
                     (ConnectionRoute::FocusChanged, ConnectionMessage::Event { event: ControlEvent::FocusChanged(focused), .. }) => {
-                        let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(focused), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
+                        let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(focused), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
                         Vec::new()
                     }
                     (ConnectionRoute::SessionChanged, ConnectionMessage::Event { event: ControlEvent::SessionChanged(changed_session_id), .. }) => {
@@ -477,7 +488,7 @@ async fn main() -> Result<()> {
                     };
                     if !source_session_alive {
                         app.should_quit = true;
-                    } else if apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?.mutated {
+                    } else if apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?.mutated {
                         snapshot_generation.record_successful_mutation();
                     }
                 }
@@ -496,9 +507,18 @@ async fn main() -> Result<()> {
                     &client_tty,
                     &mut preview_tick,
                     &preview_tx,
+                    &creation_tx, &mut creation_task,
                 ).await?;
             },
+            progress = creation_progress.recv() => if let Some(progress) = progress {
+                let effects = apply_event(&mut terminal, &mut app, Event::CreationProgress(progress), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
+                process_action_effects(effects, &mut coordinator, &tmux, &session_id, &client_tty, &connection_tx, &mut control, &mut pending_connection_generation, &mut active_connection_generation, &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx, &mut next_snapshot_seq, &mut snapshot_generation, &mut in_flight_snapshot);
+            },
         }
+    }
+    if let Some(task) = creation_task.take() {
+        let _ = task.cancel.send(());
+        let _ = task.join.await;
     }
     Ok(())
 }
@@ -688,7 +708,16 @@ async fn apply_event(
     client_tty: &str,
     preview_interval: &mut tokio::time::Interval,
     preview_tx: &mpsc::UnboundedSender<PreviewResponse>,
+    creation_tx: &mpsc::UnboundedSender<CreationProgress>,
+    creation_task: &mut Option<CreationTask>,
 ) -> Result<ActionEffects> {
+    if creation_task
+        .as_ref()
+        .is_some_and(|task| task.join.is_finished())
+        && let Some(task) = creation_task.take()
+    {
+        let _ = task.join.await;
+    }
     let result = reduce(app, event);
     let mut effects = ActionEffects::default();
     for action in result.actions {
@@ -747,15 +776,35 @@ async fn apply_event(
                 }
             }
             Action::Quit => {}
-            // Creation execution is introduced in Phase 5 Task 4. Task 2 only
-            // defines reducer effects, which remain inert at this boundary.
-            Action::StartCreation { .. } | Action::CreationMutation | Action::RefreshNow => {}
+            Action::StartCreation { id, request } => {
+                start_creation(creation_task, creation_tx, tmux.clone(), id, request);
+            }
+            Action::CreationMutation => effects.mutated = true,
+            Action::RefreshNow => effects.refresh_now = true,
         }
     }
     if result.changed {
         redraw(terminal, app)?;
     }
     Ok(effects)
+}
+
+fn start_creation(
+    task: &mut Option<CreationTask>,
+    progress: &mpsc::UnboundedSender<CreationProgress>,
+    tmux: TmuxExec,
+    id: CreationId,
+    request: CreateRequest,
+) {
+    if let Some(previous) = task.take() {
+        let _ = previous.cancel.send(());
+    }
+    let (cancel, cancellation) = oneshot::channel();
+    let progress = progress.clone();
+    let join = tokio::spawn(async move {
+        run_creation(tmux, id, request, progress, cancellation).await;
+    });
+    *task = Some(CreationTask { cancel, join });
 }
 
 fn start_preview_capture(
