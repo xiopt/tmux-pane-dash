@@ -191,7 +191,16 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
             }
             frame.render_widget(Paragraph::new(lines), inner);
         }
-        Modal::Kill { .. } => {}
+        Modal::Kill { pane_id } => {
+            let title = truncate_to_width(
+                &format!("Kill pane {}? [y/N]", pane_id.0),
+                usize::from(width.saturating_sub(4)),
+            );
+            frame.render_widget(
+                Block::default().borders(Borders::ALL).title(title),
+                modal_area,
+            );
+        }
     }
 }
 

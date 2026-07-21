@@ -85,6 +85,20 @@ fn send_modal_is_centered_and_renders_literal_ansi_looking_text_at_small_sizes()
 }
 
 #[test]
+fn kill_modal_is_centered_and_safe_at_narrow_and_tiny_sizes() {
+    let mut state = app(vec![record("dash", "%42", "working", "Task")]);
+    state.modal = Some(Modal::Kill {
+        pane_id: PaneId::from("%42"),
+    });
+
+    let normal = draw(&state, 80, 24);
+    assert!(normal.contains("Kill pane %42? [y/N]"));
+    insta::assert_snapshot!("kill_modal", normal);
+    insta::assert_snapshot!("kill_modal_narrow", draw(&state, 18, 6));
+    insta::assert_snapshot!("kill_modal_tiny", draw(&state, 1, 1));
+}
+
+#[test]
 fn dashboard_layout_switches_at_one_hundred_columns() {
     let horizontal = dashboard_areas(Rect::new(0, 0, 160, 50));
     assert!(horizontal.horizontal);

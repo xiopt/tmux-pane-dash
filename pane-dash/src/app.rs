@@ -29,6 +29,7 @@ pub enum Action {
     ToggleGroup(bool),
     CapturePreview { sequence: u64, pane_id: PaneId },
     SendText { pane_id: PaneId, text: String },
+    KillPane { pane_id: PaneId },
     Quit,
 }
 
@@ -698,6 +699,9 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
             result.actions.push(Action::ToggleGroup(state.grouped()));
             result.changed = true;
         }
+        KeyCode::Char('x') if key.modifiers == KeyModifiers::NONE => {
+            return open_kill_modal(state);
+        }
         KeyCode::Char('z') if key.modifiers == KeyModifiers::CONTROL => {
             emit_jump(state, true, &mut result)
         }
@@ -732,6 +736,25 @@ fn open_send_modal(state: &mut AppState) -> ReduceResult {
         command,
         text: String::new(),
     });
+    let changed = state.modal != modal;
+    state.modal = modal;
+    ReduceResult {
+        actions: Vec::new(),
+        changed,
+    }
+}
+
+fn open_kill_modal(state: &mut AppState) -> ReduceResult {
+    let Some(pane_id) = state.selected_pane() else {
+        let message = Some("select a pane, not a session".into());
+        let changed = state.banner != message;
+        state.banner = message;
+        return ReduceResult {
+            actions: Vec::new(),
+            changed,
+        };
+    };
+    let modal = Some(Modal::Kill { pane_id });
     let changed = state.modal != modal;
     state.modal = modal;
     ReduceResult {
@@ -783,16 +806,25 @@ fn reduce_modal_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
             }
             _ => ReduceResult::default(),
         },
-        Modal::Kill { .. } => match key.code {
-            KeyCode::Esc | KeyCode::Enter => {
-                state.modal = None;
-                ReduceResult {
+        Modal::Kill { pane_id } => {
+            let pane_id = pane_id.clone();
+            state.modal = None;
+            match key.code {
+                KeyCode::Char('y' | 'Y')
+                    if key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    ReduceResult {
+                        actions: vec![Action::KillPane { pane_id }],
+                        changed: true,
+                    }
+                }
+                _ => ReduceResult {
                     actions: Vec::new(),
                     changed: true,
-                }
+                },
             }
-            _ => ReduceResult::default(),
-        },
+        }
     }
 }
 
@@ -1818,12 +1850,13 @@ mod tests {
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT,
             ),
         );
+        reduce(&mut app, key(KeyCode::Char('x')));
         reduce(&mut app, key(KeyCode::Char('j')));
         reduce(&mut app, key(KeyCode::Enter));
         reduce(&mut app, key(KeyCode::Char('z')));
         reduce(&mut app, key(KeyCode::Char('a')));
 
-        assert_eq!(app.filter_query, "jza");
+        assert_eq!(app.filter_query, "xjza");
         assert!(app.focus().is_none());
         assert!(app.pending_action.is_none());
         assert!(app.collapsed.is_empty());
@@ -2171,5 +2204,75 @@ mod tests {
             },
         );
         assert_eq!(app.banner, None);
+    }
+
+    #[test]
+    fn kill_modal_confirms_only_unmodified_or_shift_y_and_blocks_all_other_keys() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+
+        reduce(&mut app, key(KeyCode::Char('x')));
+        assert_eq!(app.banner.as_deref(), Some("select a pane, not a session"));
+
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Char('x')));
+        assert_eq!(
+            app.modal,
+            Some(Modal::Kill {
+                pane_id: PaneId::from("%a")
+            })
+        );
+
+        let blocked = reduce(&mut app, key(KeyCode::Char('j')));
+        assert!(blocked.actions.is_empty());
+        assert_eq!(app.modal, None);
+        assert_eq!(app.selected_pane(), Some(PaneId::from("%a")));
+
+        reduce(&mut app, key(KeyCode::Char('x')));
+        let cancelled = reduce(
+            &mut app,
+            key_with_modifiers(KeyCode::Char('y'), KeyModifiers::CONTROL),
+        );
+        assert!(cancelled.actions.is_empty());
+        assert_eq!(app.modal, None);
+
+        reduce(&mut app, key(KeyCode::Char('x')));
+        let confirmed = reduce(&mut app, shift_key(KeyCode::Char('Y')));
+        assert_eq!(app.modal, None);
+        assert_eq!(
+            confirmed.actions,
+            vec![Action::KillPane {
+                pane_id: PaneId::from("%a"),
+            }]
+        );
+    }
+
+    #[test]
+    fn kill_outcomes_are_silent_except_for_failures() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        app.banner = Some("unrelated failure".into());
+
+        for outcome in [ActionOutcome::Success, ActionOutcome::Vanished] {
+            let result = reduce(
+                &mut app,
+                Event::ActionFinished {
+                    kind: CompletedAction::Kill,
+                    pane_id: PaneId::from("%a"),
+                    outcome,
+                },
+            );
+            assert!(!result.changed);
+            assert_eq!(app.banner.as_deref(), Some("unrelated failure"));
+        }
+
+        reduce(
+            &mut app,
+            Event::ActionFinished {
+                kind: CompletedAction::Kill,
+                pane_id: PaneId::from("%a"),
+                outcome: ActionOutcome::Failed("kill failed".into()),
+            },
+        );
+        assert_eq!(app.banner.as_deref(), Some("kill failed"));
     }
 }

@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: normal
+---
+▾ dash (1)                                                             1 working
+  ◐ working      2m    1.2  tmp          sonnet  Task
+
+
+
+
+
+
+
+     ┌Kill pane %42? [y/N]────────────────────────────────────────────────┐
+─────│                                                                    │─────
+selec│                                                                    │
+     │                                                                    │
+     └────────────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+
+
+
+working 1  1 panes  grouped | NAV

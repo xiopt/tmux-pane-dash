@@ -12,7 +12,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures_util::StreamExt;
-use pane_dash::actions::{execute_jump, send_text};
+use pane_dash::actions::{execute_jump, kill_pane, send_text};
 use pane_dash::app::{Action, ActionOutcome, AppState, CompletedAction, Event, reduce};
 use pane_dash::control::{ControlEvent, ControlHandle};
 use pane_dash::model::{Model, ModelConfig};
@@ -641,11 +641,11 @@ async fn apply_event(
             Action::ToggleGroup(on) => {
                 tmux.set_group(on).await?;
                 effects.mutated = true;
+                effects.refresh_now = true;
             }
             Action::Jump { target, zoom } => {
                 if execute_jump(tmux, control, client_tty, &target, zoom).await {
                     app.should_quit = true;
-                    effects.mutated = true;
                 }
             }
             Action::CapturePreview { sequence, pane_id } => {
@@ -664,6 +664,23 @@ async fn apply_event(
                     app,
                     Event::ActionFinished {
                         kind: CompletedAction::Send,
+                        pane_id,
+                        outcome,
+                    },
+                );
+                effects.mutated |= succeeded;
+                effects.refresh_now |= succeeded;
+                if completion.changed {
+                    redraw(terminal, app)?;
+                }
+            }
+            Action::KillPane { pane_id } => {
+                let outcome = kill_pane(tmux, &pane_id).await;
+                let succeeded = outcome == ActionOutcome::Success;
+                let completion = reduce(
+                    app,
+                    Event::ActionFinished {
+                        kind: CompletedAction::Kill,
                         pane_id,
                         outcome,
                     },

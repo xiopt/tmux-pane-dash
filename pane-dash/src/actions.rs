@@ -25,6 +25,19 @@ pub async fn send_text(tmux: &TmuxExec, pane_id: &PaneId, text: &str) -> ActionO
     ActionOutcome::Success
 }
 
+/// Kills the exact pane selected in the dashboard. A target that disappeared
+/// after rendering is the normal TOCTOU case and is intentionally silent.
+pub async fn kill_pane(tmux: &TmuxExec, pane_id: &PaneId) -> ActionOutcome {
+    if tmux
+        .run_silent(&["kill-pane".into(), "-t".into(), pane_id.0.clone()])
+        .await
+    {
+        ActionOutcome::Success
+    } else {
+        ActionOutcome::Vanished
+    }
+}
+
 /// Builds the one-shot tmux argv vectors for a jump action.
 ///
 /// Session switches deliberately omit `-Z`: zoom is a pane property, and a
@@ -104,7 +117,7 @@ mod tests {
     use crate::app::{ActionOutcome, JumpTarget};
     use crate::tmux_exec::TmuxExec;
 
-    use super::{execute_jump, jump_commands, send_text};
+    use super::{execute_jump, jump_commands, kill_pane, send_text};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(ToString::to_string).collect()
@@ -141,6 +154,58 @@ mod tests {
         assert_eq!(
             jump_commands("/dev/ttys001", &JumpTarget::Session("$3".into()), true),
             vec![args(&["switch-client", "-c", "/dev/ttys001", "-t", "$3"])]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_pane_runs_one_exact_argv_without_a_precheck_or_shell() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("log");
+        let fake = dir.path().join("fake-tmux");
+        fs::write(
+            &fake,
+            format!("#!/bin/sh\nprintf '<%s>\\n' \"$@\" >> '{}'", log.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            kill_pane(
+                &TmuxExec::new(&fake),
+                &crate::model::PaneId::from("%42; touch pwned")
+            )
+            .await,
+            ActionOutcome::Success
+        );
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "<kill-pane>\n<-t>\n<%42; touch pwned>\n"
+        );
+        assert!(!dir.path().join("pwned").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_pane_maps_every_tmux_failure_to_vanished() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let fake = dir.path().join("fake-tmux");
+        fs::write(&fake, "#!/bin/sh\nexit 1").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            kill_pane(&TmuxExec::new(&fake), &crate::model::PaneId::from("%42")).await,
+            ActionOutcome::Vanished
         );
     }
 
@@ -332,6 +397,181 @@ mod tests {
                 .unwrap()
                 .success()
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires tmux"]
+    async fn real_tmux_kill_pane_removes_the_target_from_an_isolated_server() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        struct ScratchServer(std::path::PathBuf);
+        impl Drop for ScratchServer {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux")
+                    .arg("-S")
+                    .arg(&self.0)
+                    .arg("kill-server")
+                    .output();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("socket");
+        let _server = ScratchServer(socket.clone());
+        assert!(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args([
+                    "-f",
+                    "/dev/null",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    "kill",
+                    "sleep 60"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args(["split-window", "-d", "-t", "kill:0", "sleep 60"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let pane_id = String::from_utf8(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args(["display-message", "-p", "-t", "kill:0.1", "#{pane_id}"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let pane_id = crate::model::PaneId::from(pane_id.trim());
+        let wrapper = dir.path().join("tmux-kill");
+        std::fs::write(
+            &wrapper,
+            format!("#!/bin/sh\nexec tmux -S '{}' \"$@\"\n", socket.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            kill_pane(&TmuxExec::new(wrapper), &pane_id).await,
+            ActionOutcome::Success
+        );
+        let remaining = String::from_utf8(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args(["list-panes", "-a", "-F", "#{pane_id}"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert!(!remaining.lines().any(|id| id == pane_id.0));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires tmux"]
+    async fn real_tmux_pane_disappearing_between_zoom_and_jump_is_silent() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        struct ScratchServer(std::path::PathBuf);
+        impl Drop for ScratchServer {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux")
+                    .arg("-S")
+                    .arg(&self.0)
+                    .arg("kill-server")
+                    .output();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("socket");
+        let _server = ScratchServer(socket.clone());
+        assert!(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args([
+                    "-f",
+                    "/dev/null",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    "jump",
+                    "sleep 60"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args(["split-window", "-d", "-t", "jump:0", "sleep 60"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let pane_id = String::from_utf8(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args(["display-message", "-p", "-t", "jump:0.1", "#{pane_id}"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let pane_id = crate::model::PaneId::from(pane_id.trim());
+        let wrapper = dir.path().join("tmux-race");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resize-pane ]; then\n  tmux -S '{0}' \"$@\" || exit $?\n  tmux -S '{0}' kill-pane -t \"$4\"\n  exit $?\nfi\nexec tmux -S '{0}' \"$@\"\n",
+                socket.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            !execute_jump(
+                &TmuxExec::new(wrapper),
+                None,
+                "/definitely-not-a-tmux-client",
+                &JumpTarget::Pane(pane_id.clone()),
+                true,
+            )
+            .await
+        );
+        let remaining = String::from_utf8(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args(["list-panes", "-a", "-F", "#{pane_id}"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert!(!remaining.lines().any(|id| id == pane_id.0));
     }
 
     #[cfg(unix)]
