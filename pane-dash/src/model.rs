@@ -338,6 +338,21 @@ use std::hash::{Hash, Hasher};
 
 use crate::snapshot::RawRecord;
 
+#[cfg(test)]
+thread_local! {
+    static BUILD_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_build_count() {
+    BUILD_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn build_count() -> usize {
+    BUILD_COUNT.with(Cell::get)
+}
+
 macro_rules! id {
     ($name:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -487,6 +502,8 @@ impl Model {
         now: u64,
         ephemeral: &HashSet<PaneId>,
     ) -> Self {
+        #[cfg(test)]
+        BUILD_COUNT.with(|count| count.set(count.get() + 1));
         let grouped = !records.iter().any(|record| record.group == "0");
         let mut panes = HashMap::new();
         let mut sessions = HashMap::new();
@@ -682,7 +699,7 @@ impl Model {
     }
 }
 
-fn is_discovered(record: &RawRecord, cfg: &ModelConfig) -> bool {
+pub fn is_discovered(record: &RawRecord, cfg: &ModelConfig) -> bool {
     !record.status.is_empty()
         || record.pane_current_command == cfg.match_pattern
         || !record.tag.is_empty()

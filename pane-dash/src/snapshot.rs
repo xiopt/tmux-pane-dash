@@ -30,7 +30,9 @@ pub struct RawRecord {
 pub struct ParseOutcome {
     pub records: Vec<RawRecord>,
     pub raw_panes: HashSet<String>,
+    pub ambiguous_panes: HashSet<String>,
     pub dropped: usize,
+    pub unattributable_dropped: usize,
 }
 
 pub fn parse(bytes: &[u8]) -> ParseOutcome {
@@ -58,13 +60,29 @@ fn flush_record(outcome: &mut ParseOutcome, record: Option<(&[u8], bool)>) {
     };
 
     if invalid {
-        outcome.dropped += 1;
+        record_drop(outcome, record);
     } else if let Some(record) = parse_record(record) {
         outcome.raw_panes.insert(record.pane_id.clone());
         outcome.records.push(record);
     } else {
-        outcome.dropped += 1;
+        record_drop(outcome, record);
     }
+}
+
+fn record_drop(outcome: &mut ParseOutcome, record: &[u8]) {
+    outcome.dropped += 1;
+    let pane_id = record.split(|byte| *byte == US).nth(5);
+    if let Some(pane_id) = pane_id.filter(|pane_id| is_numeric_pane_id(pane_id)) {
+        outcome.ambiguous_panes.insert(decode(pane_id));
+    } else {
+        outcome.unattributable_dropped += 1;
+    }
+}
+
+fn is_numeric_pane_id(value: &[u8]) -> bool {
+    value
+        .strip_prefix(b"%")
+        .is_some_and(|digits| !digits.is_empty() && digits.iter().all(u8::is_ascii_digit))
 }
 
 fn parse_record(record: &[u8]) -> Option<RawRecord> {
@@ -210,6 +228,31 @@ mod tests {
         assert!(outcome.raw_panes.contains("%undiscovered"));
         assert_eq!(outcome.raw_panes.len(), 1);
         assert!(!outcome.raw_panes.contains("not-a-pane"));
+    }
+
+    #[test]
+    fn attributes_malformed_records_only_to_syntactically_valid_numeric_pane_ids() {
+        let mut target = fields("target");
+        target[5] = b"%42".to_vec();
+        target[7] = b"not-a-bool".to_vec();
+        let mut unrelated = fields("unrelated");
+        unrelated[5] = b"%7".to_vec();
+        unrelated[7] = b"not-a-bool".to_vec();
+        let mut unattributable = fields("unattributable");
+        unattributable[5] = b"%not-numeric".to_vec();
+        unattributable[7] = b"not-a-bool".to_vec();
+
+        let mut bytes = record(&target);
+        bytes.extend(record(&target));
+        bytes.extend(record(&unrelated));
+        bytes.extend(record(&unattributable));
+        let outcome = parse(&bytes);
+
+        assert_eq!(outcome.dropped, 4);
+        assert_eq!(outcome.ambiguous_panes.len(), 2);
+        assert!(outcome.ambiguous_panes.contains("%42"));
+        assert!(outcome.ambiguous_panes.contains("%7"));
+        assert_eq!(outcome.unattributable_dropped, 1);
     }
 
     #[test]
