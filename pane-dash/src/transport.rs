@@ -23,12 +23,14 @@ pub enum ConnectionMessage {
 pub fn spawn_connection_attempt(
     tmux_bin: PathBuf,
     session_id: String,
+    client_tty: String,
     generation: u64,
     tx: mpsc::UnboundedSender<ConnectionMessage>,
 ) {
     tokio::spawn(async move {
         match connect_control(tmux_bin, &session_id).await {
             Ok((handle, mut events)) => {
+                let _ = handle.subscribe_focus(&client_tty).await;
                 if tx
                     .send(ConnectionMessage::Connected { handle, generation })
                     .is_err()
@@ -273,7 +275,7 @@ mod tests {
             );
             let (tx, mut rx) = mpsc::unbounded_channel();
 
-            spawn_connection_attempt(fake, "$7".into(), 4, tx);
+            spawn_connection_attempt(fake, "$7".into(), "/dev/ttys001".into(), 4, tx);
 
             let Some(ConnectionMessage::Connected {
                 generation: 4,
@@ -297,7 +299,7 @@ mod tests {
             let fake = fake_tmux(&dir, "printf '%s\\n' '%begin 1 1 1' '%error 1 1 1'");
             let (tx, mut rx) = mpsc::unbounded_channel();
 
-            spawn_connection_attempt(fake, "$7".into(), 8, tx);
+            spawn_connection_attempt(fake, "$7".into(), "/dev/ttys001".into(), 8, tx);
 
             assert!(matches!(
                 timeout(Duration::from_secs(1), rx.recv()).await.unwrap(),
@@ -314,7 +316,7 @@ mod tests {
             );
             let (tx, mut rx) = mpsc::unbounded_channel();
 
-            spawn_connection_attempt(fake, "$7".into(), 3, tx);
+            spawn_connection_attempt(fake, "$7".into(), "/dev/ttys001".into(), 3, tx);
             let Some(ConnectionMessage::Connected {
                 handle: _handle, ..
             }) = rx.recv().await

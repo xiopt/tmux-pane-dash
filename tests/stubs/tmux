@@ -63,6 +63,10 @@ case "$cmd" in
     else
       log_args notifications.log "$@"
     fi ;;
+  set-hook)
+    log_args calls.log "$@"
+    mkdir -p "$TMUX_STUB_DIR/hooks"
+    printf '%s' "$4" > "$TMUX_STUB_DIR/hooks/$3" ;;
   *)
     log_args calls.log "$@" ;;
 esac

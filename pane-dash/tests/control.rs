@@ -1,5 +1,6 @@
 use pane_dash::control::{
-    CONTROL_SNAPSHOT_COMMAND, GuardId, ProtocolEvent, ProtocolParser, jump_command,
+    CONTROL_SNAPSHOT_COMMAND, GuardId, ProtocolEvent, ProtocolParser, focus_subscription_command,
+    jump_command,
 };
 
 #[cfg(unix)]
@@ -104,6 +105,32 @@ mod actor_tests {
         assert_eq!(
             marker(&commands).await,
             format!("{CONTROL_SNAPSHOT_COMMAND}switch-client -Z -c /dev/ttys001 -t %2\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn focus_subscription_is_fifo_and_does_not_block_later_snapshots() {
+        let dir = TempDir::new().unwrap();
+        let commands = dir.path().join("commands");
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nn=1\nwhile IFS= read -r command; do\n  printf '%s\\n' \"$command\" >> '{}'\n  n=$((n + 1))\n  printf '%%begin 2 %s 1\\n' \"$n\"\n  if [ \"$n\" = 3 ]; then printf '\\036$7\\037%%1\\n'; fi\n  printf '%%end 2 %s 1\\n' \"$n\"\ndone",
+                commands.display()
+            ),
+        );
+        let (handle, _events) = connect_control(fake, "$7").await.unwrap();
+
+        let subscribe = handle.subscribe_focus("/dev/ttys001");
+        let snapshot = handle.snapshot();
+        let (subscribe, snapshot) = tokio::join!(subscribe, snapshot);
+
+        subscribe.unwrap();
+        assert_eq!(snapshot.unwrap(), b"\x1e$7\x1f%1\n");
+        assert_eq!(
+            marker(&commands).await,
+            "refresh-client -B \"pane_dash_focus:1:#{@pane_dash_focus_/dev/ttys001}\"\n\
+             list-panes -a -F \"\\036#{session_id}\\037#{session_name}\\037#{window_id}\\037#{window_index}\\037#{window_name}\\037#{pane_id}\\037#{pane_index}\\037#{pane_active}\\037#{pane_current_command}\\037#{pane_current_path}\\037#{pane_dead}\\037#{@pane_dash_status}\\037#{@pane_dash_status_since}\\037#{@pane_dash_heartbeat}\\037#{@pane_dash_title}\\037#{@pane_dash_model}\\037#{@pane_dash_tag}\\037#{@pane_dash_group}\"\n"
         );
     }
 
@@ -932,6 +959,78 @@ fn builds_the_exact_control_snapshot_command() {
     assert_eq!(
         CONTROL_SNAPSHOT_COMMAND,
         "list-panes -a -F \"\\036#{session_id}\\037#{session_name}\\037#{window_id}\\037#{window_index}\\037#{window_name}\\037#{pane_id}\\037#{pane_index}\\037#{pane_active}\\037#{pane_current_command}\\037#{pane_current_path}\\037#{pane_dead}\\037#{@pane_dash_status}\\037#{@pane_dash_status_since}\\037#{@pane_dash_heartbeat}\\037#{@pane_dash_title}\\037#{@pane_dash_model}\\037#{@pane_dash_tag}\\037#{@pane_dash_group}\"\n"
+    );
+}
+
+#[test]
+fn builds_exact_focus_subscription_commands_for_real_client_ttys() {
+    assert_eq!(
+        focus_subscription_command("/dev/ttys001"),
+        Some("refresh-client -B \"pane_dash_focus:1:#{@pane_dash_focus_/dev/ttys001}\"\n".into())
+    );
+    assert_eq!(
+        focus_subscription_command("/dev/pts/42"),
+        Some("refresh-client -B \"pane_dash_focus:1:#{@pane_dash_focus_/dev/pts/42}\"\n".into())
+    );
+    for tty in [
+        "tty",
+        "/dev/ttyS0",
+        "/dev/ttys 1",
+        "/dev/ttys:1",
+        "/dev/ttys{1}",
+        "/dev/ttys\\1",
+        "/dev/ttys#1",
+        "/dev/ttys\n1",
+    ] {
+        assert_eq!(focus_subscription_command(tty), None, "tty: {tty:?}");
+    }
+}
+
+#[test]
+fn recognizes_only_exact_outside_focus_subscription_notifications() {
+    let mut parser = ProtocolParser::default();
+    for (line, expected) in [
+        (
+            b"%subscription-changed pane_dash_focus $0 : 1\n".as_slice(),
+            Some(true),
+        ),
+        (
+            b"%subscription-changed pane_dash_focus $0 - - - : 0\n",
+            Some(false),
+        ),
+        (
+            b"%subscription-changed pane_dash_focus $0 : 0\n",
+            Some(false),
+        ),
+        (b"%subscription-changed other $0 : 1\n", None),
+        (b"%subscription-changed pane_dash_focus $0 : 2\n", None),
+        (
+            b"%subscription-changed pane_dash_focus $0 : 1 extra\n",
+            None,
+        ),
+        (b"%subscription-changed pane_dash_focus $0 1\n", None),
+    ] {
+        assert_eq!(
+            parser.push_line(line),
+            expected.map_or_else(Vec::new, |focused| vec![ProtocolEvent::FocusChanged(
+                focused
+            )])
+        );
+    }
+
+    assert!(parser.push_line(b"%begin 1 2 1\n").is_empty());
+    assert!(
+        parser
+            .push_line(b"%subscription-changed pane_dash_focus $0 : 1\n")
+            .is_empty()
+    );
+    assert_eq!(
+        parser.push_line(b"%end 1 2 1\n"),
+        vec![response(
+            guard(1, 2),
+            true,
+            b"%subscription-changed pane_dash_focus $0 : 1\n"
+        )]
     );
 }
 

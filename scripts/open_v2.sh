@@ -16,5 +16,6 @@ get_opt() {
 w="$(get_opt @pane-dash-width 90%)"
 h="$(get_opt @pane-dash-height 85%)"
 
+tmux set-option -g "@pane_dash_focus_${client_tty}" 1
 tmux display-popup -E -c "$client_tty" -t "$pane_id" -w "$w" -h "$h" \
   "$binary" "$client_tty" "$session_id" "$pane_id"

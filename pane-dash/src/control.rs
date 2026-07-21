@@ -5,6 +5,7 @@ pub const CONTROL_SNAPSHOT_COMMAND: &str = "list-panes -a -F \"\\036#{session_id
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlEvent {
     TopologyChanged,
+    FocusChanged(bool),
     Terminated(String),
 }
 
@@ -31,6 +32,19 @@ impl ControlHandle {
         let (reply, response) = oneshot::channel();
         self.requests
             .send(Request::Jump { command, reply })
+            .await
+            .map_err(|_| anyhow!("tmux control actor is not running"))?;
+        response
+            .await
+            .map_err(|_| anyhow!("tmux control actor stopped before replying"))?
+    }
+
+    pub async fn subscribe_focus(&self, client_tty: &str) -> Result<()> {
+        let command = focus_subscription_command(client_tty)
+            .ok_or_else(|| anyhow!("invalid tmux control focus subscription client tty"))?;
+        let (reply, response) = oneshot::channel();
+        self.requests
+            .send(Request::SubscribeFocus { command, reply })
             .await
             .map_err(|_| anyhow!("tmux control actor is not running"))?;
         response
@@ -93,6 +107,10 @@ enum Request {
         command: String,
         reply: oneshot::Sender<Result<bool>>,
     },
+    SubscribeFocus {
+        command: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
 }
 
 impl Request {
@@ -100,6 +118,7 @@ impl Request {
         match self {
             Self::Snapshot { .. } => CONTROL_SNAPSHOT_COMMAND,
             Self::Jump { command, .. } => command,
+            Self::SubscribeFocus { command, .. } => command,
         }
     }
 
@@ -115,6 +134,13 @@ impl Request {
             Self::Jump { reply, .. } => {
                 let _ = reply.send(Ok(ok));
             }
+            Self::SubscribeFocus { reply, .. } => {
+                let _ = reply.send(if ok {
+                    Ok(())
+                } else {
+                    Err(anyhow!("tmux control focus subscription failed"))
+                });
+            }
         }
     }
 
@@ -124,6 +150,9 @@ impl Request {
                 let _ = reply.send(Err(anyhow!("{message}")));
             }
             Self::Jump { reply, .. } => {
+                let _ = reply.send(Err(anyhow!("{message}")));
+            }
+            Self::SubscribeFocus { reply, .. } => {
                 let _ = reply.send(Err(anyhow!("{message}")));
             }
         }
@@ -149,7 +178,7 @@ async fn consume_attach_handshake<R: tokio::io::AsyncBufRead + Unpin>(
                 ProtocolEvent::Response { ok: false, .. } => bail!("tmux control attach failed"),
                 ProtocolEvent::MalformedResponse => bail!("malformed tmux control attach response"),
                 ProtocolEvent::Exit => bail!("tmux control exited during attach"),
-                ProtocolEvent::TopologyChanged => {}
+                ProtocolEvent::TopologyChanged | ProtocolEvent::FocusChanged(_) => {}
             }
         }
     }
@@ -199,6 +228,7 @@ async fn control_actor(
                                 }
                             }
                             ProtocolEvent::TopologyChanged => { let _ = events.send(ControlEvent::TopologyChanged); }
+                            ProtocolEvent::FocusChanged(focused) => { let _ = events.send(ControlEvent::FocusChanged(focused)); }
                             ProtocolEvent::Exit => {
                                 terminated = Some("tmux control exited".into());
                                 break;
@@ -273,6 +303,7 @@ pub enum ProtocolEvent {
         data: Vec<u8>,
     },
     TopologyChanged,
+    FocusChanged(bool),
     Exit,
     MalformedResponse,
 }
@@ -315,6 +346,9 @@ impl ProtocolParser {
                 Vec::new()
             }
             _ if topology_token(line) => vec![ProtocolEvent::TopologyChanged],
+            _ if let Some(focused) = focus_subscription_changed(line) => {
+                vec![ProtocolEvent::FocusChanged(focused)]
+            }
             _ if first_token(line) == Some(b"%exit") => vec![ProtocolEvent::Exit],
             _ => Vec::new(),
         }
@@ -340,6 +374,13 @@ pub fn jump_command(client_tty: &str, target: &str) -> Option<String> {
 
     let zoom = if target.starts_with('%') { " -Z" } else { "" };
     Some(format!("switch-client{zoom} -c {client_tty} -t {target}\n"))
+}
+
+/// Builds the fixed control-mode subscription used to relay popup-owner focus.
+pub fn focus_subscription_command(client_tty: &str) -> Option<String> {
+    is_real_client_tty(client_tty).then(|| {
+        format!("refresh-client -B \"pane_dash_focus:1:#{{@pane_dash_focus_{client_tty}}}\"\n")
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,6 +430,22 @@ fn topology_token(line: &[u8]) -> bool {
     )
 }
 
+fn focus_subscription_changed(line: &[u8]) -> Option<bool> {
+    let fields: Vec<_> = line_without_lf(line)
+        .split(|byte| byte.is_ascii_whitespace())
+        .filter(|field| !field.is_empty())
+        .collect();
+    match fields.as_slice() {
+        [b"%subscription-changed", b"pane_dash_focus", .., b":", b"1"] if fields.len() >= 5 => {
+            Some(true)
+        }
+        [b"%subscription-changed", b"pane_dash_focus", .., b":", b"0"] if fields.len() >= 5 => {
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
 fn first_token(line: &[u8]) -> Option<&[u8]> {
     line_without_lf(line)
         .split(|byte| byte.is_ascii_whitespace())
@@ -410,6 +467,13 @@ fn is_safe_control_argument(value: &str) -> bool {
             || byte.is_ascii_control()
             || matches!(byte, b'\\' | b'\"' | b';')
     })
+}
+
+fn is_real_client_tty(value: &str) -> bool {
+    let suffix = value
+        .strip_prefix("/dev/ttys")
+        .or_else(|| value.strip_prefix("/dev/pts/"));
+    matches!(suffix, Some(suffix) if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 }
 
 fn is_machine_session_id(value: &str) -> bool {

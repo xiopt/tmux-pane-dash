@@ -390,6 +390,7 @@ async fn wait_topology(
         .unwrap_or_else(|| panic!("{label}: control event channel closed"));
     match event {
         ControlEvent::TopologyChanged => {}
+        ControlEvent::FocusChanged(_) => {}
         ControlEvent::Terminated(reason) => panic!("{label}: control terminated: {reason}"),
     }
 }
@@ -397,7 +398,10 @@ async fn wait_topology(
 fn drain_events(events: &mut tokio::sync::mpsc::UnboundedReceiver<ControlEvent>) {
     while let Ok(event) = events.try_recv() {
         assert!(
-            matches!(event, ControlEvent::TopologyChanged),
+            matches!(
+                event,
+                ControlEvent::TopologyChanged | ControlEvent::FocusChanged(_)
+            ),
             "control terminated while draining: {event:?}"
         );
     }

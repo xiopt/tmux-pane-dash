@@ -62,6 +62,7 @@ enum ConnectionMessageKind {
     Connected,
     Failed,
     TopologyChanged,
+    FocusChanged,
     Terminated,
 }
 
@@ -71,6 +72,7 @@ enum ConnectionRoute {
     Install,
     ConnectionFailed,
     TopologyChanged,
+    FocusChanged,
     ChannelEnded,
 }
 
@@ -89,6 +91,9 @@ fn classify_connection_message(
         }
         ConnectionMessageKind::TopologyChanged if active_generation == Some(generation) => {
             ConnectionRoute::TopologyChanged
+        }
+        ConnectionMessageKind::FocusChanged if active_generation == Some(generation) => {
+            ConnectionRoute::FocusChanged
         }
         ConnectionMessageKind::Terminated if active_generation == Some(generation) => {
             ConnectionRoute::ChannelEnded
@@ -267,6 +272,7 @@ async fn main() -> Result<()> {
         &mut coordinator,
         &tmux,
         &session_id,
+        &client_tty,
         &connection_tx,
         &mut control,
         &mut pending_connection_generation,
@@ -295,7 +301,7 @@ async fn main() -> Result<()> {
                 Some(Ok(CrosstermEvent::Key(key))) => {
                     let effects = apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
                     process_action_effects(
-                        effects, &mut coordinator, &tmux, &session_id, &connection_tx,
+                        effects, &mut coordinator, &tmux, &session_id, &client_tty, &connection_tx,
                         &mut control, &mut pending_connection_generation,
                         &mut active_connection_generation, &mut next_connection_generation,
                         &mut debounce_deadline, &snapshot_tx, &mut next_snapshot_seq,
@@ -317,7 +323,7 @@ async fn main() -> Result<()> {
                 dispatch_directives(
                     coordinator.input(pane_dash::transport::TransportInput::FallbackTick),
                     &mut coordinator,
-                    &tmux, &session_id, &connection_tx, &mut control,
+                    &tmux, &session_id, &client_tty, &connection_tx, &mut control,
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
                     &mut next_snapshot_seq, &snapshot_generation,
@@ -342,6 +348,9 @@ async fn main() -> Result<()> {
                         ControlEvent::TopologyChanged => {
                             (ConnectionMessageKind::TopologyChanged, *generation)
                         }
+                        ControlEvent::FocusChanged(_) => {
+                            (ConnectionMessageKind::FocusChanged, *generation)
+                        }
                         ControlEvent::Terminated(_) => (ConnectionMessageKind::Terminated, *generation),
                     },
                 };
@@ -365,6 +374,10 @@ async fn main() -> Result<()> {
                     (ConnectionRoute::TopologyChanged, _) => {
                         coordinator.input(pane_dash::transport::TransportInput::TopologyChanged)
                     }
+                    (ConnectionRoute::FocusChanged, ConnectionMessage::Event { event: ControlEvent::FocusChanged(focused), .. }) => {
+                        let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(focused), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
+                        Vec::new()
+                    }
                     (ConnectionRoute::ChannelEnded, _) => {
                         clear_terminated_connection_state(
                             &mut control,
@@ -377,7 +390,7 @@ async fn main() -> Result<()> {
                     _ => Vec::new(),
                 };
                 dispatch_directives(
-                    directives, &mut coordinator, &tmux, &session_id, &connection_tx, &mut control,
+                    directives, &mut coordinator, &tmux, &session_id, &client_tty, &connection_tx, &mut control,
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
                     &mut next_snapshot_seq, &snapshot_generation,
@@ -398,7 +411,7 @@ async fn main() -> Result<()> {
                 dispatch_directives(
                     coordinator.input(pane_dash::transport::TransportInput::DebounceElapsed),
                     &mut coordinator,
-                    &tmux, &session_id, &connection_tx, &mut control,
+                    &tmux, &session_id, &client_tty, &connection_tx, &mut control,
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
                     &mut next_snapshot_seq, &snapshot_generation,
@@ -419,7 +432,7 @@ async fn main() -> Result<()> {
                 };
                 let directives = coordinator.snapshot_completed(completion);
                 dispatch_directives(
-                    directives, &mut coordinator, &tmux, &session_id, &connection_tx, &mut control,
+                    directives, &mut coordinator, &tmux, &session_id, &client_tty, &connection_tx, &mut control,
                     &mut pending_connection_generation, &mut active_connection_generation,
                     &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
                     &mut next_snapshot_seq, &snapshot_generation,
@@ -480,6 +493,7 @@ fn dispatch_directives(
     coordinator: &mut TransportCoordinator,
     tmux: &TmuxExec,
     session_id: &str,
+    client_tty: &str,
     connection_tx: &mpsc::UnboundedSender<ConnectionMessage>,
     control: &mut Option<ControlHandle>,
     pending_connection_generation: &mut Option<u64>,
@@ -502,6 +516,7 @@ fn dispatch_directives(
                 spawn_connection_attempt(
                     PathBuf::from("tmux"),
                     session_id.into(),
+                    client_tty.into(),
                     generation,
                     connection_tx.clone(),
                 );
@@ -553,6 +568,7 @@ fn process_action_effects(
     coordinator: &mut TransportCoordinator,
     tmux: &TmuxExec,
     session_id: &str,
+    client_tty: &str,
     connection_tx: &mpsc::UnboundedSender<ConnectionMessage>,
     control: &mut Option<ControlHandle>,
     pending_connection_generation: &mut Option<u64>,
@@ -573,6 +589,7 @@ fn process_action_effects(
             coordinator,
             tmux,
             session_id,
+            client_tty,
             connection_tx,
             control,
             pending_connection_generation,
@@ -1058,6 +1075,7 @@ mod tests {
                 &mut coordinator,
                 &tmux,
                 "session",
+                "/dev/ttys001",
                 &connection_tx,
                 &mut control,
                 &mut pending_connection_generation,
@@ -1187,6 +1205,7 @@ mod tests {
                 &mut coordinator,
                 &tmux,
                 "session",
+                "/dev/ttys001",
                 &connection_tx,
                 &mut control,
                 &mut pending_connection_generation,
@@ -1209,6 +1228,7 @@ mod tests {
                 &mut coordinator,
                 &tmux,
                 "session",
+                "/dev/ttys001",
                 &connection_tx,
                 &mut control,
                 &mut pending_connection_generation,
@@ -1358,6 +1378,7 @@ mod tests {
             &mut coordinator,
             &tmux,
             "session",
+            "/dev/ttys001",
             &connection_tx,
             &mut control,
             &mut pending_connection_generation,
@@ -1382,6 +1403,7 @@ mod tests {
             &mut coordinator,
             &tmux,
             "session",
+            "/dev/ttys001",
             &connection_tx,
             &mut control,
             &mut pending_connection_generation,
@@ -1414,6 +1436,7 @@ mod tests {
             ConnectionMessageKind::Connected,
             ConnectionMessageKind::Failed,
             ConnectionMessageKind::TopologyChanged,
+            ConnectionMessageKind::FocusChanged,
             ConnectionMessageKind::Terminated,
         ] {
             assert_eq!(
@@ -1434,8 +1457,38 @@ mod tests {
             ConnectionRoute::TopologyChanged
         );
         assert_eq!(
+            classify_connection_message(ConnectionMessageKind::FocusChanged, 3, pending, active),
+            ConnectionRoute::FocusChanged
+        );
+        assert_eq!(
             classify_connection_message(ConnectionMessageKind::Terminated, 3, pending, active),
             ConnectionRoute::ChannelEnded
+        );
+    }
+
+    #[test]
+    fn relayed_focus_updates_preview_state_and_respects_inspect_mode() {
+        let mut app = preview_app();
+        assert!(reduce(&mut app, Event::TerminalFocus(false)).changed);
+        assert!(!app.preview.terminal_focused);
+        assert!(reduce(&mut app, Event::PreviewTick).actions.is_empty());
+
+        let resumed = reduce(&mut app, Event::TerminalFocus(true));
+        assert!(app.preview.terminal_focused);
+        assert!(matches!(
+            resumed.actions.as_slice(),
+            [Action::CapturePreview { .. }]
+        ));
+
+        reduce(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+        );
+        reduce(&mut app, Event::TerminalFocus(false));
+        assert!(
+            reduce(&mut app, Event::TerminalFocus(true))
+                .actions
+                .is_empty()
         );
     }
 
@@ -1464,6 +1517,7 @@ mod tests {
             &mut coordinator,
             &tmux,
             "session",
+            "/dev/ttys001",
             &connection_tx,
             &mut control,
             &mut pending_connection_generation,
@@ -1523,6 +1577,7 @@ mod tests {
             &mut coordinator,
             &tmux,
             "session",
+            "/dev/ttys001",
             &connection_tx,
             &mut control,
             &mut pending_connection_generation,
