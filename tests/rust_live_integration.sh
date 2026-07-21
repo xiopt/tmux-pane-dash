@@ -9,7 +9,7 @@ REAL_TMUX="$(command -v "$TMUX_BIN")"
 BIN="$ROOT/bin/pane-dash"
 TMP='' SOCKET='' WRAP='' LOG='' REJECT='' TASK9_MARKER='' TASK9_DEGRADED_INDEX=''
 declare -a CLIENT_PIDS=() CLIENT_TTYS=() PRODUCER_PIDS=() WRITER_FDS=()
-declare -a TRANSCRIPTS=() SESSIONS=() LABELS=() POPUP_CONTROLS=()
+declare -a TRANSCRIPTS=() SESSIONS=() LABELS=() POPUP_CONTROLS=() POPUP_PIDS=()
 declare -a TASK9_SOURCE_SESSIONS=() TASK9_TARGET_SESSIONS=() TASK9_SOURCE_PANES=()
 declare -a TASK9_TARGET_PANES=() TASK9_TAGS=() TASK9_CLIENT_INDEXES=()
 
@@ -33,7 +33,7 @@ diagnostics() {
   admin list-clients -F '#{client_pid} #{client_control_mode} #{client_tty}' 2>&1 || true
   local index
   for index in "${!CLIENT_PIDS[@]}"; do
-    printf 'owner[%s] label=%s session=%s client=%s tty=%s popup=%s producer=%s transcript=%s\n' "$index" "${LABELS[index]}" "${SESSIONS[index]}" "${CLIENT_PIDS[index]}" "${CLIENT_TTYS[index]}" "${POPUP_CONTROLS[index]:-}" "${PRODUCER_PIDS[index]}" "${TRANSCRIPTS[index]}" >&2
+    printf 'owner[%s] label=%s session=%s client=%s tty=%s control=%s popup-pid=%s producer=%s transcript=%s\n' "$index" "${LABELS[index]}" "${SESSIONS[index]}" "${CLIENT_PIDS[index]}" "${CLIENT_TTYS[index]}" "${POPUP_CONTROLS[index]:-}" "${POPUP_PIDS[index]:-}" "${PRODUCER_PIDS[index]}" "${TRANSCRIPTS[index]}" >&2
   done
   [[ -z "$LOG" ]] || perl -e 'for(glob "$ARGV[0]/*"){open F,"<",$_ or next;binmode F;local$/;$_=<F>;s/\0/ | /g;print}' "$LOG" 2>/dev/null | tail -30 || true
 }
@@ -126,21 +126,71 @@ new_control() {
   return 1
 }
 control_present() { controls | grep -Fxq "$1"; }
-popup_open() { control_present "${POPUP_CONTROLS[$1]:-}"; }
+pid_is_numeric() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+pid_is_alive() {
+  local pid="$1" state
+  pid_is_numeric "$pid" && kill -0 "$pid" 2>/dev/null || return 1
+  state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+  [[ -n "$state" && "$state" != *Z* ]]
+}
+pane_dash_process() {
+  local pid="$1" command
+  pid_is_alive "$pid" || return 1
+  command="$(ps -o command= -p "$pid" 2>/dev/null)"
+  [[ "$command" == "$BIN"* ]]
+}
+control_parent_pid() {
+  local control="$1" parent
+  pid_is_alive "$control" || return 1
+  parent="$(ps -o ppid= -p "$control" 2>/dev/null | tr -d '[:space:]')"
+  pid_is_numeric "$parent" || return 1
+  printf '%s\n' "$parent"
+}
+popup_control_has_owner() {
+  local index="$1" control="$2" parent
+  parent="$(control_parent_pid "$control")" || return 1
+  [[ "$parent" == "${POPUP_PIDS[index]:-}" ]] && pane_dash_process "$parent"
+}
+popup_open() { pane_dash_process "${POPUP_PIDS[$1]:-}"; }
 popup_closed() { ! popup_open "$1"; }
 popup_is_only_control() { popup_open "$1" && (( $(control_count)==1 )); }
-popup_replaced() { [[ "${POPUP_CONTROLS[$1]:-}" == "$2" ]] && ! control_present "$2" && (( $(control_count)==1 )); }
+popup_replaced() {
+  local index="$1" old_control="$2" replacement
+  [[ "${POPUP_CONTROLS[index]:-}" == "$old_control" ]] && ! control_present "$old_control" && (( $(control_count)==1 )) || return 1
+  replacement="$(controls)"
+  [[ "$replacement" != "$old_control" ]] && popup_control_has_owner "$index" "$replacement"
+}
 open_popup() {
-  local index="$1" before
+  local index="$1" before popup_pid
   before="$(controls)"
   send_bytes "$index" '\002'; send_bytes "$index" D
   wait_for "popup $index control" 3 new_control "$before"
   POPUP_CONTROLS[index]="$NEW_CONTROL_PID"
+  popup_pid="$(control_parent_pid "$NEW_CONTROL_PID")" || die "popup $index control pid invalid: $NEW_CONTROL_PID"
+  pane_dash_process "$popup_pid" || die "popup $index parent is not pane-dash: control=$NEW_CONTROL_PID parent=$popup_pid"
+  POPUP_PIDS[index]="$popup_pid"
 }
-close_popup() { send_bytes "$1" q; wait_for "popup $1 close" 2 popup_closed "$1"; POPUP_CONTROLS[$1]=''; }
+close_popup() {
+  local index="$1" control="${POPUP_CONTROLS[$1]:-}"
+  send_bytes "$index" q
+  wait_for "popup $index pane-dash exit" 2 popup_closed "$index"
+  ! control_present "$control" || die "popup $index control survived pane-dash exit: $control"
+  POPUP_CONTROLS[index]=''
+}
 target_gone() { ! admin list-panes -a -F '#{pane_id}' | grep -Fxq "$1"; }
 target_present() { admin list-panes -a -F '#{pane_id}' | grep -Fxq "$1"; }
 runtime_count() { local start="$1" end="$2"; local total=0 command; for command in capture-pane list-panes show-options -C; do total=$((total + $(record_count "$start" "$end" "$command"))); done; printf '%s\n' "$total"; }
+assert_no_popup_runtime_after_exit() {
+  local label="$1" popup_pid="$2" exited="$3" observed captures lists duration
+  sleep 1.1
+  observed="$(now)"
+  captures="$(record_count "$exited" "$observed" capture-pane)"
+  lists="$(record_count "$exited" "$observed" list-panes)"
+  duration="$(perl -e 'printf "%.0f", ($ARGV[1] - $ARGV[0]) * 1000' "$exited" "$observed")"
+  (( duration >= 1100 )) || die "$label post-exit observation shorter than fallback interval: ${duration}ms"
+  (( captures == 0 && lists == 0 )) || die "$label popup runtime after pane-dash exit: capture-pane=$captures list-panes=$lists"
+  printf '%s popup-pid=%s post-exit-observation=%sms capture-pane=%s list-panes=%s\n' "$label" "$popup_pid" "$duration" "$captures" "$lists"
+}
 pane_contains() { admin capture-pane -p -t "$1" | grep -aFq "$2"; }
 client_snapshot() { admin list-clients -F '#{client_tty} #{session_id} #{pane_id}' | awk -v tty="$1" '$1==tty {print $2 " " $3; exit}'; }
 client_is() { [[ "$(client_snapshot "$1")" == "$2 $3" ]]; }
@@ -196,10 +246,11 @@ task9_select_target() {
   wait_for "task9 ${TASK9_TAGS[index]} selected preview" 2 task9_selected_preview "$index" "$started"
 }
 task9_close_popup() {
-  local index="$1" client_index="${TASK9_CLIENT_INDEXES[$1]}"
+  local index="$1" client_index="${TASK9_CLIENT_INDEXES[$1]}" control="${POPUP_CONTROLS[${TASK9_CLIENT_INDEXES[$1]}]:-}"
   task9_popup_open "$index" || return 0
   task9_write "$index" q
-  wait_for "task9 ${TASK9_TAGS[index]} popup close" 2 task9_popup_closed "$index"
+  wait_for "task9 ${TASK9_TAGS[index]} pane-dash exit" 2 task9_popup_closed "$index"
+  ! control_present "$control" || die "task9 ${TASK9_TAGS[index]} control survived pane-dash exit: $control"
   POPUP_CONTROLS[client_index]=''
 }
 task9_teardown() {
@@ -214,29 +265,29 @@ task9_teardown() {
   rm -f "$TASK9_MARKER"
 }
 task9_normal_enter() {
-  local index client_index tty control
-  task9_setup normal; index="$TASK9_INDEX"; client_index="${TASK9_CLIENT_INDEXES[index]}"; tty="${CLIENT_TTYS[client_index]}"; control="${POPUP_CONTROLS[client_index]}"
+  local index client_index tty control popup_pid
+  task9_setup normal; index="$TASK9_INDEX"; client_index="${TASK9_CLIENT_INDEXES[index]}"; tty="${CLIENT_TTYS[client_index]}"; control="${POPUP_CONTROLS[client_index]}"; popup_pid="${POPUP_PIDS[client_index]}"
   [[ "$(pane_zoom "${TASK9_TARGET_PANES[index]}")" == 0 ]] || die 'task9 normal target initially zoomed'
   task9_select_target "$index"; task9_write "$index" '\r'
   wait_for 'task9 normal exact client jump' 2 client_is "$tty" "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}"
-  wait_for 'task9 normal popup exit' 2 task9_popup_closed "$index"
+  wait_for 'task9 normal pane-dash exit' 2 task9_popup_closed "$index"
   [[ "$(pane_zoom "${TASK9_TARGET_PANES[index]}")" == 0 ]] || die 'task9 normal changed target zoom'
   ! control_present "$control" || die 'task9 normal control survived'
-  printf 'task9 normal session=%s pane=%s zoom=0 control=%s closed\n' "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}" "$control"
+  printf 'task9 normal session=%s pane=%s zoom=0 control=%s popup-pid=%s closed\n' "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}" "$control" "$popup_pid"
   task9_teardown "$index"
 }
 task9_zoom_jump() {
-  local index client_index tty control started observed resize_at
-  task9_setup zoom; index="$TASK9_INDEX"; client_index="${TASK9_CLIENT_INDEXES[index]}"; tty="${CLIENT_TTYS[client_index]}"; control="${POPUP_CONTROLS[client_index]}"
+  local index client_index tty control popup_pid started observed resize_at
+  task9_setup zoom; index="$TASK9_INDEX"; client_index="${TASK9_CLIENT_INDEXES[index]}"; tty="${CLIENT_TTYS[client_index]}"; control="${POPUP_CONTROLS[client_index]}"; popup_pid="${POPUP_PIDS[client_index]}"
   task9_select_target "$index"; started="$(now)"; task9_write "$index" '\032'
   wait_for 'task9 zoom resize invocation' 2 log_has_target_since "$started" resize-pane "${TASK9_TARGET_PANES[index]}"
   wait_for 'task9 zoom exact client jump' 2 client_is "$tty" "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}"
   observed="$(now)"; resize_at="$(log_target_time_since "$started" resize-pane "${TASK9_TARGET_PANES[index]}")"
   perl -e 'exit(($ARGV[0] < $ARGV[1]) ? 0 : 1)' "$resize_at" "$observed" || die 'task9 zoom resize ordering'
   [[ "$(pane_zoom "${TASK9_TARGET_PANES[index]}")" == 1 ]] || die 'task9 zoom target not zoomed'
-  wait_for 'task9 zoom popup exit' 2 task9_popup_closed "$index"
+  wait_for 'task9 zoom pane-dash exit' 2 task9_popup_closed "$index"
   ! control_present "$control" || die 'task9 zoom control survived'
-  printf 'task9 zoom session=%s pane=%s zoom=1 control=%s closed resize-before-switch=%s<%s\n' "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}" "$control" "$resize_at" "$observed"
+  printf 'task9 zoom session=%s pane=%s zoom=1 control=%s popup-pid=%s closed resize-before-switch=%s<%s\n' "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}" "$control" "$popup_pid" "$resize_at" "$observed"
   task9_teardown "$index"
 }
 task9_killed_before_jump() {
@@ -265,13 +316,14 @@ task9_killed_between_resize_and_switch() {
   task9_close_popup "$index"; task9_teardown "$index"
 }
 task9_degraded_jump() {
-  local index client_index tty initial_control replacement_control reconnect_started degraded_started transcript_offset closed
+  local index client_index tty initial_control replacement_control popup_pid reconnect_started degraded_started transcript_offset exited
   [[ ! -e "$REJECT" ]] || die 'task9 degraded inherited global reject marker'
-  task9_setup degraded-jump; index="$TASK9_INDEX"; TASK9_DEGRADED_INDEX="$index"; client_index="${TASK9_CLIENT_INDEXES[index]}"; tty="${CLIENT_TTYS[client_index]}"; initial_control="${POPUP_CONTROLS[client_index]}"
+  task9_setup degraded-jump; index="$TASK9_INDEX"; TASK9_DEGRADED_INDEX="$index"; client_index="${TASK9_CLIENT_INDEXES[index]}"; tty="${CLIENT_TTYS[client_index]}"; initial_control="${POPUP_CONTROLS[client_index]}"; popup_pid="${POPUP_PIDS[client_index]}"
   reconnect_started="$(now)"
   admin run-shell "kill -TERM $initial_control"
   wait_for 'task9 degraded exactly one replacement control' 3 popup_replaced "$client_index" "$initial_control"
   replacement_control="$(controls)"; POPUP_CONTROLS[client_index]="$replacement_control"
+  popup_control_has_owner "$client_index" "$replacement_control" || die 'task9 degraded replacement parent changed popup pid'
   (( $(record_count "$reconnect_started" "$(now)" -C)==1 )) || die 'task9 degraded initial control did not get exactly one replacement spawn'
   transcript_offset="$(ansi_size "$client_index")"; degraded_started="$(now)"; : > "$REJECT"
   admin run-shell "kill -TERM $replacement_control"
@@ -282,13 +334,12 @@ task9_degraded_jump() {
   (( $(log_exact_switch_client_since "$degraded_started" "$tty" "${TASK9_TARGET_PANES[index]}")==1 )) || die 'task9 degraded missing exact one-shot owner switch-client'
   control_is_zero || die 'task9 degraded control returned after jump'
   [[ "$(pane_zoom "${TASK9_TARGET_PANES[index]}")" == 0 ]] || die 'task9 degraded normal jump changed target zoom'
-  wait_for 'task9 degraded popup exit' 2 task9_popup_closed "$index"
-  closed="$(now)"; sleep .2
-  (( $(record_count "$closed" "$(now)" list-panes)==0 )) || die 'task9 degraded list-panes continued after close'
-  (( $(record_count "$closed" "$(now)" capture-pane)==0 )) || die 'task9 degraded capture-pane continued after close'
+  wait_for 'task9 degraded pane-dash exit' 2 task9_popup_closed "$index"
+  exited="$(now)"
+  assert_no_popup_runtime_after_exit 'task9 degraded-jump' "$popup_pid" "$exited"
   ! control_present "$replacement_control" || die 'task9 degraded replacement control survived'
   rm -f "$REJECT" "$TASK9_MARKER"; REJECT=''; TASK9_MARKER=''; TASK9_DEGRADED_INDEX=''
-  printf 'task9 degraded-jump session=%s pane=%s owner=%s controls=0 reconnects=1+rejected1 closed runtime=0\n' "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}" "$tty"
+  printf 'task9 degraded-jump session=%s pane=%s owner=%s control=%s popup-pid=%s controls=0 reconnects=1+rejected1 closed\n' "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}" "$tty" "$replacement_control" "$popup_pid"
   task9_teardown "$index"
 }
 task9_scenarios() {
@@ -310,37 +361,37 @@ destroy_popup_setup() { # detach-on-destroy value label
   index=$((${#CLIENT_PIDS[@]} - 1))
   open_popup "$index"
   wait_for "destroy ${label} popup frame" 3 ansi_has "$index" "destroy-${label}"
-  DESTROY_SOURCE="$source" DESTROY_INDEX="$index" DESTROY_TTY="${CLIENT_TTYS[index]}" DESTROY_CONTROL="${POPUP_CONTROLS[index]}"
+  DESTROY_SOURCE="$source" DESTROY_INDEX="$index" DESTROY_TTY="${CLIENT_TTYS[index]}" DESTROY_CONTROL="${POPUP_CONTROLS[index]}" DESTROY_POPUP_PID="${POPUP_PIDS[index]}"
 }
 
 destroy_popup_detach_off() {
-  local before started closed
+  local before started exited
   destroy_popup_setup off off
   before="$(record_count "$(now)" "$(now)" -C)"
   started="$(now)"
   admin kill-session -t "$DESTROY_SOURCE"
-  wait_for 'destroy off popup control closes <=2s' 2 popup_closed "$DESTROY_INDEX"
-  closed="$(now)"
+  wait_for 'destroy off pane-dash exits <=2s' 2 popup_closed "$DESTROY_INDEX"
+  exited="$(now)"
   ! control_present "$DESTROY_CONTROL" || die 'destroy off control survived'
   ! client_gone "$DESTROY_TTY" || die 'destroy off normal client detached'
   [[ -n "$(client_snapshot "$DESTROY_TTY")" ]] || die 'destroy off normal client was not reassigned'
-  (( $(record_count "$started" "$closed" -C)==before )) || die 'destroy off attempted control reconnect'
+  (( $(record_count "$started" "$exited" -C)==before )) || die 'destroy off attempted control reconnect'
   sleep .2
-  (( $(runtime_count "$closed" "$(now)")==0 )) || die 'destroy off popup runtime work after close'
-  printf 'destroy-off popup/control closed<=2s control=%s normal-client=%s reassigned=%s reconnects=0 runtime=0\n' "$DESTROY_CONTROL" "$DESTROY_TTY" "$(client_snapshot "$DESTROY_TTY")"
+  (( $(runtime_count "$exited" "$(now)")==0 )) || die 'destroy off popup runtime work after pane-dash exit'
+  printf 'destroy-off popup-pid=%s closed<=2s control=%s normal-client=%s reassigned=%s reconnects=0 runtime=0\n' "$DESTROY_POPUP_PID" "$DESTROY_CONTROL" "$DESTROY_TTY" "$(client_snapshot "$DESTROY_TTY")"
 }
 
 destroy_popup_detach_on() {
   destroy_popup_setup on on
   admin kill-session -t "$DESTROY_SOURCE"
-  wait_for 'destroy on popup control closes <=2s' 2 popup_closed "$DESTROY_INDEX"
+  wait_for 'destroy on pane-dash exits <=2s' 2 popup_closed "$DESTROY_INDEX"
   wait_for 'destroy on exact normal client detaches' 2 client_gone "$DESTROY_TTY"
   ! control_present "$DESTROY_CONTROL" || die 'destroy on control survived'
-  printf 'destroy-on popup/control closed<=2s control=%s client=%s detached\n' "$DESTROY_CONTROL" "$DESTROY_TTY"
+  printf 'destroy-on popup-pid=%s closed<=2s control=%s client=%s detached\n' "$DESTROY_POPUP_PID" "$DESTROY_CONTROL" "$DESTROY_TTY"
 }
 
 destroy_popup_while_degraded() {
-  local started closed
+  local started exited
   destroy_popup_setup off degraded
   : > "$REJECT"
   admin run-shell "kill -TERM $DESTROY_CONTROL"
@@ -348,13 +399,12 @@ destroy_popup_while_degraded() {
   wait_for 'destroy degraded no control' 2 control_is_zero
   started="$(now)"
   admin kill-session -t "$DESTROY_SOURCE"
-  wait_for 'destroy degraded zero-drop snapshot closes <=1.1s' 1.1 popup_closed "$DESTROY_INDEX"
-  closed="$(now)"
-  sleep .2
-  (( $(record_count "$closed" "$(now)" list-panes)==0 )) || die 'destroy degraded list-panes continued after close'
+  wait_for 'destroy degraded pane-dash exits <=1.1s' 1.1 popup_closed "$DESTROY_INDEX"
+  exited="$(now)"
+  assert_no_popup_runtime_after_exit 'destroy-degraded' "$DESTROY_POPUP_PID" "$exited"
   ! client_gone "$DESTROY_TTY" || die 'destroy degraded normal client detached'
   rm -f "$REJECT"
-  printf 'destroy-degraded popup/control closed<=1.1s control=%s list-panes-after-close=0\n' "$DESTROY_CONTROL"
+  printf 'destroy-degraded popup-pid=%s closed<=1.1s control=%s\n' "$DESTROY_POPUP_PID" "$DESTROY_CONTROL"
 }
 
 unrelated_session_changes_keep_popup_open() {
@@ -392,8 +442,8 @@ main() {
   grep -Fxq '*:focus' <<< "$terminal_features" || die 'production plugin did not enable terminal focus feature'
   start_client live first; start_client live second
   [[ -n "${CLIENT_PIDS[0]:-}" && -n "${CLIENT_TTYS[0]:-}" && -n "${CLIENT_PIDS[1]:-}" && -n "${CLIENT_TTYS[1]:-}" ]] || die 'client identity mapping'
-  open_popup 0; [[ -n "${POPUP_CONTROLS[0]:-}" ]] || die 'first popup owner mapping'; wait_for 'first popup frame' 3 ansi_has 0 live-test; (( $(control_count)==1 )) || die 'first popup control count'
-  open_popup 1; [[ -n "${POPUP_CONTROLS[1]:-}" && "${POPUP_CONTROLS[0]}" != "${POPUP_CONTROLS[1]}" ]] || die 'independent popup owner mapping'; wait_for 'independent popup controls' 3 has_two_controls
+  open_popup 0; [[ -n "${POPUP_CONTROLS[0]:-}" && -n "${POPUP_PIDS[0]:-}" ]] || die 'first popup owner mapping'; wait_for 'first popup frame' 3 ansi_has 0 live-test; (( $(control_count)==1 )) || die 'first popup control count'
+  open_popup 1; [[ -n "${POPUP_CONTROLS[1]:-}" && "${POPUP_CONTROLS[0]}" != "${POPUP_CONTROLS[1]}" && -n "${POPUP_PIDS[1]:-}" && "${POPUP_PIDS[0]}" != "${POPUP_PIDS[1]}" ]] || die 'independent popup control/pid mapping'; wait_for 'independent popup controls' 3 has_two_controls
   before="$(ansi_size 0)"; admin resize-window -t live:0 -x 99 -y 32; send_bytes 0 '\014'; wait_for '99-column layout transcript' 2 ansi_grew_from 0 "$before"; ansi_tail_has 0 "$((before+1))" '─' || die '99-column transcript lacks vertical preview border'
   before="$(ansi_size 0)"; admin resize-window -t live:0 -x 100 -y 32; send_bytes 0 '\014'; wait_for '100-column layout transcript' 2 ansi_grew_from 0 "$before"; ansi_tail_has 0 "$((before+1))" '│' || die '100-column transcript lacks horizontal preview border'; has_two_controls || die 'resize panicked popup'
   # All open_v2/binary option reads must settle before the runtime assertion.
@@ -414,7 +464,7 @@ main() {
   budget 'focus-out after convergence' 0 0
   t="$(now)"; send_bytes 0 '\033[I'; wait_for 'focus-in preview <=1.1s' 1.1 has_capture_since "$t"; focus_in_ms="$(elapsed_ms "$t")"; printf 'focus-in terminal-to-resumed-capture=%sms subscription-convergence<=1000ms immediate-on-relay\n' "$focus_in_ms"; budget 'healthy follow' 10 0
   (( $(record_count "$startup" "$(now)" show-options)==0 )) || die 'runtime show-options'
-  old_control="${POPUP_CONTROLS[0]}"; admin run-shell "kill -TERM $old_control"; wait_for 'single replacement control' 3 popup_replaced 0 "$old_control"; POPUP_CONTROLS[0]="$(controls)"; t="$(now)"; : > "$REJECT"; admin run-shell "kill -TERM ${POPUP_CONTROLS[0]}"
+  old_control="${POPUP_CONTROLS[0]}"; admin run-shell "kill -TERM $old_control"; wait_for 'single replacement control with same popup parent' 3 popup_replaced 0 "$old_control"; POPUP_CONTROLS[0]="$(controls)"; popup_control_has_owner 0 "${POPUP_CONTROLS[0]}" || die 'healthy replacement parent changed popup pid'; t="$(now)"; : > "$REJECT"; admin run-shell "kill -TERM ${POPUP_CONTROLS[0]}"
   wait_for 'degraded banner' 3 ansi_has 0 'live updates lost — polling'; wait_for 'degraded list-panes' 2 has_list_since "$t"; wait_for 'no persistent control after rejected reconnect' 2 control_is_zero
   budget 'degraded follow' 10 5; send_bytes 0 '\025'; budget 'degraded inspect' 0 5
   # Status publishers write a coherent triple. A bare status is deliberately
@@ -436,7 +486,7 @@ main() {
   wait_for 'literal hostile send reaches selected cat pane' 2 pane_contains "$pane" "$hostile"
   [[ ! -e "$sentinel" ]] || die 'hostile send sentinel'
   send_bytes 0 x; send_bytes 0 y; wait_for 'confirmed selected-pane kill' 2 target_gone "$pane"; target_present "$target" || die 'spare pane did not survive selected kill'
-   t="$(now)"; send_bytes 0 q; sleep .2; (( $(runtime_count "$t" "$(now)")==0 )) || die 'closed popup runtime work'
+   send_bytes 0 q; wait_for 'healthy popup pane-dash exit' 2 popup_closed 0; t="$(now)"; ! control_present "${POPUP_CONTROLS[0]}" || die 'healthy popup control survived pane-dash exit'; sleep .2; (( $(runtime_count "$t" "$(now)")==0 )) || die 'closed popup runtime work'
    rm -f "$REJECT"
    unrelated_session_changes_keep_popup_open
    destroy_popup_detach_off
@@ -447,4 +497,27 @@ main() {
 }
 session_gone() { ! admin has-session -t "$1" 2>/dev/null; }
 control_is_zero() { (( $(control_count)==0 )); }
+popup_pid_tracking_self_test() {
+  local popup_pid
+  sleep 5 & popup_pid=$!
+  # shellcheck disable=SC2329 # popup_closed invokes this test override indirectly.
+  control_present() { return 1; }
+  pane_dash_process() { pid_is_alive "$1"; }
+  POPUP_CONTROLS[0]=999999
+  POPUP_PIDS[0]="$popup_pid"
+  if popup_closed 0; then
+    kill "$popup_pid" 2>/dev/null || true
+    wait "$popup_pid" 2>/dev/null || true
+    printf 'RED: control-only popup_closed passed while popup pid=%s remained alive\n' "$popup_pid" >&2
+    return 1
+  fi
+  kill "$popup_pid" 2>/dev/null || true
+  wait "$popup_pid" 2>/dev/null || true
+}
+
+if [[ "${1:-}" == --popup-pid-self-test ]]; then
+  popup_pid_tracking_self_test
+  exit
+fi
+
 main "$@"
