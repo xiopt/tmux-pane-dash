@@ -1199,8 +1199,16 @@ fn reduce_create_modal_key(
             }
         },
         CreateModal::Form(form) if form.submitting => {
-            state.modal = Some(Modal::Create(CreateModal::Form(form)));
-            ReduceResult::default()
+            if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+                state.should_quit = true;
+                ReduceResult {
+                    actions: vec![Action::Quit],
+                    changed: true,
+                }
+            } else {
+                state.modal = Some(Modal::Create(CreateModal::Form(form)));
+                ReduceResult::default()
+            }
         }
         CreateModal::Form(mut form) => reduce_create_form_key(state, &mut form, key),
     }

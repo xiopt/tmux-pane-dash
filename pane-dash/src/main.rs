@@ -1984,7 +1984,7 @@ mod tests {
         apply_event(
             &mut terminal,
             &mut app,
-            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
             &tmux,
             None,
             "/dev/ttys001",
