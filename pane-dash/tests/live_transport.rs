@@ -12,7 +12,7 @@ use pane_dash::{
     actions::{kill_pane, send_text},
     app::ActionOutcome,
     control::{ControlEvent, ControlHandle, connect_control},
-    model::{Model, ModelConfig, PaneId, Status},
+    model::{Model, ModelConfig, PaneId, Status, WindowId},
     preview::parse_preview,
     snapshot::parse,
     tmux_exec::TmuxExec,
@@ -66,8 +66,9 @@ async fn live_transport_freshness_harness() {
     );
 
     drain_events(&mut events);
-    let split_started = Instant::now();
     let split_pane = harness.split("live:0", "exec sleep 60");
+    // Tagging and one-shot discovery establish the expected post-split model;
+    // they are setup, not part of the completed mutation -> accepted model metric.
     harness.set_pane_option(&split_pane, "@pane_dash_tag", "live-split");
     assert!(
         harness
@@ -77,22 +78,30 @@ async fn live_transport_freshness_harness() {
         "one-shot split did not retain {}",
         split_pane.0
     );
+    let split_started = completed_mutation_started();
     assert_notification_snapshot(
         &control,
         &mut events,
         &mut transport,
         "attached_split",
         split_started,
-        |model| model.panes().contains_key(&split_pane),
+        |model| {
+            model
+                .panes()
+                .get(&split_pane)
+                .is_some_and(|pane| pane.tag == "live-split")
+        },
     )
     .await;
 
+    // Creating/tagging the kill target and consuming its setup event are
+    // preconditions; the kill metric starts only after kill_pane returns.
     let kill_target = harness.split("live:0", "exec sleep 60");
     harness.set_pane_option(&kill_target, "@pane_dash_tag", "live-kill");
     wait_topology(&mut events, "setup_kill").await;
     drain_events(&mut events);
-    let kill_started = Instant::now();
     assert_eq!(kill_pane(&exec, &kill_target).await, ActionOutcome::Success);
+    let kill_started = completed_mutation_started();
     assert_notification_snapshot(
         &control,
         &mut events,
@@ -104,10 +113,13 @@ async fn live_transport_freshness_harness() {
     .await;
 
     drain_events(&mut events);
-    let new_started = Instant::now();
     harness.run(["new-window", "-d", "-t", "live", "-n", "fresh", "exec cat"]);
+    // Pane discovery and tag setup make this window identifiable in the model;
+    // neither is part of the new-window freshness metric.
     let fresh_pane = harness.pane_id("live:fresh.0");
+    let fresh_window = harness.window_id("live:fresh");
     harness.set_pane_option(&fresh_pane, "@pane_dash_tag", "live-fresh");
+    let new_started = completed_mutation_started();
     assert_notification_snapshot(
         &control,
         &mut events,
@@ -117,15 +129,19 @@ async fn live_transport_freshness_harness() {
         |model| {
             model
                 .windows()
-                .values()
-                .any(|window| window.name == "fresh")
+                .get(&fresh_window)
+                .is_some_and(|window| window.name == "fresh")
+                && model
+                    .panes()
+                    .get(&fresh_pane)
+                    .is_some_and(|pane| pane.tag == "live-fresh")
         },
     )
     .await;
 
     drain_events(&mut events);
-    let rename_started = Instant::now();
     harness.run(["rename-window", "-t", "live:fresh", "renamed"]);
+    let rename_started = completed_mutation_started();
     assert_notification_snapshot(
         &control,
         &mut events,
@@ -135,8 +151,8 @@ async fn live_transport_freshness_harness() {
         |model| {
             model
                 .windows()
-                .values()
-                .any(|window| window.name == "renamed")
+                .get(&fresh_window)
+                .is_some_and(|window| window.name == "renamed")
         },
     )
     .await;
@@ -145,9 +161,11 @@ async fn live_transport_freshness_harness() {
     harness.run(["link-window", "-s", "live:0", "-t", "linked:1"]);
     wait_topology(&mut events, "link_window").await;
     drain_events(&mut events);
-    let linked_started = Instant::now();
     let linked_pane = harness.split("live:0", "exec sleep 60");
+    // The linked window and its tag are established before timing; only the
+    // completed split's notification/debounce/snapshot path is measured.
     harness.set_pane_option(&linked_pane, "@pane_dash_tag", "live-linked");
+    let linked_started = completed_mutation_started();
     assert_notification_snapshot(
         &control,
         &mut events,
@@ -167,6 +185,10 @@ async fn live_transport_freshness_harness() {
                 && memberships
                     .iter()
                     .any(|membership| model.sessions()[&membership.session_id].name == "linked")
+                && model
+                    .panes()
+                    .get(&linked_pane)
+                    .is_some_and(|pane| pane.tag == "live-linked")
         },
     )
     .await;
@@ -326,6 +348,14 @@ async fn assert_notification_snapshot<A>(
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+/// The attached-topology metric starts only once the synchronous mutation and
+/// required setup have completed: completed tmux mutation -> accepted model.
+/// It therefore measures control notification consumption, the 50ms debounce,
+/// and snapshot/model acceptance—not one-shot setup command latency.
+fn completed_mutation_started() -> Instant {
+    Instant::now()
 }
 
 async fn channel_model(control: &ControlHandle, transport: &mut TransportCoordinator) -> Model {
@@ -565,6 +595,13 @@ impl Harness {
     fn pane_id(&self, target: &str) -> PaneId {
         PaneId::from(
             self.output(["display-message", "-p", "-t", target, "#{pane_id}"])
+                .trim(),
+        )
+    }
+
+    fn window_id(&self, target: &str) -> WindowId {
+        WindowId::from(
+            self.output(["display-message", "-p", "-t", target, "#{window_id}"])
                 .trim(),
         )
     }
