@@ -30,7 +30,13 @@ pub fn spawn_connection_attempt(
     tokio::spawn(async move {
         match connect_control(tmux_bin, &session_id).await {
             Ok((handle, mut events)) => {
-                let _ = handle.subscribe_focus(&client_tty).await;
+                if let Err(error) = handle.subscribe_focus(&client_tty).await {
+                    let _ = tx.send(ConnectionMessage::Failed {
+                        generation,
+                        error: error.to_string(),
+                    });
+                    return;
+                }
                 if tx
                     .send(ConnectionMessage::Connected { handle, generation })
                     .is_err()
@@ -271,7 +277,7 @@ mod tests {
             let dir = TempDir::new().unwrap();
             let fake = fake_tmux(
                 &dir,
-                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nsleep 0.05",
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\nprintf '%s\\n' '%begin 2 2 2' '%end 2 2 2'\nsleep 0.05",
             );
             let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -308,11 +314,58 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn invalid_focus_tty_fails_without_connecting_or_emitting_events() {
+            let dir = TempDir::new().unwrap();
+            let fake = fake_tmux(&dir, "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nsleep 1");
+            let (tx, mut rx) = mpsc::unbounded_channel();
+
+            spawn_connection_attempt(fake, "$7".into(), "not-a-tty".into(), 19, tx);
+
+            let Some(ConnectionMessage::Failed {
+                generation: 19,
+                error,
+            }) = timeout(Duration::from_secs(1), rx.recv()).await.unwrap()
+            else {
+                panic!("expected focus subscription failure for generation 19");
+            };
+            assert!(error.contains("invalid tmux control focus subscription client tty"));
+            assert!(matches!(
+                timeout(Duration::from_millis(100), rx.recv()).await,
+                Ok(None)
+            ));
+        }
+
+        #[tokio::test]
+        async fn focus_subscription_error_fails_without_connecting_or_emitting_events() {
+            let dir = TempDir::new().unwrap();
+            let fake = fake_tmux(
+                &dir,
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\nprintf '%s\\n' '%begin 2 2 2' '%error 2 2 2'\nsleep 1",
+            );
+            let (tx, mut rx) = mpsc::unbounded_channel();
+
+            spawn_connection_attempt(fake, "$7".into(), "/dev/ttys001".into(), 23, tx);
+
+            let Some(ConnectionMessage::Failed {
+                generation: 23,
+                error,
+            }) = timeout(Duration::from_secs(1), rx.recv()).await.unwrap()
+            else {
+                panic!("expected focus subscription failure for generation 23");
+            };
+            assert!(error.contains("tmux control focus subscription failed"));
+            assert!(matches!(
+                timeout(Duration::from_millis(100), rx.recv()).await,
+                Ok(None)
+            ));
+        }
+
+        #[tokio::test]
         async fn late_events_keep_the_generation_of_the_connection_that_emitted_them() {
             let dir = TempDir::new().unwrap();
             let fake = fake_tmux(
                 &dir,
-                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nsleep 0.05",
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\nprintf '%s\\n' '%begin 2 2 2' '%end 2 2 2'\nsleep 0.05",
             );
             let (tx, mut rx) = mpsc::unbounded_channel();
 

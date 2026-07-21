@@ -29,9 +29,9 @@ assert_notification() {
   run "$SCRIPT"
 
   [ "$status" -eq 0 ]
-  assert_call 3 bind-key D run-shell "'$ROOT/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
-  assert_call 4 bind-key T run-shell "\"$ROOT/scripts/tag.sh\" toggle '#{pane_id}'"
-  assert_call 5 bind-key M command-prompt -p 'pane-dash label:' \
+  assert_call 5 bind-key D run-shell "'$ROOT/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
+  assert_call 6 bind-key T run-shell "\"$ROOT/scripts/tag.sh\" toggle '#{pane_id}'"
+  assert_call 7 bind-key M command-prompt -p 'pane-dash label:' \
     "set-option -p @pane_dash_label_input \"%%%\" ; run-shell '\"$ROOT/scripts/tag.sh\" label-from-option \"#{pane_id}\"'"
 }
 
@@ -43,9 +43,9 @@ assert_notification() {
   run "$SCRIPT"
 
   [ "$status" -eq 0 ]
-  assert_call 3 bind-key F run-shell "'$ROOT/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
-  assert_call 4 bind-key g run-shell "\"$ROOT/scripts/tag.sh\" toggle '#{pane_id}'"
-  assert_call 5 bind-key L command-prompt -p 'pane-dash label:' \
+  assert_call 5 bind-key F run-shell "'$ROOT/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
+  assert_call 6 bind-key g run-shell "\"$ROOT/scripts/tag.sh\" toggle '#{pane_id}'"
+  assert_call 7 bind-key L command-prompt -p 'pane-dash label:' \
     "set-option -p @pane_dash_label_input \"%%%\" ; run-shell '\"$ROOT/scripts/tag.sh\" label-from-option \"#{pane_id}\"'"
 }
 
@@ -53,7 +53,7 @@ assert_notification() {
   run "$SCRIPT"
 
   [ "$status" -eq 0 ]
-  assert_call 3 bind-key D run-shell "'$ROOT/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
+  assert_call 5 bind-key D run-shell "'$ROOT/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
 }
 
 @test "resolves the rust binary from the plugin-local bin directory first" {
@@ -67,7 +67,7 @@ assert_notification() {
   run "$copy_root/pane_dash.tmux"
 
   [ "$status" -eq 0 ]
-  assert_call 3 bind-key D run-shell \
+  assert_call 5 bind-key D run-shell \
     "'$copy_root/scripts/open_v2.sh' '$copy_root/bin/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'"
 }
 
@@ -82,7 +82,7 @@ assert_notification() {
   run "$copy_root/pane_dash.tmux"
 
   [ "$status" -eq 0 ]
-  assert_call 3 bind-key D run-shell \
+  assert_call 5 bind-key D run-shell \
     "'$copy_root/scripts/open_v2.sh' '$copy_root/bin/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'"
 }
 
@@ -98,7 +98,7 @@ assert_notification() {
   [ "$status" -eq 0 ]
   assert_notification 1 display-message \
     'pane-dash: rust engine selected but pane-dash binary not found; using fzf'
-  assert_call 3 bind-key D run-shell "'$copy_root/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
+  assert_call 5 bind-key D run-shell "'$copy_root/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
 }
 
 @test "open_v2 passes the exact popup argv with defaults" {
@@ -117,8 +117,8 @@ assert_notification() {
   run "$copy_root/pane_dash.tmux"
 
   [ "$status" -eq 0 ]
-  assert_call 3 bind-key D run-shell "'$copy_root/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
-  assert_call 4 bind-key T run-shell "\"$copy_root/scripts/tag.sh\" toggle '#{pane_id}'"
+  assert_call 5 bind-key D run-shell "'$copy_root/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
+  assert_call 6 bind-key T run-shell "\"$copy_root/scripts/tag.sh\" toggle '#{pane_id}'"
 }
 
 @test "installs additive indexed focus hooks without replacing user hook zero" {
@@ -134,6 +134,37 @@ assert_notification() {
   [ "$status" -eq 0 ]
   [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[0]")" = 'display-message user-focus-hook' ]
   [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[31337]")" = 'set-option -gF "@pane_dash_focus_#{hook_client}" "1"' ]
+}
+
+@test "default focus setup enables both tmux focus options" {
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+  assert_call 3 set-option -g focus-events on
+  assert_call 4 set-option -as terminal-features ',*:focus'
+  [ "$(<"$TMUX_STUB_DIR/global/focus-events")" = on ]
+  [ "$(<"$TMUX_STUB_DIR/global/terminal-features")" = ',*:focus' ]
+}
+
+@test "enables focus delivery idempotently without replacing user hooks or terminal features" {
+  mkdir -p "$TMUX_STUB_DIR/hooks"
+  printf '%s' 'display-message user-focus-hook' > "$TMUX_STUB_DIR/hooks/client-focus-in[0]"
+  printf '%s' 'screen*:RGB' > "$TMUX_STUB_DIR/global/terminal-features"
+
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+  assert_call 3 set-option -g focus-events on
+  assert_call 4 set-option -as terminal-features ',*:focus'
+  [ "$(<"$TMUX_STUB_DIR/global/focus-events")" = on ]
+  [ "$(<"$TMUX_STUB_DIR/global/terminal-features")" = 'screen*:RGB,*:focus' ]
+  [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[0]")" = 'display-message user-focus-hook' ]
+
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -oF '*:focus' "$TMUX_STUB_DIR/global/terminal-features" | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[0]")" = 'display-message user-focus-hook' ]
 }
 
 @test "open_v2 initializes the owner focus option before opening its popup" {

@@ -16,6 +16,7 @@ declare -a TASK9_TARGET_PANES=() TASK9_TAGS=() TASK9_CLIENT_INDEXES=()
 die() { printf 'FAIL: %s\n' "$*" >&2; diagnostics >&2 || true; exit 1; }
 admin() { TMUX='' "$REAL_TMUX" -S "$SOCKET" "$@"; }
 now() { perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%.9f",clock_gettime(CLOCK_MONOTONIC)'; }
+elapsed_ms() { perl -e 'printf "%.0f", ($ARGV[1] - $ARGV[0]) * 1000' "$1" "$(now)"; }
 cleanup() {
   set +e
   local fd pid
@@ -381,11 +382,14 @@ main() {
   admin new-session -d -s other -x 120 -y 40 'exec cat'
   local pane target startup old_control t before after captures
   pane="$(admin display-message -p -t live:0.0 '#{pane_id}')"; target="$(admin split-window -d -P -F '#{pane_id}' -t live:0 'exec cat')"
-  admin set-option -g @pane-dash-engine rust; admin set-option -g @pane-dash-width 100%; admin set-option -g @pane-dash-height 100%; admin set-option -g focus-events on; admin set-option -as terminal-features ',xterm*:focus'; admin set-option -p -t "$pane" @pane_dash_tag live-test; admin set-option -p -t "$target" @pane_dash_tag live-spare
+  admin set-option -g @pane-dash-engine rust; admin set-option -g @pane-dash-width 100%; admin set-option -g @pane-dash-height 100%; admin set-option -p -t "$pane" @pane_dash_tag live-test; admin set-option -p -t "$target" @pane_dash_tag live-spare
   TASK9_MARKER="$TMP/task9-marker"
   admin set-environment -g PATH "$WRAP:$PATH"; admin set-environment -g PD_REAL_TMUX "$REAL_TMUX"; admin set-environment -g PD_SOCKET "$SOCKET"; admin set-environment -g PD_LOG "$LOG"; admin set-environment -g PD_REJECT "$REJECT"; admin set-environment -g PD_TASK9_MARKER "$TASK9_MARKER"
   # Install pane_dash.tmux through the wrapper; do not directly run pane-dash.
   PATH="$WRAP:$PATH" PD_REAL_TMUX="$REAL_TMUX" PD_SOCKET="$SOCKET" PD_LOG="$LOG" PD_REJECT="$REJECT" TMUX='' "$ROOT/pane_dash.tmux"
+  [[ "$(admin show-options -gv focus-events)" == on ]] || die 'production plugin did not enable focus-events'
+  terminal_features="$(admin show-options -sv terminal-features)"
+  grep -Fxq '*:focus' <<< "$terminal_features" || die 'production plugin did not enable terminal focus feature'
   start_client live first; start_client live second
   [[ -n "${CLIENT_PIDS[0]:-}" && -n "${CLIENT_TTYS[0]:-}" && -n "${CLIENT_PIDS[1]:-}" && -n "${CLIENT_TTYS[1]:-}" ]] || die 'client identity mapping'
   open_popup 0; [[ -n "${POPUP_CONTROLS[0]:-}" ]] || die 'first popup owner mapping'; wait_for 'first popup frame' 3 ansi_has 0 live-test; (( $(control_count)==1 )) || die 'first popup control count'
@@ -403,12 +407,12 @@ main() {
   # capture to the second control client.
   send_bytes 0 '\025'; t="$(now)"; send_bytes 1 j; send_bytes 1 j; wait_for 'second popup preview' .5 has_capture_since "$t"
   send_bytes 0 '\022';
-  # Subscription changes are sampled by tmux at most once a second, so the
-  # first owner may contribute up to two captures before it observes FocusOut.
+  # Subscription changes converge within one second, so the first owner may
+  # contribute up to two captures before it observes FocusOut.
   send_bytes 0 '\033[O'; t="$(now)"; budget 'focus-out first owner only second follows' 12 0; captures="$(record_count "$t" "$(now)" capture-pane)"; ((captures>=9)) || die 'second popup did not continue during first focus-out'
   close_popup 1; wait_for 'second popup independent close' 2 popup_is_only_control 0
-  before="$(record_count "$startup" "$(now)" capture-pane)"; budget 'focus-out inspect' 0 0; after="$(record_count "$startup" "$(now)" capture-pane)"; ((before==after)) || die 'focus-out capture'
-  t="$(now)"; send_bytes 0 '\033[I'; wait_for 'focus-in preview' .5 has_capture_since "$t"; budget 'healthy follow' 10 0
+  budget 'focus-out after convergence' 0 0
+  t="$(now)"; send_bytes 0 '\033[I'; wait_for 'focus-in preview <=1.1s' 1.1 has_capture_since "$t"; focus_in_ms="$(elapsed_ms "$t")"; printf 'focus-in terminal-to-resumed-capture=%sms subscription-convergence<=1000ms immediate-on-relay\n' "$focus_in_ms"; budget 'healthy follow' 10 0
   (( $(record_count "$startup" "$(now)" show-options)==0 )) || die 'runtime show-options'
   old_control="${POPUP_CONTROLS[0]}"; admin run-shell "kill -TERM $old_control"; wait_for 'single replacement control' 3 popup_replaced 0 "$old_control"; POPUP_CONTROLS[0]="$(controls)"; t="$(now)"; : > "$REJECT"; admin run-shell "kill -TERM ${POPUP_CONTROLS[0]}"
   wait_for 'degraded banner' 3 ansi_has 0 'live updates lost — polling'; wait_for 'degraded list-panes' 2 has_list_since "$t"; wait_for 'no persistent control after rejected reconnect' 2 control_is_zero

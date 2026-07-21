@@ -44,9 +44,11 @@ case "$cmd" in
       done
       printf '%s%s\n' "$rendered" "$rest"
     done < "$TMUX_STUB_DIR/panes" ;;
-  show-option | show-options) # show-option(s) -gqv <name> | show-option -pqv -t <pane> <name>
+  show-option | show-options) # show-option(s) -gqv <name> | show-options -sv <name> | show-option -pqv -t <pane> <name>
     log_args invocations.log "$@"
     if [ "$2" = "-gqv" ]; then
+      cat "$TMUX_STUB_DIR/global/$3" 2>/dev/null || true
+    elif [ "$2" = "-sv" ]; then
       cat "$TMUX_STUB_DIR/global/$3" 2>/dev/null || true
     else                     # -pqv -t <pane> <name>
       cat "$TMUX_STUB_DIR/panes.d/$4/$5" 2>/dev/null || true
@@ -67,6 +69,17 @@ case "$cmd" in
     log_args calls.log "$@"
     mkdir -p "$TMUX_STUB_DIR/hooks"
     printf '%s' "$4" > "$TMUX_STUB_DIR/hooks/$3" ;;
+  set-option)
+    log_args calls.log "$@"
+    case "${2:-}" in
+      -g)
+        mkdir -p "$(dirname "$TMUX_STUB_DIR/global/$3")"
+        printf '%s' "$4" > "$TMUX_STUB_DIR/global/$3" ;;
+      -as)
+        mkdir -p "$(dirname "$TMUX_STUB_DIR/global/$3")"
+        current="$(cat "$TMUX_STUB_DIR/global/$3" 2>/dev/null || true)"
+        printf '%s%s' "$current" "$4" > "$TMUX_STUB_DIR/global/$3" ;;
+    esac ;;
   *)
     log_args calls.log "$@" ;;
 esac
