@@ -98,6 +98,24 @@ fn malformed_or_unsupported_ansi_never_panics_or_leaks_terminal_state() {
             .flat_map(|line| &line.spans)
             .all(|span| span.style == Style::default())
     );
+
+    let hostile = std::panic::catch_unwind(|| {
+        parse_preview(
+            PaneId("%12".into()),
+            b"\x1b[38;5;999mcolor\x1b[0m\x1b]8;;\x07link\x1b]8;;\x07\x1b[?25l".to_vec(),
+        )
+    })
+    .expect("hostile ANSI must not panic");
+    let hostile_text = hostile.lines.iter().map(line_text).collect::<String>();
+    assert_eq!(hostile_text, "colorlink");
+    assert!(
+        hostile
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .all(|span| !span.content.contains('\x1b')),
+        "unsupported terminal controls must not leak into preview text"
+    );
 }
 
 /// Captured from OpenCode 1.17.20 in a 120x36 isolated tmux pane attached through

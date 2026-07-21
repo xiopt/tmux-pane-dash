@@ -2147,6 +2147,15 @@ mod tests {
             })
         );
 
+        let empty_submit = reduce(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.modal, None);
+        assert!(empty_submit.actions.is_empty());
+
+        reduce(
+            &mut app,
+            key_with_modifiers(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+
         reduce(&mut app, key(KeyCode::Char('é')));
         reduce(&mut app, shift_key(KeyCode::Char('X')));
         reduce(&mut app, key(KeyCode::Backspace));
@@ -2215,26 +2224,49 @@ mod tests {
 
         reduce(&mut app, key(KeyCode::Char('j')));
         reduce(&mut app, key(KeyCode::Char('j')));
-        reduce(&mut app, key(KeyCode::Char('x')));
-        assert_eq!(
-            app.modal,
-            Some(Modal::Kill {
-                pane_id: PaneId::from("%a")
-            })
-        );
 
-        let blocked = reduce(&mut app, key(KeyCode::Char('j')));
-        assert!(blocked.actions.is_empty());
-        assert_eq!(app.modal, None);
-        assert_eq!(app.selected_pane(), Some(PaneId::from("%a")));
-
-        reduce(&mut app, key(KeyCode::Char('x')));
-        let cancelled = reduce(
-            &mut app,
+        for cancelled_key in [
+            key(KeyCode::Char('j')),
+            key(KeyCode::Char('n')),
+            shift_key(KeyCode::Char('N')),
+            key(KeyCode::Enter),
+            key(KeyCode::Esc),
+            key(KeyCode::Char('k')),
+            key(KeyCode::Char('z')),
+            key(KeyCode::Backspace),
             key_with_modifiers(KeyCode::Char('y'), KeyModifiers::CONTROL),
-        );
-        assert!(cancelled.actions.is_empty());
-        assert_eq!(app.modal, None);
+        ] {
+            reduce(&mut app, key(KeyCode::Char('x')));
+            assert_eq!(
+                app.modal,
+                Some(Modal::Kill {
+                    pane_id: PaneId::from("%a")
+                })
+            );
+            let preserved = (
+                app.selected_pane(),
+                app.focus.clone(),
+                app.mode,
+                app.filter_query.clone(),
+                app.pending_action.clone(),
+                app.should_quit,
+            );
+
+            let cancelled = reduce(&mut app, cancelled_key);
+            assert!(cancelled.actions.is_empty());
+            assert_eq!(app.modal, None);
+            assert_eq!(
+                (
+                    app.selected_pane(),
+                    app.focus.clone(),
+                    app.mode,
+                    app.filter_query.clone(),
+                    app.pending_action.clone(),
+                    app.should_quit,
+                ),
+                preserved
+            );
+        }
 
         reduce(&mut app, key(KeyCode::Char('x')));
         let confirmed = reduce(&mut app, shift_key(KeyCode::Char('Y')));

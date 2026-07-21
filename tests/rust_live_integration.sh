@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/spike/lib.sh"
 REAL_TMUX="$(command -v "$TMUX_BIN")"
 BIN="$ROOT/bin/pane-dash"
-TMP='' SOCKET='' WRAP='' LOG='' REJECT='' TASK9_MARKER='' TASK9_DEGRADED_INDEX=''
+TMP='' SOCKET='' WRAP='' LOG='' REJECT='' TASK9_MARKER='' TASK9_DEGRADED_INDEX='' TASK9_HOOK_INDEX=''
 declare -a CLIENT_PIDS=() CLIENT_TTYS=() PRODUCER_PIDS=() WRITER_FDS=()
 declare -a TRANSCRIPTS=() SESSIONS=() LABELS=() POPUP_CONTROLS=() POPUP_PIDS=()
 declare -a TASK9_SOURCE_SESSIONS=() TASK9_TARGET_SESSIONS=() TASK9_SOURCE_PANES=()
@@ -20,6 +20,7 @@ elapsed_ms() { perl -e 'printf "%.0f", ($ARGV[1] - $ARGV[0]) * 1000' "$1" "$(now
 cleanup() {
   set +e
   local fd pid
+  task9_clear_causal_evidence
   if [[ -n "$TASK9_MARKER" ]]; then rm -f "$TASK9_MARKER"; TASK9_MARKER=''; fi
   if [[ -n "$REJECT" ]]; then rm -f "$REJECT"; REJECT=''; fi
   if [[ -n "$TASK9_DEGRADED_INDEX" ]]; then TASK9_DEGRADED_INDEX=''; fi
@@ -77,7 +78,7 @@ f="$(mktemp "$PD_LOG/invocation.XXXXXXXX")"
   perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'my$f=shift;open my$o,">",$f or die$!;binmode$o;printf $o "%.9f\0",clock_gettime(CLOCK_MONOTONIC);print $o join("\0",@ARGV),"\0"' "$f" "${args[@]}"
   if [[ -e "$PD_REJECT" ]]; then for x in "${args[@]}"; do [[ "$x" != -C ]] || exit 79; done; fi
   if [[ -n "${PD_TASK9_MARKER:-}" && -f "$PD_TASK9_MARKER" ]]; then
-    read -r marker_pane marker_victim < "$PD_TASK9_MARKER"
+    read -r marker_kind marker_pane marker_victim < "$PD_TASK9_MARKER"
     command_index=0
     while (( command_index < ${#args[@]} )); do
       case "${args[command_index]}" in
@@ -85,7 +86,13 @@ f="$(mktemp "$PD_LOG/invocation.XXXXXXXX")"
         *) break ;;
       esac
     done
-    if [[ "${args[command_index]:-}" == resize-pane && "${args[command_index+1]:-}" == -Z && "${args[command_index+2]:-}" == -t && "${args[command_index+3]:-}" == "$marker_pane" ]]; then
+    if [[ "$marker_kind" == causal && "${args[command_index]:-}" == resize-pane && "${args[command_index+1]:-}" == -Z && "${args[command_index+2]:-}" == -t && "${args[command_index+3]:-}" == "$marker_pane" ]]; then
+      "$PD_REAL_TMUX" "${args[@]}" || exit $?
+      TMUX='' "$PD_REAL_TMUX" -S "$PD_SOCKET" set-option -g @pane_dash_test_resize_complete 1 || exit $?
+      rm -f "$PD_TASK9_MARKER"
+      exit 0
+    fi
+    if [[ "$marker_kind" == kill && "${args[command_index]:-}" == resize-pane && "${args[command_index+1]:-}" == -Z && "${args[command_index+2]:-}" == -t && "${args[command_index+3]:-}" == "$marker_pane" ]]; then
       "$PD_REAL_TMUX" "${args[@]}" || exit $?
       TMUX='' "$PD_REAL_TMUX" -S "$PD_SOCKET" kill-pane -t "$marker_victim" || exit $?
       rm -f "$PD_TASK9_MARKER"
@@ -207,6 +214,20 @@ log_exact_switch_client_since() {
 task9_write() { local fd="${WRITER_FDS[${TASK9_CLIENT_INDEXES[$1]}]}"; printf '%b' "$2" >&"$fd"; }
 task9_popup_open() { popup_open "${TASK9_CLIENT_INDEXES[$1]}"; }
 task9_popup_closed() { popup_closed "${TASK9_CLIENT_INDEXES[$1]}"; }
+task9_clear_causal_evidence() {
+  admin set-option -gu @pane_dash_test_resize_complete 2>/dev/null || true
+  admin set-option -gu @pane_dash_test_switch_saw_resize 2>/dev/null || true
+  if [[ -n "$TASK9_HOOK_INDEX" ]]; then
+    admin set-hook -gu "client-session-changed[$TASK9_HOOK_INDEX]" 2>/dev/null || true
+    TASK9_HOOK_INDEX=''
+  fi
+}
+task9_install_causal_hook() {
+  task9_clear_causal_evidence
+  TASK9_HOOK_INDEX="$((100000 + RANDOM))"
+  admin set-hook -g "client-session-changed[$TASK9_HOOK_INDEX]" 'set-option -gF @pane_dash_test_switch_saw_resize "#{@pane_dash_test_resize_complete}"'
+}
+task9_option_value() { admin show-options -gv "$1" 2>/dev/null || true; }
 task9_target_present() { target_present "${TASK9_TARGET_PANES[$1]}"; }
 task9_target_gone() { target_gone "${TASK9_TARGET_PANES[$1]}"; }
 task9_ansi_grew() { ansi_grew_from "${TASK9_CLIENT_INDEXES[$1]}" "$2"; }
@@ -262,7 +283,7 @@ task9_teardown() {
   wait_for "task9 ${TASK9_TAGS[index]} client close" 2 client_gone "$tty"
   admin kill-session -t "${TASK9_SOURCE_SESSIONS[index]}" 2>/dev/null || true
   admin kill-session -t "${TASK9_TARGET_SESSIONS[index]}" 2>/dev/null || true
-  rm -f "$TASK9_MARKER"
+  rm -f "$TASK9_MARKER"; task9_clear_causal_evidence
 }
 task9_normal_enter() {
   local index client_index tty control popup_pid
@@ -277,17 +298,20 @@ task9_normal_enter() {
   task9_teardown "$index"
 }
 task9_zoom_jump() {
-  local index client_index tty control popup_pid started observed resize_at
+  local index client_index tty control popup_pid started
   task9_setup zoom; index="$TASK9_INDEX"; client_index="${TASK9_CLIENT_INDEXES[index]}"; tty="${CLIENT_TTYS[client_index]}"; control="${POPUP_CONTROLS[client_index]}"; popup_pid="${POPUP_PIDS[client_index]}"
-  task9_select_target "$index"; started="$(now)"; task9_write "$index" '\032'
+  task9_select_target "$index"; task9_install_causal_hook
+  [[ -z "$(task9_option_value @pane_dash_test_resize_complete)" && -z "$(task9_option_value @pane_dash_test_switch_saw_resize)" ]] || die 'task9 zoom causal markers were not cleared'
+  printf 'causal %s\n' "${TASK9_TARGET_PANES[index]}" > "$TASK9_MARKER"
+  started="$(now)"; task9_write "$index" '\032'
   wait_for 'task9 zoom resize invocation' 2 log_has_target_since "$started" resize-pane "${TASK9_TARGET_PANES[index]}"
   wait_for 'task9 zoom exact client jump' 2 client_is "$tty" "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}"
-  observed="$(now)"; resize_at="$(log_target_time_since "$started" resize-pane "${TASK9_TARGET_PANES[index]}")"
-  perl -e 'exit(($ARGV[0] < $ARGV[1]) ? 0 : 1)' "$resize_at" "$observed" || die 'task9 zoom resize ordering'
+  [[ ! -e "$TASK9_MARKER" ]] || die 'task9 zoom causal marker was not consumed'
+  [[ "$(task9_option_value @pane_dash_test_switch_saw_resize)" == 1 ]] || die 'task9 zoom switch did not observe completed resize'
   [[ "$(pane_zoom "${TASK9_TARGET_PANES[index]}")" == 1 ]] || die 'task9 zoom target not zoomed'
   wait_for 'task9 zoom pane-dash exit' 2 task9_popup_closed "$index"
   ! control_present "$control" || die 'task9 zoom control survived'
-  printf 'task9 zoom session=%s pane=%s zoom=1 control=%s popup-pid=%s closed resize-before-switch=%s<%s\n' "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}" "$control" "$popup_pid" "$resize_at" "$observed"
+  printf 'task9 zoom session=%s pane=%s zoom=1 control=%s popup-pid=%s closed resize-before-switch=verified\n' "${TASK9_TARGET_SESSIONS[index]}" "${TASK9_TARGET_PANES[index]}" "$control" "$popup_pid"
   task9_teardown "$index"
 }
 task9_killed_before_jump() {
@@ -305,7 +329,7 @@ task9_killed_between_resize_and_switch() {
   local index client_index tty control
   task9_setup killed-between; index="$TASK9_INDEX"; client_index="${TASK9_CLIENT_INDEXES[index]}"; tty="${CLIENT_TTYS[client_index]}"; control="${POPUP_CONTROLS[client_index]}"
   [[ ! -e "$TASK9_MARKER" ]] || die 'task9 marker unexpectedly present'
-  task9_select_target "$index"; printf '%s %s\n' "${TASK9_TARGET_PANES[index]}" "${TASK9_TARGET_PANES[index]}" > "$TASK9_MARKER"
+  task9_select_target "$index"; printf 'kill %s %s\n' "${TASK9_TARGET_PANES[index]}" "${TASK9_TARGET_PANES[index]}" > "$TASK9_MARKER"
   task9_write "$index" '\032'
   wait_for 'task9 killed-between target gone' 2 task9_target_gone "$index"
   [[ ! -e "$TASK9_MARKER" ]] || die 'task9 marker was not consumed'
@@ -515,8 +539,22 @@ popup_pid_tracking_self_test() {
   wait "$popup_pid" 2>/dev/null || true
 }
 
+resize_timestamp_ordering_self_test() {
+  local resize_observed_at=10 switch_observed_at=11
+  if perl -e 'exit(($ARGV[0] < $ARGV[1]) ? 0 : 1)' "$resize_observed_at" "$switch_observed_at"; then
+    printf 'RED: observed timestamp ordering passes without proving switch observed resize completion\n'
+    return 0
+  fi
+  return 1
+}
+
 if [[ "${1:-}" == --popup-pid-self-test ]]; then
   popup_pid_tracking_self_test
+  exit
+fi
+
+if [[ "${1:-}" == --resize-timestamp-ordering-self-test ]]; then
+  resize_timestamp_ordering_self_test
   exit
 fi
 
