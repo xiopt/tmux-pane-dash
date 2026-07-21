@@ -2,10 +2,10 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{AppState, Mode, status_index};
+use crate::app::{AppState, Modal, Mode, status_index};
 use crate::model::{Row, Status};
 
 pub use crate::app::format_age;
@@ -144,6 +144,65 @@ pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
         status_bar(app, cache.status_counts, layout.status_area.width),
         layout.status_area,
     );
+    render_modal(frame, app);
+}
+
+fn render_modal(frame: &mut Frame, app: &AppState) {
+    let Some(modal) = &app.modal else {
+        return;
+    };
+    let area = frame.area();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let width = area.width.clamp(1, 70);
+    let height = area.height.clamp(1, 5);
+    let modal_area = Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    );
+    frame.render_widget(Clear, modal_area);
+    match modal {
+        Modal::Send {
+            pane_id,
+            command,
+            text,
+        } => {
+            let title = truncate_to_width(
+                &format!("Send to {} (running: {})", pane_id.0, command),
+                usize::from(width.saturating_sub(4)),
+            );
+            let block = Block::default().borders(Borders::ALL).title(title);
+            let inner = block.inner(modal_area);
+            frame.render_widget(block, modal_area);
+            if inner.width == 0 || inner.height == 0 {
+                return;
+            }
+            let input = truncate_to_width(&literal_input(text), usize::from(inner.width));
+            let mut lines = vec![Line::raw(input)];
+            if inner.height > 1 {
+                lines.push(Line::raw(truncate_to_width(
+                    "Enter send | Esc cancel",
+                    usize::from(inner.width),
+                )));
+            }
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
+        Modal::Kill { .. } => {}
+    }
+}
+
+fn literal_input(text: &str) -> String {
+    text.chars()
+        .map(|character| match character {
+            '\0'..='\u{1f}' => char::from_u32(0x2400 + character as u32).unwrap(),
+            '\u{7f}' => '␡',
+            _ => character,
+        })
+        .collect()
 }
 
 fn render_preview(frame: &mut Frame, app: &AppState, areas: DashboardAreas) {

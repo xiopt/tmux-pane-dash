@@ -1,0 +1,10 @@
+---
+source: tests/render.rs
+expression: "draw(&state, 18, 6)"
+---
+┌Send to %1 (ru──┐
+│#[fg=red] 東 京   │
+│Enter send | Esc│
+│                │
+└────────────────┘
+W1P1 grouped NAV

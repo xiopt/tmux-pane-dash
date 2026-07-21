@@ -28,6 +28,7 @@ pub enum Action {
     Jump { target: JumpTarget, zoom: bool },
     ToggleGroup(bool),
     CapturePreview { sequence: u64, pane_id: PaneId },
+    SendText { pane_id: PaneId, text: String },
     Quit,
 }
 
@@ -35,6 +36,31 @@ pub enum Action {
 pub enum JumpTarget {
     Session(SessionId),
     Pane(PaneId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Modal {
+    Send {
+        pane_id: PaneId,
+        command: String,
+        text: String,
+    },
+    Kill {
+        pane_id: PaneId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionOutcome {
+    Success,
+    Vanished,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletedAction {
+    Send,
+    Kill,
 }
 
 #[derive(Debug)]
@@ -55,6 +81,11 @@ pub enum Event {
         sequence: u64,
         pane_id: PaneId,
         result: Result<PreviewFrame, String>,
+    },
+    ActionFinished {
+        kind: CompletedAction,
+        pane_id: PaneId,
+        outcome: ActionOutcome,
     },
 }
 
@@ -124,6 +155,7 @@ pub struct AppState {
     pub banner: Option<String>,
     pub transport_degraded: bool,
     pub preview: PreviewState,
+    pub modal: Option<Modal>,
     focus: Option<Focus>,
     pending_key: Option<KeyCode>,
     render_cache: RefCell<RenderCache>,
@@ -156,6 +188,7 @@ impl AppState {
             banner: None,
             transport_degraded: false,
             preview: PreviewState::default(),
+            modal: None,
             focus: None,
             pending_key: None,
             render_cache: RefCell::new(RenderCache::default()),
@@ -332,9 +365,39 @@ pub fn reduce(state: &mut AppState, event: Event) -> ReduceResult {
             pane_id,
             result,
         } => reduce_preview_captured(state, sequence, pane_id, result),
+        Event::ActionFinished {
+            kind,
+            pane_id,
+            outcome,
+        } => reduce_action_finished(state, kind, pane_id, outcome),
     };
     sync_preview_target(state, &mut result);
     result
+}
+
+fn reduce_action_finished(
+    state: &mut AppState,
+    kind: CompletedAction,
+    pane_id: PaneId,
+    outcome: ActionOutcome,
+) -> ReduceResult {
+    let message = match (kind, outcome) {
+        (CompletedAction::Send, ActionOutcome::Success) => None,
+        (CompletedAction::Send, ActionOutcome::Vanished) => {
+            Some(format!("pane {} vanished, aborted", pane_id.0))
+        }
+        (CompletedAction::Send, ActionOutcome::Failed(error)) => Some(error),
+        (CompletedAction::Kill, ActionOutcome::Failed(error)) => Some(error),
+        (CompletedAction::Kill, ActionOutcome::Success | ActionOutcome::Vanished) => {
+            return ReduceResult::default();
+        }
+    };
+    let changed = state.banner != message;
+    state.banner = message;
+    ReduceResult {
+        actions: Vec::new(),
+        changed,
+    }
 }
 
 fn sync_preview_target(state: &mut AppState, result: &mut ReduceResult) {
@@ -522,7 +585,13 @@ pub(crate) fn status_index(status: crate::model::Status) -> usize {
 }
 
 fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
+    if state.modal.is_some() {
+        return reduce_modal_key(state, key);
+    }
     let mut result = ReduceResult::default();
+    if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
+        return open_send_modal(state);
+    }
     if key.modifiers == KeyModifiers::CONTROL {
         match key.code {
             KeyCode::Char('u') => {
@@ -640,6 +709,91 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
         _ => {}
     }
     result
+}
+
+fn open_send_modal(state: &mut AppState) -> ReduceResult {
+    let Some(pane_id) = state.selected_pane() else {
+        let message = Some("select a pane, not a session".into());
+        let changed = state.banner != message;
+        state.banner = message;
+        return ReduceResult {
+            actions: Vec::new(),
+            changed,
+        };
+    };
+    let command = state
+        .model
+        .panes()
+        .get(&pane_id)
+        .map(|pane| pane.command.clone())
+        .unwrap_or_default();
+    let modal = Some(Modal::Send {
+        pane_id,
+        command,
+        text: String::new(),
+    });
+    let changed = state.modal != modal;
+    state.modal = modal;
+    ReduceResult {
+        actions: Vec::new(),
+        changed,
+    }
+}
+
+fn reduce_modal_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
+    let Some(modal) = state.modal.as_mut() else {
+        return ReduceResult::default();
+    };
+    match modal {
+        Modal::Send { pane_id, text, .. } => match key.code {
+            KeyCode::Esc => {
+                state.modal = None;
+                ReduceResult {
+                    actions: Vec::new(),
+                    changed: true,
+                }
+            }
+            KeyCode::Backspace if !text.is_empty() => {
+                text.pop();
+                ReduceResult {
+                    actions: Vec::new(),
+                    changed: true,
+                }
+            }
+            KeyCode::Enter => {
+                let text = std::mem::take(text);
+                let pane_id = pane_id.clone();
+                state.modal = None;
+                ReduceResult {
+                    actions: (!text.is_empty())
+                        .then_some(Action::SendText { pane_id, text })
+                        .into_iter()
+                        .collect(),
+                    changed: true,
+                }
+            }
+            KeyCode::Char(character)
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                text.push(character);
+                ReduceResult {
+                    actions: Vec::new(),
+                    changed: true,
+                }
+            }
+            _ => ReduceResult::default(),
+        },
+        Modal::Kill { .. } => match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                state.modal = None;
+                ReduceResult {
+                    actions: Vec::new(),
+                    changed: true,
+                }
+            }
+            _ => ReduceResult::default(),
+        },
+    }
 }
 
 fn inspect_preview(state: &mut AppState, up: bool) -> bool {
@@ -799,7 +953,10 @@ mod tests {
         text::{Line, Span},
     };
 
-    use crate::app::{Action, AppState, Event, Focus, InputMode, JumpTarget, Mode, reduce};
+    use crate::app::{
+        Action, ActionOutcome, AppState, CompletedAction, Event, Focus, InputMode, JumpTarget,
+        Modal, Mode, reduce,
+    };
     use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, Status, WindowId};
     use crate::preview::{PreviewFrame, parse_preview};
     use crate::snapshot::{ParseOutcome, RawRecord};
@@ -1937,5 +2094,82 @@ mod tests {
             app.render_cache.borrow().rebuild_count,
             initial_rebuilds + 2
         );
+    }
+
+    #[test]
+    fn send_modal_exclusively_edits_literal_text_and_emits_one_action() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(
+            &mut app,
+            key_with_modifiers(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            app.modal,
+            Some(Modal::Send {
+                pane_id: PaneId::from("%a"),
+                command: "opencode".into(),
+                text: String::new(),
+            })
+        );
+
+        reduce(&mut app, key(KeyCode::Char('é')));
+        reduce(&mut app, shift_key(KeyCode::Char('X')));
+        reduce(&mut app, key(KeyCode::Backspace));
+        let ignored = reduce(
+            &mut app,
+            key_with_modifiers(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        );
+        assert!(ignored.actions.is_empty());
+        assert_eq!(
+            app.modal,
+            Some(Modal::Send {
+                pane_id: PaneId::from("%a"),
+                command: "opencode".into(),
+                text: "é".into(),
+            })
+        );
+
+        let submitted = reduce(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.modal, None);
+        assert_eq!(
+            submitted.actions,
+            vec![Action::SendText {
+                pane_id: PaneId::from("%a"),
+                text: "é".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn send_modal_reports_non_pane_selection_and_action_outcomes() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        reduce(
+            &mut app,
+            key_with_modifiers(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.banner.as_deref(), Some("select a pane, not a session"));
+
+        reduce(&mut app, key(KeyCode::Char('j')));
+        reduce(
+            &mut app,
+            Event::ActionFinished {
+                kind: CompletedAction::Send,
+                pane_id: PaneId::from("%a"),
+                outcome: ActionOutcome::Vanished,
+            },
+        );
+        assert_eq!(app.banner.as_deref(), Some("pane %a vanished, aborted"));
+
+        reduce(
+            &mut app,
+            Event::ActionFinished {
+                kind: CompletedAction::Send,
+                pane_id: PaneId::from("%a"),
+                outcome: ActionOutcome::Success,
+            },
+        );
+        assert_eq!(app.banner, None);
     }
 }

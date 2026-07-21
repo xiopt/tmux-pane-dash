@@ -35,6 +35,44 @@ impl TmuxExec {
             .context("tmux capture-pane")
     }
 
+    pub async fn display_pane_id(&self, pane_id: &PaneId) -> Result<Vec<u8>> {
+        self.run_dynamic(&[
+            "display-message".into(),
+            "-p".into(),
+            "-t".into(),
+            pane_id.0.clone(),
+            "#{pane_id}".into(),
+        ])
+        .await
+        .context("tmux display pane id")
+    }
+
+    pub async fn send_keys_literal(&self, pane_id: &PaneId, text: String) -> Result<()> {
+        self.run_dynamic(&[
+            "send-keys".into(),
+            "-l".into(),
+            "-t".into(),
+            pane_id.0.clone(),
+            "--".into(),
+            text,
+        ])
+        .await
+        .context("tmux send literal keys")?;
+        Ok(())
+    }
+
+    pub async fn send_enter(&self, pane_id: &PaneId) -> Result<()> {
+        self.run_dynamic(&[
+            "send-keys".into(),
+            "-t".into(),
+            pane_id.0.clone(),
+            "Enter".into(),
+        ])
+        .await
+        .context("tmux send enter")?;
+        Ok(())
+    }
+
     pub async fn set_group(&self, on: bool) -> Result<()> {
         let value = if on { "1" } else { "0" };
         self.run(["set-option", "-g", "@pane_dash_group", value])
@@ -59,6 +97,23 @@ impl TmuxExec {
     }
 
     async fn run<const N: usize>(&self, args: [&str; N]) -> Result<Vec<u8>> {
+        let output = Command::new(&self.bin)
+            .args(args)
+            .output()
+            .await
+            .with_context(|| format!("spawn {}", self.bin.display()))?;
+        if !output.status.success() {
+            bail!(
+                "{} exited {}: {}",
+                self.bin.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(output.stdout)
+    }
+
+    async fn run_dynamic(&self, args: &[String]) -> Result<Vec<u8>> {
         let output = Command::new(&self.bin)
             .args(args)
             .output()

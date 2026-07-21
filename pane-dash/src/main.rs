@@ -12,8 +12,8 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures_util::StreamExt;
-use pane_dash::actions::execute_jump;
-use pane_dash::app::{Action, AppState, Event, reduce};
+use pane_dash::actions::{execute_jump, send_text};
+use pane_dash::app::{Action, ActionOutcome, AppState, CompletedAction, Event, reduce};
 use pane_dash::control::{ControlEvent, ControlHandle};
 use pane_dash::model::{Model, ModelConfig};
 use pane_dash::options::parse_show_options;
@@ -35,6 +35,12 @@ struct PreviewResponse {
     sequence: u64,
     pane_id: pane_dash::model::PaneId,
     result: Result<pane_dash::preview::PreviewFrame, String>,
+}
+
+#[derive(Default)]
+struct ActionEffects {
+    mutated: bool,
+    refresh_now: bool,
 }
 
 struct SnapshotResponse {
@@ -283,7 +289,18 @@ async fn main() -> Result<()> {
         tokio::select! {
             event = input.next() => match event {
                 Some(Ok(CrosstermEvent::Key(key))) => {
-                    if apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await? {
+                    let effects = apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
+                    if effects.refresh_now {
+                        dispatch_directives(
+                            coordinator.input(pane_dash::transport::TransportInput::RefreshNow),
+                            &mut coordinator, &tmux, &session_id, &connection_tx, &mut control,
+                            &mut pending_connection_generation, &mut active_connection_generation,
+                            &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
+                            &mut next_snapshot_seq, &snapshot_generation,
+                            &mut in_flight_snapshot,
+                        );
+                    }
+                    if effects.mutated {
                         snapshot_generation.record_successful_mutation();
                     }
                 },
@@ -308,7 +325,7 @@ async fn main() -> Result<()> {
                     &mut next_snapshot_seq, &snapshot_generation,
                     &mut in_flight_snapshot,
                 );
-                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await? {
+                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?.mutated {
                     snapshot_generation.record_successful_mutation();
                 }
             },
@@ -411,7 +428,7 @@ async fn main() -> Result<()> {
                     &mut in_flight_snapshot,
                 );
                 if snapshot_generation.accepts(response.seq, response.mutation_generation)
-                    && apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?
+                    && apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?.mutated
                 {
                     snapshot_generation.record_successful_mutation();
                 }
@@ -574,19 +591,19 @@ async fn apply_event(
     client_tty: &str,
     preview_interval: &mut tokio::time::Interval,
     preview_tx: &mpsc::UnboundedSender<PreviewResponse>,
-) -> Result<bool> {
+) -> Result<ActionEffects> {
     let result = reduce(app, event);
-    let mut mutated = false;
+    let mut effects = ActionEffects::default();
     for action in result.actions {
         match action {
             Action::ToggleGroup(on) => {
                 tmux.set_group(on).await?;
-                mutated = true;
+                effects.mutated = true;
             }
             Action::Jump { target, zoom } => {
                 if execute_jump(tmux, control, client_tty, &target, zoom).await {
                     app.should_quit = true;
-                    mutated = true;
+                    effects.mutated = true;
                 }
             }
             Action::CapturePreview { sequence, pane_id } => {
@@ -598,13 +615,30 @@ async fn apply_event(
                     pane_id,
                 );
             }
+            Action::SendText { pane_id, text } => {
+                let outcome = send_text(tmux, &pane_id, &text).await;
+                let succeeded = outcome == ActionOutcome::Success;
+                let completion = reduce(
+                    app,
+                    Event::ActionFinished {
+                        kind: CompletedAction::Send,
+                        pane_id,
+                        outcome,
+                    },
+                );
+                effects.mutated |= succeeded;
+                effects.refresh_now |= succeeded;
+                if completion.changed {
+                    redraw(terminal, app)?;
+                }
+            }
             Action::Quit => {}
         }
     }
     if result.changed {
         redraw(terminal, app)?;
     }
-    Ok(mutated)
+    Ok(effects)
 }
 
 fn start_preview_capture(

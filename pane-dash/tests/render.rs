@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pane_dash::app::{AppState, Event, Mode, reduce};
+use pane_dash::app::{AppState, Event, Modal, Mode, reduce};
 use pane_dash::model::{Model, ModelConfig, PaneId};
 use pane_dash::options::DashConfig;
 use pane_dash::preview::PreviewFrame;
@@ -63,6 +63,25 @@ fn draw_at(app: &AppState, width: u16, height: u16, now: u64) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn send_modal_is_centered_and_renders_literal_ansi_looking_text_at_small_sizes() {
+    let mut state = app(vec![record("dash", "%1", "working", "Task")]);
+    state.modal = Some(Modal::Send {
+        pane_id: "%1".into(),
+        command: "cat".into(),
+        text: "#[fg=red] 東京".into(),
+    });
+
+    let normal = draw(&state, 80, 24);
+    assert!(normal.contains("Send to %1 (running: cat)"));
+    assert!(normal.contains("#[fg=red]"));
+    assert!(normal.contains("Enter send | Esc cancel"));
+    assert!(!draw(&state, 1, 1).is_empty());
+    insta::assert_snapshot!("send_modal", normal);
+    insta::assert_snapshot!("send_modal_narrow", draw(&state, 18, 6));
+    insta::assert_snapshot!("send_modal_tiny", draw(&state, 1, 1));
 }
 
 #[test]

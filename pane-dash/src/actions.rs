@@ -1,6 +1,29 @@
-use crate::app::JumpTarget;
+use crate::app::{ActionOutcome, JumpTarget};
 use crate::control::ControlHandle;
+use crate::model::PaneId;
+use crate::tmux_arg::{Field, encode};
 use crate::tmux_exec::TmuxExec;
+
+pub async fn send_text(tmux: &TmuxExec, pane_id: &PaneId, text: &str) -> ActionOutcome {
+    let Ok(readback) = tmux.display_pane_id(pane_id).await else {
+        return ActionOutcome::Vanished;
+    };
+    let readback = String::from_utf8_lossy(&readback);
+    let readback = readback.trim_end_matches(['\r', '\n']);
+    if readback != pane_id.0 {
+        return ActionOutcome::Vanished;
+    }
+    let text = match encode(text, Field::Plain) {
+        Ok(text) => text,
+        Err(error) => return ActionOutcome::Failed(error.to_string()),
+    };
+    if tmux.send_keys_literal(pane_id, text).await.is_err()
+        || tmux.send_enter(pane_id).await.is_err()
+    {
+        return ActionOutcome::Vanished;
+    }
+    ActionOutcome::Success
+}
 
 /// Builds the one-shot tmux argv vectors for a jump action.
 ///
@@ -78,9 +101,10 @@ pub async fn execute_jump(
 
 #[cfg(test)]
 mod tests {
-    use crate::app::JumpTarget;
+    use crate::app::{ActionOutcome, JumpTarget};
+    use crate::tmux_exec::TmuxExec;
 
-    use super::{execute_jump, jump_commands};
+    use super::{execute_jump, jump_commands, send_text};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(ToString::to_string).collect()
@@ -117,6 +141,162 @@ mod tests {
         assert_eq!(
             jump_commands("/dev/ttys001", &JumpTarget::Session("$3".into()), true),
             vec![args(&["switch-client", "-c", "/dev/ttys001", "-t", "$3"])]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn send_text_prechecks_then_delivers_literal_argv_and_enter() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("log");
+        let fake = dir.path().join("fake-tmux");
+        fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '<%s>\\n' \"$@\" >> '{}'\nif [ \"$1\" = display-message ]; then printf '%%42\\r\\n'; fi",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let outcome = send_text(
+            &TmuxExec::new(&fake),
+            &crate::model::PaneId::from("%42"),
+            "spaces 'quotes' ; #[x] \\ newline\nユニコード -leading",
+        )
+        .await;
+
+        assert_eq!(outcome, ActionOutcome::Success);
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "<display-message>\n<-p>\n<-t>\n<%42>\n<#{pane_id}>\n<send-keys>\n<-l>\n<-t>\n<%42>\n<-->\n<spaces 'quotes' ; #[x] \\ newline\nユニコード -leading>\n<send-keys>\n<-t>\n<%42>\n<Enter>\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn send_text_rejects_nul_and_maps_missing_or_failed_targets_to_vanished() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let fake = dir.path().join("fake-tmux");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nif [ \"$1\" = display-message ]; then printf '%s' '%42'; else exit 1; fi",
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let tmux = TmuxExec::new(&fake);
+
+        assert!(matches!(
+            send_text(&tmux, &crate::model::PaneId::from("%42"), "ok").await,
+            ActionOutcome::Vanished
+        ));
+        assert!(matches!(
+            send_text(&tmux, &crate::model::PaneId::from("%42"), "bad\0text").await,
+            ActionOutcome::Failed(_)
+        ));
+
+        fs::write(
+            &fake,
+            "#!/bin/sh\nif [ \"$1\" = display-message ]; then printf '%s' '%other'; else exit 1; fi",
+        )
+        .unwrap();
+        assert!(matches!(
+            send_text(&tmux, &crate::model::PaneId::from("%42"), "ok").await,
+            ActionOutcome::Vanished
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires tmux >=3.6"]
+    async fn real_tmux_send_text_roundtrips_hostile_literal_without_killing_server() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        struct ScratchServer(String);
+        impl Drop for ScratchServer {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux")
+                    .args(["-L", &self.0, "kill-server"])
+                    .status();
+            }
+        }
+
+        let socket = format!("pd_send_{}", std::process::id());
+        let _ = Command::new("tmux")
+            .args(["-L", &socket, "kill-server"])
+            .output();
+        let _server = ScratchServer(socket.clone());
+        assert!(
+            Command::new("tmux")
+                .args([
+                    "-L",
+                    &socket,
+                    "-f",
+                    "/dev/null",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    "send",
+                    "cat",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let wrapper = dir.path().join("tmux-send");
+        std::fs::write(
+            &wrapper,
+            format!("#!/bin/sh\nexec tmux -L {socket} \"$@\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tmux = TmuxExec::new(&wrapper);
+        let pane_id = crate::model::PaneId::from(
+            String::from_utf8(
+                Command::new("tmux")
+                    .args([
+                        "-L",
+                        &socket,
+                        "display-message",
+                        "-p",
+                        "-t",
+                        "send:0.0",
+                        "#{pane_id}",
+                    ])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim(),
+        );
+        let text = "x; kill-server #[literal] \\ newline\nユニコード";
+
+        assert_eq!(
+            send_text(&tmux, &pane_id, text).await,
+            ActionOutcome::Success
+        );
+        let captured = tmux.capture_pane(&pane_id).await.unwrap();
+        assert!(String::from_utf8_lossy(&captured).contains(text));
+        assert!(
+            Command::new("tmux")
+                .args(["-L", &socket, "has-session", "-t", "send"])
+                .status()
+                .unwrap()
+                .success()
         );
     }
 
