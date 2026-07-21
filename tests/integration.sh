@@ -8,6 +8,21 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 T() { TMUX='' command tmux -L "$SOCK" "$@"; }
 fail() { echo "FAIL: $1"; T kill-server 2>/dev/null || true; exit 1; }
 pass() { echo "ok: $1"; }
+pane_has_command() { [ "$(T display-message -p -t "$1" '#{pane_current_command}')" = "$2" ]; }
+capture_has_line() { T capture-pane -p -t "$1" | grep -Fxq -- "$2"; }
+wait_for() {
+  local what="$1" pane="$2" deadline current capture
+  shift 2
+  deadline="$(perl -MTime::HiRes=time -e 'print time + 2')"
+  while ! "$@"; do
+    if ! perl -e 'exit $ARGV[0] < $ARGV[1] ? 0 : 1' "$(perl -MTime::HiRes=time -e 'print time')" "$deadline"; then
+      current="$(T display-message -p -t "$pane" '#{pane_current_command}' 2>&1 || true)"
+      capture="$(T capture-pane -p -t "$pane" 2>&1 || true)"
+      fail "$what (current command: $current; capture: $capture)"
+    fi
+    sleep 0.02
+  done
+}
 
 trap 'T kill-server 2>/dev/null || true' EXIT
 T -f /dev/null new-session -d -s alpha -x 120 -y 30
@@ -41,6 +56,9 @@ pass "capture normal screen"
 # 4. switch-client requires a client. A script(1)-backed PTY is not reliable
 #    here because this non-interactive test runner closes its stdin, so assert
 #    tmux's documented detached-server failure precisely instead.
+# Use an unconfigured shell so this timing gate measures tmux delivery, not
+# user shell initialization.
+T set-option -g default-shell /bin/sh
 T new-session -d -s beta
 pane_b="$(T display-message -p -t beta '#{pane_id}')"
 if switch_error="$(T switch-client -t "$pane_b" 2>&1)"; then
@@ -54,11 +72,10 @@ pass "switch-client detached failure"
 
 # 5. send-keys -l literal: C-c must arrive as text, not as a key
 T send-keys -t "$pane_b" cat Enter
-sleep 0.2
+wait_for "cat did not start" "$pane_b" pane_has_command "$pane_b" cat
 T send-keys -l -t "$pane_b" -- 'C-c'
 T send-keys -t "$pane_b" Enter
-sleep 0.2
-T capture-pane -p -t "$pane_b" | grep -qx 'C-c' || fail "literal send-keys"
+wait_for "literal send-keys" "$pane_b" capture_has_line "$pane_b" 'C-c'
 pass "literal send-keys"
 
 echo "ALL INTEGRATION CHECKS PASSED"
