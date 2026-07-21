@@ -81,14 +81,22 @@ main() {
   open_popup 1; wait_for 'independent popup controls' 3 has_two_controls
   before="$(ansi_size)"; admin resize-window -t live:0 -x 99 -y 32; send_bytes 0 '\014'; wait_for '99-column layout transcript' 2 ansi_grew_from "$before"; ansi_tail_has "$((before+1))" '─' || die '99-column transcript lacks vertical preview border'
   before="$(ansi_size)"; admin resize-window -t live:0 -x 100 -y 32; send_bytes 0 '\014'; wait_for '100-column layout transcript' 2 ansi_grew_from "$before"; ansi_tail_has "$((before+1))" '│' || die '100-column transcript lacks horizontal preview border'; has_two_controls || die 'resize panicked popup'
-  send_bytes 1 q; wait_for 'second popup independent close' 2 only_control "$first"
   # All open_v2/binary option reads must settle before the runtime assertion.
   startup="$(now)"
   send_bytes 0 j # None -> session header; the second j selects its first pane.
   t="$(now)"; send_bytes 0 j; wait_for 'selected-pane preview <=500ms' .5 has_capture_since "$t"
   send_bytes 0 '\025'; before="$(record_count "$startup" "$(now)" capture-pane)"; budget 'healthy inspect' 0 0; after="$(record_count "$startup" "$(now)" capture-pane)"; ((before==after)) || die 'Ctrl-U capture'
   send_bytes 0 '\022'; t="$(now)"; wait_for 'Ctrl-R preview' .5 has_capture_since "$t"
-  send_bytes 0 '\033[O'; before="$(record_count "$startup" "$(now)" capture-pane)"; budget 'focus-out inspect' 0 0; after="$(record_count "$startup" "$(now)" capture-pane)"; ((before==after)) || die 'focus-out capture'
+  # Prove the second owner has an independently running preview before the
+  # first owner's focus transition. Pausing the first owner isolates that
+  # capture to the second control client.
+  send_bytes 0 '\025'; t="$(now)"; send_bytes 1 j; send_bytes 1 j; wait_for 'second popup preview' .5 has_capture_since "$t"
+  send_bytes 0 '\022';
+  # Subscription changes are sampled by tmux at most once a second, so the
+  # first owner may contribute up to two captures before it observes FocusOut.
+  send_bytes 0 '\033[O'; t="$(now)"; budget 'focus-out first owner only second follows' 12 0; captures="$(record_count "$t" "$(now)" capture-pane)"; ((captures>=9)) || die 'second popup did not continue during first focus-out'
+  send_bytes 1 q; wait_for 'second popup independent close' 2 only_control "$first"
+  before="$(record_count "$startup" "$(now)" capture-pane)"; budget 'focus-out inspect' 0 0; after="$(record_count "$startup" "$(now)" capture-pane)"; ((before==after)) || die 'focus-out capture'
   t="$(now)"; send_bytes 0 '\033[I'; wait_for 'focus-in preview' .5 has_capture_since "$t"; budget 'healthy follow' 10 0
   (( $(record_count "$startup" "$(now)" show-options)==0 )) || die 'runtime show-options'
   admin run-shell "kill -TERM $first"; wait_for 'single replacement control' 3 replacement "$first"; second="$(first_control)"; t="$(now)"; : > "$REJECT"; admin run-shell "kill -TERM $second"
