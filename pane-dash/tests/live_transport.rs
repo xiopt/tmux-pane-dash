@@ -27,6 +27,14 @@ const OPTIONAL_NOTIFICATION_QUIET_PERIOD: Duration = Duration::from_millis(100);
 const PREVIEW_BUDGET: Duration = Duration::from_millis(500);
 const DEBOUNCE: Duration = Duration::from_millis(50);
 
+#[test]
+fn parses_new_window_ids_from_one_rs_terminated_tab_delimited_record() {
+    let (window_id, pane_id) = parse_new_window_ids("@17\t%42\u{001e}\n");
+
+    assert_eq!(window_id, WindowId::from("@17"));
+    assert_eq!(pane_id, PaneId::from("%42"));
+}
+
 /// Exercises the real control-channel and one-shot paths without relying on a
 /// user's tmux server, configuration, environment, or fixed socket path.
 #[tokio::test(flavor = "current_thread")]
@@ -67,18 +75,10 @@ async fn live_transport_freshness_harness() {
 
     drain_events(&mut events);
     let split_pane = harness.split("live:0", "exec sleep 60");
-    // Tagging and one-shot discovery establish the expected post-split model;
-    // they are setup, not part of the completed mutation -> accepted model metric.
+    // The clock starts immediately after the topology mutation completes. Tag
+    // setup is required for the exact predicate, so it stays in the budget.
+    let split_started = Instant::now();
     harness.set_pane_option(&split_pane, "@pane_dash_tag", "live-split");
-    assert!(
-        harness
-            .output(["list-panes", "-a", "-F", "#{pane_id}"])
-            .lines()
-            .any(|pane_id| pane_id == split_pane.0),
-        "one-shot split did not retain {}",
-        split_pane.0
-    );
-    let split_started = completed_mutation_started();
     assert_notification_snapshot(
         &control,
         &mut events,
@@ -113,13 +113,11 @@ async fn live_transport_freshness_harness() {
     .await;
 
     drain_events(&mut events);
-    harness.run(["new-window", "-d", "-t", "live", "-n", "fresh", "exec cat"]);
-    // Pane discovery and tag setup make this window identifiable in the model;
-    // neither is part of the new-window freshness metric.
-    let fresh_pane = harness.pane_id("live:fresh.0");
-    let fresh_window = harness.window_id("live:fresh");
+    let (fresh_window, fresh_pane) = harness.new_window("live", "fresh", "exec cat");
+    // The new-window command returned both exact IDs. Start before the tag
+    // setup, which is necessary to make the accepted-model predicate exact.
+    let new_started = Instant::now();
     harness.set_pane_option(&fresh_pane, "@pane_dash_tag", "live-fresh");
-    let new_started = completed_mutation_started();
     assert_notification_snapshot(
         &control,
         &mut events,
@@ -162,10 +160,9 @@ async fn live_transport_freshness_harness() {
     wait_topology(&mut events, "link_window").await;
     drain_events(&mut events);
     let linked_pane = harness.split("live:0", "exec sleep 60");
-    // The linked window and its tag are established before timing; only the
-    // completed split's notification/debounce/snapshot path is measured.
+    // As above, the measurement includes unavoidable tag setup after split.
+    let linked_started = Instant::now();
     harness.set_pane_option(&linked_pane, "@pane_dash_tag", "live-linked");
-    let linked_started = completed_mutation_started();
     assert_notification_snapshot(
         &control,
         &mut events,
@@ -350,10 +347,9 @@ async fn assert_notification_snapshot<A>(
     }
 }
 
-/// The attached-topology metric starts only once the synchronous mutation and
-/// required setup have completed: completed tmux mutation -> accepted model.
-/// It therefore measures control notification consumption, the 50ms debounce,
-/// and snapshot/model acceptance—not one-shot setup command latency.
+/// Marks primary-mutation completion. Callers must invoke this before all
+/// unavoidable post-mutation setup (such as tagging) so it remains within the
+/// completed mutation -> accepted model interval.
 fn completed_mutation_started() -> Instant {
     Instant::now()
 }
@@ -500,6 +496,29 @@ fn metric(label: &str, elapsed: Duration, budget: Duration) {
     assert!(elapsed <= budget, "{label}: {elapsed:?} exceeds {budget:?}");
 }
 
+fn parse_new_window_ids(output: &str) -> (WindowId, PaneId) {
+    let record = output
+        .strip_suffix('\n')
+        .and_then(|line| line.strip_suffix('\u{001e}'))
+        .expect("new-window -P output was not one RS-terminated line");
+    let (window_id, pane_id) = record
+        .split_once('\t')
+        .expect("new-window -P output did not contain window and pane IDs");
+    assert!(
+        !pane_id.contains('\t'),
+        "new-window -P output contained more than two fields"
+    );
+    assert!(
+        window_id.starts_with('@'),
+        "new-window returned invalid window ID"
+    );
+    assert!(
+        pane_id.starts_with('%'),
+        "new-window returned invalid pane ID"
+    );
+    (WindowId::from(window_id), PaneId::from(pane_id))
+}
+
 fn unix_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -599,13 +618,6 @@ impl Harness {
         )
     }
 
-    fn window_id(&self, target: &str) -> WindowId {
-        WindowId::from(
-            self.output(["display-message", "-p", "-t", target, "#{window_id}"])
-                .trim(),
-        )
-    }
-
     fn split(&self, target: &str, command: &str) -> PaneId {
         PaneId::from(
             self.output([
@@ -620,6 +632,23 @@ impl Harness {
             ])
             .trim(),
         )
+    }
+
+    /// Returns IDs emitted by the completed topology mutation itself, avoiding
+    /// a post-mutation discovery command outside the freshness interval.
+    fn new_window(&self, target: &str, name: &str, command: &str) -> (WindowId, PaneId) {
+        parse_new_window_ids(&self.output([
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{window_id}\t#{pane_id}\u{001e}",
+            "-t",
+            target,
+            "-n",
+            name,
+            command,
+        ]))
     }
 
     fn set_pane_option(&self, pane_id: &PaneId, name: &str, value: &str) {
