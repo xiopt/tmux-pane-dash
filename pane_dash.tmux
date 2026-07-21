@@ -14,16 +14,44 @@ shell_quote() {
   printf "'"
 }
 
+has_focus_hook() {
+  local hooks
+  hooks="$(tmux show-hooks -g "$1" 2>/dev/null)"
+  case "$hooks" in
+    *'@pane_dash_focus_#{hook_client}'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+install_focus_hook() {
+  if ! has_focus_hook "$1"; then
+    tmux set-hook -ag "$1" "$2"
+  fi
+}
+
+has_focus_terminal_feature() {
+  local terminal_features feature
+  terminal_features="$(tmux show-options -sv terminal-features 2>/dev/null)"
+  while IFS= read -r feature || [ -n "$feature" ]; do
+    [ "$feature" = '*:focus' ] && return 0
+  done <<EOF
+$terminal_features
+EOF
+  return 1
+}
+
 dash_key="$(get_opt @pane-dash-key D)"
 tag_key="$(get_opt @pane-dash-tag-key T)"
 label_key="$(get_opt @pane-dash-label-key M)"
 engine="$(get_opt @pane-dash-engine fzf)"
 
-tmux set-hook -g 'client-focus-in[31337]' 'set-option -gF "@pane_dash_focus_#{hook_client}" "1"'
-tmux set-hook -g 'client-focus-out[31337]' 'set-option -gF "@pane_dash_focus_#{hook_client}" "0"'
+install_focus_hook client-focus-in 'set-option -gF "@pane_dash_focus_#{hook_client}" "1"'
+install_focus_hook client-focus-out 'set-option -gF "@pane_dash_focus_#{hook_client}" "0"'
 
 tmux set-option -g focus-events on
-tmux set-option -s 'terminal-features[31337]' '*:focus'
+if ! has_focus_terminal_feature; then
+  tmux set-option -sa terminal-features '*:focus'
+fi
 
 if [ "$engine" = rust ]; then
   binary="$DIR/bin/pane-dash"

@@ -121,53 +121,45 @@ assert_notification() {
   assert_call 6 bind-key T run-shell "\"$copy_root/scripts/tag.sh\" toggle '#{pane_id}'"
 }
 
-@test "installs additive indexed focus hooks without replacing user hook zero" {
+@test "appends a focus hook at the first free index without replacing a user hook" {
   mkdir -p "$TMUX_STUB_DIR/hooks"
   printf '%s' 'display-message user-focus-hook' > "$TMUX_STUB_DIR/hooks/client-focus-in[0]"
+
   run "$SCRIPT"
 
   [ "$status" -eq 0 ]
-  assert_call 1 set-hook -g 'client-focus-in[31337]' 'set-option -gF "@pane_dash_focus_#{hook_client}" "1"'
-  assert_call 2 set-hook -g 'client-focus-out[31337]' 'set-option -gF "@pane_dash_focus_#{hook_client}" "0"'
   [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[0]")" = 'display-message user-focus-hook' ]
-  run "$SCRIPT"
-  [ "$status" -eq 0 ]
-  [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[0]")" = 'display-message user-focus-hook' ]
-  [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[31337]")" = 'set-option -gF "@pane_dash_focus_#{hook_client}" "1"' ]
+  [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[1]")" = 'set-option -gF "@pane_dash_focus_#{hook_client}" "1"' ]
 }
 
-@test "default focus setup enables focus events and a stable server feature index" {
+@test "default focus setup enables focus events and appends the terminal focus feature" {
   run "$SCRIPT"
 
   [ "$status" -eq 0 ]
-  assert_call 3 set-option -g focus-events on
-  assert_call 4 set-option -s 'terminal-features[31337]' '*:focus'
   [ "$(<"$TMUX_STUB_DIR/global/focus-events")" = on ]
-  [ "$(<"$TMUX_STUB_DIR/server-options/terminal-features/31337")" = '*:focus' ]
-}
-
-@test "enables focus delivery idempotently without replacing user hooks or indexed terminal features" {
-  mkdir -p "$TMUX_STUB_DIR/hooks"
-  printf '%s' 'display-message user-focus-hook' > "$TMUX_STUB_DIR/hooks/client-focus-in[0]"
-  mkdir -p "$TMUX_STUB_DIR/server-options/terminal-features"
-  printf '%s' 'screen*:RGB' > "$TMUX_STUB_DIR/server-options/terminal-features/7"
-
-  run "$SCRIPT"
-
-  [ "$status" -eq 0 ]
-  assert_call 3 set-option -g focus-events on
-  assert_call 4 set-option -s 'terminal-features[31337]' '*:focus'
-  [ "$(<"$TMUX_STUB_DIR/global/focus-events")" = on ]
-  [ "$(<"$TMUX_STUB_DIR/server-options/terminal-features/7")" = 'screen*:RGB' ]
-  [ "$(<"$TMUX_STUB_DIR/server-options/terminal-features/31337")" = '*:focus' ]
-  [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[0]")" = 'display-message user-focus-hook' ]
-
-  run "$SCRIPT"
-
-  [ "$status" -eq 0 ]
   [ "$(find "$TMUX_STUB_DIR/server-options/terminal-features" -type f -exec grep -lFx '*:focus' {} + | wc -l | tr -d ' ')" -eq 1 ]
-  [ "$(<"$TMUX_STUB_DIR/server-options/terminal-features/7")" = 'screen*:RGB' ]
-  [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[0]")" = 'display-message user-focus-hook' ]
+}
+
+@test "preserves same-index focus hooks and terminal feature while adding focus setup once" {
+  mkdir -p "$TMUX_STUB_DIR/hooks"
+  printf '%s' 'display-message user-focus-in' > "$TMUX_STUB_DIR/hooks/client-focus-in[31337]"
+  printf '%s' 'display-message user-focus-out' > "$TMUX_STUB_DIR/hooks/client-focus-out[31337]"
+  mkdir -p "$TMUX_STUB_DIR/server-options/terminal-features"
+  printf '%s' 'user*:RGB' > "$TMUX_STUB_DIR/server-options/terminal-features/31337"
+
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$TMUX_STUB_DIR/global/focus-events")" = on ]
+  [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-in[31337]")" = 'display-message user-focus-in' ]
+  [ "$(<"$TMUX_STUB_DIR/hooks/client-focus-out[31337]")" = 'display-message user-focus-out' ]
+  [ "$(<"$TMUX_STUB_DIR/server-options/terminal-features/31337")" = 'user*:RGB' ]
+  [ "$(find "$TMUX_STUB_DIR/hooks" -type f -exec grep -lFx 'set-option -gF "@pane_dash_focus_#{hook_client}" "1"' {} + | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(find "$TMUX_STUB_DIR/hooks" -type f -exec grep -lFx 'set-option -gF "@pane_dash_focus_#{hook_client}" "0"' {} + | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(find "$TMUX_STUB_DIR/server-options/terminal-features" -type f -exec grep -lFx '*:focus' {} + | wc -l | tr -d ' ')" -eq 1 ]
 }
 
 @test "open_v2 initializes the owner focus option before opening its popup" {

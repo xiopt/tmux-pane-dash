@@ -45,10 +45,19 @@ case "$cmd" in
       done
       printf '%s%s\n' "$rendered" "$rest"
     done < "$TMUX_STUB_DIR/panes" ;;
-  show-option | show-options) # show-option -gqv <name> | show-options -s <name> | show-option -pqv -t <pane> <name>
+  show-option | show-options) # show-option -gqv <name> | show-options -s[v] <name> | show-option -pqv -t <pane> <name>
     log_args invocations.log "$@"
     if [ "$2" = "-gqv" ]; then
       cat "$TMUX_STUB_DIR/global/$3" 2>/dev/null || true
+    elif [ "$2" = "-sv" ]; then
+      option_dir="$TMUX_STUB_DIR/server-options/$3"
+      if [ -d "$option_dir" ]; then
+        for entry in "$option_dir"/*; do
+          [ -f "$entry" ] || continue
+          cat "$entry"
+          printf '\n'
+        done
+      fi
     elif [ "$2" = "-s" ]; then
       option_dir="$TMUX_STUB_DIR/server-options/$3"
       if [ -d "$option_dir" ]; then
@@ -59,6 +68,15 @@ case "$cmd" in
       fi
     else                     # -pqv -t <pane> <name>
       cat "$TMUX_STUB_DIR/panes.d/$4/$5" 2>/dev/null || true
+    fi ;;
+  show-hooks)
+    log_args invocations.log "$@"
+    hook_dir="$TMUX_STUB_DIR/hooks"
+    if [ -d "$hook_dir" ]; then
+      for entry in "$hook_dir"/"$3"\[*\]; do
+        [ -f "$entry" ] || continue
+        printf '%s %s\n' "$(basename "$entry")" "$(<"$entry")"
+      done
     fi ;;
   display-message)          # display-message -p -t <pane> '<fmt>'
     if [ "${2:-}" = "-p" ]; then
@@ -75,7 +93,13 @@ case "$cmd" in
   set-hook)
     log_args calls.log "$@"
     mkdir -p "$TMUX_STUB_DIR/hooks"
-    printf '%s' "$4" > "$TMUX_STUB_DIR/hooks/$3" ;;
+    if [ "$2" = "-ag" ]; then
+      index=0
+      while [ -e "$TMUX_STUB_DIR/hooks/$3[$index]" ]; do index=$((index + 1)); done
+      printf '%s' "$4" > "$TMUX_STUB_DIR/hooks/$3[$index]"
+    else
+      printf '%s' "$4" > "$TMUX_STUB_DIR/hooks/$3"
+    fi ;;
   set-option)
     log_args calls.log "$@"
     case "${2:-}" in
@@ -91,6 +115,12 @@ case "$cmd" in
         index="${3#*\[}"
         index="${index%\]}"
         mkdir -p "$TMUX_STUB_DIR/server-options/$option"
+        printf '%s' "$4" > "$TMUX_STUB_DIR/server-options/$option/$index" ;;
+      -sa)
+        option="$3"
+        index=0
+        mkdir -p "$TMUX_STUB_DIR/server-options/$option"
+        while [ -e "$TMUX_STUB_DIR/server-options/$option/$index" ]; do index=$((index + 1)); done
         printf '%s' "$4" > "$TMUX_STUB_DIR/server-options/$option/$index" ;;
     esac ;;
   *)

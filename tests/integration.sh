@@ -29,16 +29,28 @@ T -f /dev/null new-session -d -s alpha -x 120 -y 30
 
 pane="$(T display-message -p -t alpha '#{pane_id}')"
 
-# 1. Plugin setup keeps user terminal features and owns one stable focus entry.
-T set-option -s 'terminal-features[7]' 'user*:RGB'
+# 1. Plugin setup appends focus entries without taking a user's index.
+T set-hook -g 'client-focus-in[31337]' 'display-message user-focus-in'
+T set-hook -g 'client-focus-out[31337]' 'display-message user-focus-out'
+T set-option -s 'terminal-features[31337]' 'user*:RGB'
 T run-shell "$ROOT/pane_dash.tmux"
 T run-shell "$ROOT/pane_dash.tmux"
-terminal_features="$(T show-options -s terminal-features)"
-[ "$(printf '%s\n' "$terminal_features" | grep -Fxc 'terminal-features[31337] *:focus')" = "1" ] \
-  || fail "plugin focus terminal feature count"
-printf '%s\n' "$terminal_features" | grep -Fxq 'terminal-features[7] user*:RGB' \
+focus_in_hooks="$(T show-hooks -g client-focus-in)"
+focus_out_hooks="$(T show-hooks -g client-focus-out)"
+terminal_features="$(T show-options -sv terminal-features)"
+[ "$(printf '%s\n' "$focus_in_hooks" | grep -Fxc 'client-focus-in[31337] display-message user-focus-in')" = "1" ] \
+  || fail "plugin replaced user client-focus-in hook"
+[ "$(printf '%s\n' "$focus_out_hooks" | grep -Fxc 'client-focus-out[31337] display-message user-focus-out')" = "1" ] \
+  || fail "plugin replaced user client-focus-out hook"
+[ "$(printf '%s\n' "$focus_in_hooks" | grep -Fc '@pane_dash_focus_#{hook_client}')" = "1" ] \
+  || fail "plugin client-focus-in hook count"
+[ "$(printf '%s\n' "$focus_out_hooks" | grep -Fc '@pane_dash_focus_#{hook_client}')" = "1" ] \
+  || fail "plugin client-focus-out hook count"
+[ "$(printf '%s\n' "$terminal_features" | grep -Fxc 'user*:RGB')" = "1" ] \
   || fail "plugin replaced user terminal feature"
-pass "plugin terminal features are indexed and idempotent"
+[ "$(printf '%s\n' "$terminal_features" | grep -Fxc '*:focus')" = "1" ] \
+  || fail "plugin focus terminal feature count"
+pass "plugin focus setup preserves same-index entries and is idempotent"
 
 # 2. pane options: set, read via display-message format, unset
 T set-option -p -t "$pane" @pane_dash_status working
