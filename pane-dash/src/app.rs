@@ -15,6 +15,8 @@ use crate::snapshot::ParseOutcome;
 
 type Selection = (SessionId, WindowId, PaneId);
 
+pub use crate::creation::CreationId;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Grouped,
@@ -73,9 +75,6 @@ pub enum Modal {
     Create(CreateModal),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CreationId(pub u64);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateChoiceKind {
     Right,
@@ -90,10 +89,12 @@ pub enum CreateChoiceKind {
 pub struct CreateChoice {
     pub label: &'static str,
     pub kind: CreateChoiceKind,
+    pub context: CreateContext,
+    pub cwd: String,
 }
 
 impl CreateChoice {
-    pub const fn new(kind: CreateChoiceKind) -> Self {
+    pub fn new(kind: CreateChoiceKind, context: CreateContext, cwd: String) -> Self {
         let label = match kind {
             CreateChoiceKind::Right => "Split right",
             CreateChoiceKind::Left => "Split left",
@@ -102,7 +103,12 @@ impl CreateChoice {
             CreateChoiceKind::NewWindow => "New window",
             CreateChoiceKind::NewSession => "New session",
         };
-        Self { label, kind }
+        Self {
+            label,
+            kind,
+            context,
+            cwd,
+        }
     }
 }
 
@@ -128,7 +134,6 @@ pub enum CreateModal {
     Choice {
         choices: Vec<CreateChoice>,
         selected: usize,
-        cwd: String,
     },
     Form(CreateForm),
 }
@@ -892,39 +897,32 @@ fn open_create_modal(state: &mut AppState) -> ReduceResult {
     let modal = if state.model.panes().is_empty() {
         CreateModal::Form(create_form(CreateContext::NewSession, String::new()))
     } else {
-        let (choices, cwd) = match &state.focus {
-            Some(Focus::Pane((_, _, pane_id))) => (
+        let choices = match &state.focus {
+            Some(Focus::Pane((session_id, _, pane_id))) => {
+                pane_create_choices(state, session_id, pane_id)
+            }
+            Some(Focus::Header(session_id)) => {
+                let cwd = session_default_cwd(state, session_id);
                 vec![
-                    CreateChoice::new(CreateChoiceKind::Right),
-                    CreateChoice::new(CreateChoiceKind::Left),
-                    CreateChoice::new(CreateChoiceKind::Bottom),
-                    CreateChoice::new(CreateChoiceKind::Top),
-                    CreateChoice::new(CreateChoiceKind::NewWindow),
-                    CreateChoice::new(CreateChoiceKind::NewSession),
-                ],
-                state
-                    .model
-                    .panes()
-                    .get(pane_id)
-                    .map(|pane| pane.path.clone())
-                    .unwrap_or_default(),
-            ),
-            Some(Focus::Header(session_id)) => (
-                vec![
-                    CreateChoice::new(CreateChoiceKind::NewWindow),
-                    CreateChoice::new(CreateChoiceKind::NewSession),
-                ],
-                session_default_cwd(state, session_id),
-            ),
-            None => (
-                vec![CreateChoice::new(CreateChoiceKind::NewSession)],
+                    CreateChoice::new(
+                        CreateChoiceKind::NewWindow,
+                        CreateContext::NewWindow {
+                            target: session_id.clone(),
+                        },
+                        cwd.clone(),
+                    ),
+                    CreateChoice::new(CreateChoiceKind::NewSession, CreateContext::NewSession, cwd),
+                ]
+            }
+            None => vec![CreateChoice::new(
+                CreateChoiceKind::NewSession,
+                CreateContext::NewSession,
                 String::new(),
-            ),
+            )],
         };
         CreateModal::Choice {
             choices,
             selected: 0,
-            cwd,
         }
     };
     state.modal = Some(Modal::Create(modal));
@@ -932,6 +930,53 @@ fn open_create_modal(state: &mut AppState) -> ReduceResult {
         actions: Vec::new(),
         changed: true,
     }
+}
+
+fn pane_create_choices(
+    state: &AppState,
+    session_id: &SessionId,
+    pane_id: &PaneId,
+) -> Vec<CreateChoice> {
+    let cwd = state
+        .model
+        .panes()
+        .get(pane_id)
+        .map(|pane| pane.path.clone())
+        .unwrap_or_default();
+    let linked_session_count = state
+        .model
+        .memberships()
+        .iter()
+        .filter(|membership| membership.pane_id == *pane_id)
+        .map(|membership| &membership.session_id)
+        .collect::<HashSet<_>>()
+        .len();
+    let split = |kind, direction| {
+        CreateChoice::new(
+            kind,
+            CreateContext::Split {
+                target: pane_id.clone(),
+                initiating_session: session_id.clone(),
+                linked_session_count,
+                direction,
+            },
+            cwd.clone(),
+        )
+    };
+    vec![
+        split(CreateChoiceKind::Right, SplitDirection::Right),
+        split(CreateChoiceKind::Left, SplitDirection::Left),
+        split(CreateChoiceKind::Bottom, SplitDirection::Bottom),
+        split(CreateChoiceKind::Top, SplitDirection::Top),
+        CreateChoice::new(
+            CreateChoiceKind::NewWindow,
+            CreateContext::NewWindow {
+                target: session_id.clone(),
+            },
+            cwd.clone(),
+        ),
+        CreateChoice::new(CreateChoiceKind::NewSession, CreateContext::NewSession, cwd),
+    ]
 }
 
 fn session_default_cwd(state: &AppState, session_id: &SessionId) -> String {
@@ -1068,7 +1113,6 @@ fn reduce_create_modal_key(
         CreateModal::Choice {
             choices,
             mut selected,
-            cwd,
         } => match key.code {
             KeyCode::Esc => ReduceResult {
                 actions: Vec::new(),
@@ -1076,11 +1120,7 @@ fn reduce_create_modal_key(
             },
             KeyCode::Char('j') | KeyCode::Down => {
                 selected = (selected + 1).min(choices.len().saturating_sub(1));
-                state.modal = Some(Modal::Create(CreateModal::Choice {
-                    choices,
-                    selected,
-                    cwd,
-                }));
+                state.modal = Some(Modal::Create(CreateModal::Choice { choices, selected }));
                 ReduceResult {
                     actions: Vec::new(),
                     changed: true,
@@ -1088,11 +1128,7 @@ fn reduce_create_modal_key(
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 selected = selected.saturating_sub(1);
-                state.modal = Some(Modal::Create(CreateModal::Choice {
-                    choices,
-                    selected,
-                    cwd,
-                }));
+                state.modal = Some(Modal::Create(CreateModal::Choice { choices, selected }));
                 ReduceResult {
                     actions: Vec::new(),
                     changed: true,
@@ -1100,46 +1136,19 @@ fn reduce_create_modal_key(
             }
             KeyCode::Enter => {
                 let Some(choice) = choices.get(selected) else {
-                    state.modal = Some(Modal::Create(CreateModal::Choice {
-                        choices,
-                        selected,
-                        cwd,
-                    }));
+                    state.modal = Some(Modal::Create(CreateModal::Choice { choices, selected }));
                     return ReduceResult::default();
                 };
-                let context = match choice.kind {
-                    CreateChoiceKind::Right => split_context(state, SplitDirection::Right),
-                    CreateChoiceKind::Left => split_context(state, SplitDirection::Left),
-                    CreateChoiceKind::Bottom => split_context(state, SplitDirection::Bottom),
-                    CreateChoiceKind::Top => split_context(state, SplitDirection::Top),
-                    CreateChoiceKind::NewWindow => {
-                        session_at_focus(state).map(|target| CreateContext::NewWindow { target })
-                    }
-                    CreateChoiceKind::NewSession => Some(CreateContext::NewSession),
-                };
-                let Some(context) = context else {
-                    state.modal = Some(Modal::Create(CreateModal::Choice {
-                        choices,
-                        selected,
-                        cwd,
-                    }));
-                    return ReduceResult::default();
-                };
-                state.modal = Some(Modal::Create(CreateModal::Form(create_form(
-                    context,
-                    cwd.clone(),
-                ))));
+                let context = choice.context.clone();
+                let cwd = choice.cwd.clone();
+                state.modal = Some(Modal::Create(CreateModal::Form(create_form(context, cwd))));
                 ReduceResult {
                     actions: Vec::new(),
                     changed: true,
                 }
             }
             _ => {
-                state.modal = Some(Modal::Create(CreateModal::Choice {
-                    choices,
-                    selected,
-                    cwd,
-                }));
+                state.modal = Some(Modal::Create(CreateModal::Choice { choices, selected }));
                 ReduceResult::default()
             }
         },
@@ -1149,27 +1158,6 @@ fn reduce_create_modal_key(
         }
         CreateModal::Form(mut form) => reduce_create_form_key(state, &mut form, key),
     }
-}
-
-fn split_context(state: &AppState, direction: SplitDirection) -> Option<CreateContext> {
-    let (initiating_session, _, pane_id) = match &state.focus {
-        Some(Focus::Pane(selection)) => selection,
-        Some(Focus::Header(_)) | None => return None,
-    };
-    let linked_session_count = state
-        .model
-        .memberships()
-        .iter()
-        .filter(|membership| membership.pane_id == *pane_id)
-        .map(|membership| &membership.session_id)
-        .collect::<HashSet<_>>()
-        .len();
-    Some(CreateContext::Split {
-        target: pane_id.clone(),
-        initiating_session: initiating_session.clone(),
-        linked_session_count,
-        direction,
-    })
 }
 
 fn reduce_create_form_key(
@@ -1353,22 +1341,12 @@ fn reduce_creation_progress(state: &mut AppState, progress: CreationProgress) ->
             }
         }
         CreationProgress::Stage { stage, pane_id, .. } => {
-            let Some(pane_id) = pane_id.or_else(|| pending_pane_id(state)) else {
+            let Some(pane_id) = pane_id else {
                 return ReduceResult::default();
             };
-            let next = match stage {
-                CreateStage::Create => return ReduceResult::default(),
-                CreateStage::Tag => PendingCreationState::Tagging { pane_id },
-                CreateStage::SendCommand => PendingCreationState::Sending { pane_id },
-                CreateStage::SendEnter => PendingCreationState::Entering { pane_id },
-            };
-            if let Some(pending) = state.pending_creation.as_mut()
-                && matches!(
-                    pending.state,
-                    PendingCreationState::Created { .. }
-                        | PendingCreationState::Tagging { .. }
-                        | PendingCreationState::Sending { .. }
-                )
+            if let Some(next) =
+                next_creation_stage(state.pending_creation.as_ref(), stage, &pane_id)
+                && let Some(pending) = state.pending_creation.as_mut()
             {
                 pending.state = next;
                 state.invalidate_render_cache();
@@ -1385,16 +1363,13 @@ fn reduce_creation_progress(state: &mut AppState, progress: CreationProgress) ->
             ..
         } => finish_creation(state, pane_id, resolution),
         CreationProgress::TimedOut { .. } => {
-            let Some(pane_id) = pending_pane_id(state) else {
-                if !matches!(
-                    state
-                        .pending_creation
-                        .as_ref()
-                        .map(|pending| &pending.state),
-                    Some(PendingCreationState::Creating)
-                ) {
-                    return ReduceResult::default();
-                }
+            if matches!(
+                state
+                    .pending_creation
+                    .as_ref()
+                    .map(|pending| &pending.state),
+                Some(PendingCreationState::Creating)
+            ) {
                 let error = "creation timed out".to_owned();
                 if let Some(pending) = state.pending_creation.as_mut() {
                     pending.state = PendingCreationState::Error(error.clone());
@@ -1408,26 +1383,61 @@ fn reduce_creation_progress(state: &mut AppState, progress: CreationProgress) ->
                     actions: Vec::new(),
                     changed: true,
                 };
+            }
+            let Some((pane_id, stage)) = pending_timeout_target(state.pending_creation.as_ref())
+            else {
+                return ReduceResult::default();
             };
-            finish_creation(
-                state,
-                pane_id,
-                CreationResolution::TimedOut {
-                    stage: CreateStage::Create,
-                },
-            )
+            finish_creation(state, pane_id, CreationResolution::TimedOut { stage })
         }
     }
 }
 
-fn pending_pane_id(state: &AppState) -> Option<PaneId> {
-    match state.pending_creation.as_ref()?.state {
-        PendingCreationState::Created { ref pane_id }
-        | PendingCreationState::Tagging { ref pane_id }
-        | PendingCreationState::Sending { ref pane_id }
-        | PendingCreationState::Entering { ref pane_id }
-        | PendingCreationState::AwaitingSnapshot { ref pane_id, .. } => Some(pane_id.clone()),
-        PendingCreationState::Creating | PendingCreationState::Error(_) => None,
+fn next_creation_stage(
+    pending: Option<&PendingCreation>,
+    stage: CreateStage,
+    pane_id: &PaneId,
+) -> Option<PendingCreationState> {
+    match (&pending?.state, stage) {
+        (PendingCreationState::Created { pane_id: bound }, CreateStage::Tag)
+            if bound == pane_id =>
+        {
+            Some(PendingCreationState::Tagging {
+                pane_id: pane_id.clone(),
+            })
+        }
+        (PendingCreationState::Tagging { pane_id: bound }, CreateStage::SendCommand)
+            if bound == pane_id =>
+        {
+            Some(PendingCreationState::Sending {
+                pane_id: pane_id.clone(),
+            })
+        }
+        (PendingCreationState::Sending { pane_id: bound }, CreateStage::SendEnter)
+            if bound == pane_id =>
+        {
+            Some(PendingCreationState::Entering {
+                pane_id: pane_id.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn pending_timeout_target(pending: Option<&PendingCreation>) -> Option<(PaneId, CreateStage)> {
+    match &pending?.state {
+        PendingCreationState::Created { pane_id } | PendingCreationState::Tagging { pane_id } => {
+            Some((pane_id.clone(), CreateStage::Tag))
+        }
+        PendingCreationState::Sending { pane_id } => {
+            Some((pane_id.clone(), CreateStage::SendCommand))
+        }
+        PendingCreationState::Entering { pane_id } => {
+            Some((pane_id.clone(), CreateStage::SendEnter))
+        }
+        PendingCreationState::Creating
+        | PendingCreationState::AwaitingSnapshot { .. }
+        | PendingCreationState::Error(_) => None,
     }
 }
 
@@ -1439,11 +1449,18 @@ fn finish_creation(
     let Some(pending) = state.pending_creation.as_mut() else {
         return ReduceResult::default();
     };
-    if matches!(
-        pending.state,
-        PendingCreationState::Creating
-            | PendingCreationState::Error(_)
-            | PendingCreationState::AwaitingSnapshot { .. }
+    if !matches!(
+        (&pending.state, &resolution),
+        (PendingCreationState::Created { pane_id: bound }, CreationResolution::TimedOut { stage: CreateStage::Tag })
+            | (PendingCreationState::Tagging { pane_id: bound }, CreationResolution::Success)
+            | (PendingCreationState::Tagging { pane_id: bound }, CreationResolution::TagFailed(_))
+            | (PendingCreationState::Tagging { pane_id: bound }, CreationResolution::TimedOut { stage: CreateStage::Tag })
+            | (PendingCreationState::Sending { pane_id: bound }, CreationResolution::CommandFailed { stage: CreateStage::SendCommand, .. })
+            | (PendingCreationState::Sending { pane_id: bound }, CreationResolution::TimedOut { stage: CreateStage::SendCommand })
+            | (PendingCreationState::Entering { pane_id: bound }, CreationResolution::Success)
+            | (PendingCreationState::Entering { pane_id: bound }, CreationResolution::CommandFailed { stage: CreateStage::SendEnter, .. })
+            | (PendingCreationState::Entering { pane_id: bound }, CreationResolution::TimedOut { stage: CreateStage::SendEnter })
+            if bound == &pane_id
     ) {
         return ReduceResult::default();
     }
@@ -1616,11 +1633,11 @@ mod tests {
     };
 
     use crate::app::{
-        Action, ActionOutcome, AppState, CompletedAction, CreateChoice, CreateChoiceKind,
-        CreateModal, CreationId, Event, Focus, InputMode, JumpTarget, Modal, Mode,
+        Action, ActionOutcome, AppState, CompletedAction, CreateChoiceKind, CreateForm,
+        CreateModal, CreationId, Event, Focus, InputMode, JumpTarget, Modal, Mode, PendingCreation,
         PendingCreationState, reduce,
     };
-    use crate::creation::{CreateContext, CreationProgress, CreationResolution};
+    use crate::creation::{CreateContext, CreateStage, CreationProgress, CreationResolution};
     use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, Status, WindowId};
     use crate::preview::{PreviewFrame, parse_preview};
     use crate::snapshot::{ParseOutcome, RawRecord};
@@ -1687,21 +1704,22 @@ mod tests {
         let result = reduce(&mut app, key(KeyCode::Char('n')));
 
         assert!(result.changed);
+        let Some(Modal::Create(CreateModal::Choice { choices, selected })) = &app.modal else {
+            panic!("expected creation choices");
+        };
+        assert_eq!(*selected, 0);
         assert_eq!(
-            app.modal,
-            Some(Modal::Create(CreateModal::Choice {
-                choices: vec![
-                    CreateChoice::new(CreateChoiceKind::Right),
-                    CreateChoice::new(CreateChoiceKind::Left),
-                    CreateChoice::new(CreateChoiceKind::Bottom),
-                    CreateChoice::new(CreateChoiceKind::Top),
-                    CreateChoice::new(CreateChoiceKind::NewWindow),
-                    CreateChoice::new(CreateChoiceKind::NewSession),
-                ],
-                selected: 0,
-                cwd: "/tmp".into(),
-            }))
+            choices.iter().map(|choice| choice.kind).collect::<Vec<_>>(),
+            [
+                CreateChoiceKind::Right,
+                CreateChoiceKind::Left,
+                CreateChoiceKind::Bottom,
+                CreateChoiceKind::Top,
+                CreateChoiceKind::NewWindow,
+                CreateChoiceKind::NewSession,
+            ]
         );
+        assert!(choices.iter().all(|choice| choice.cwd == "/tmp"));
     }
 
     #[test]
@@ -1715,17 +1733,12 @@ mod tests {
         let mut app = state(vec![fallback, active]);
         app.focus = Some(Focus::Header("$1".into()));
         reduce(&mut app, key(KeyCode::Char('n')));
-        assert_eq!(
+        assert!(matches!(
             app.modal,
-            Some(Modal::Create(CreateModal::Choice {
-                choices: vec![
-                    CreateChoice::new(CreateChoiceKind::NewWindow),
-                    CreateChoice::new(CreateChoiceKind::NewSession),
-                ],
-                selected: 0,
-                cwd: "/active".into(),
-            }))
-        );
+            Some(Modal::Create(CreateModal::Choice { ref choices, selected: 0 }))
+                if choices.iter().map(|choice| choice.kind).eq([CreateChoiceKind::NewWindow, CreateChoiceKind::NewSession])
+                    && choices.iter().all(|choice| choice.cwd == "/active")
+        ));
 
         let mut empty = state(Vec::new());
         reduce(&mut empty, key(KeyCode::Char('n')));
@@ -1738,14 +1751,11 @@ mod tests {
         enter_query(&mut retained, "does-not-match");
         reduce(&mut retained, key(KeyCode::Esc));
         reduce(&mut retained, key(KeyCode::Char('n')));
-        assert_eq!(
+        assert!(matches!(
             retained.modal,
-            Some(Modal::Create(CreateModal::Choice {
-                choices: vec![CreateChoice::new(CreateChoiceKind::NewSession)],
-                selected: 0,
-                cwd: String::new(),
-            }))
-        );
+            Some(Modal::Create(CreateModal::Choice { ref choices, selected: 0 }))
+                if choices.len() == 1 && choices[0].kind == CreateChoiceKind::NewSession && choices[0].cwd.is_empty()
+        ));
     }
 
     #[test]
@@ -1821,6 +1831,14 @@ mod tests {
             []
         );
         assert!(app.modal.is_none());
+        reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::Stage {
+                id,
+                stage: CreateStage::Tag,
+                pane_id: Some("%9".into()),
+            }),
+        );
         let finished = reduce(
             &mut app,
             Event::CreationProgress(CreationProgress::Finished {
@@ -1899,9 +1917,11 @@ mod tests {
         let before_mode = app.mode;
 
         reduce(&mut app, key(KeyCode::Char('n')));
-        assert!(
-            matches!(app.modal, Some(Modal::Create(CreateModal::Choice { ref cwd, .. })) if cwd == "/first")
-        );
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Create(CreateModal::Choice { ref choices, .. }))
+                if choices.iter().all(|choice| choice.cwd == "/first")
+        ));
         reduce(&mut app, key(KeyCode::Char('s')));
         assert_eq!(app.mode, before_mode);
         reduce(&mut app, key(KeyCode::Esc));
@@ -1949,6 +1969,186 @@ mod tests {
             app.modal,
             Some(Modal::Create(CreateModal::Form(_)))
         ));
+    }
+
+    #[test]
+    fn creation_choices_freeze_context_across_snapshot_focus_changes() {
+        let mut original = record("$1", "@1", "%1", 0);
+        original.pane_current_path = "/original".into();
+        let mut app = state(vec![original]);
+        app.focus = Some(Focus::Pane(("$1".into(), "@1".into(), "%1".into())));
+        app.sync_selection();
+        reduce(&mut app, key(KeyCode::Char('n')));
+
+        let mut replacement = record("$2", "@2", "%2", 0);
+        replacement.pane_current_path = "/replacement".into();
+        reduce(&mut app, snapshot(vec![replacement], 11));
+        for _ in 0..4 {
+            reduce(&mut app, key(KeyCode::Char('j')));
+        }
+        reduce(&mut app, key(KeyCode::Enter));
+
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Create(CreateModal::Form(CreateForm {
+                kind: CreateContext::NewWindow { ref target },
+                ref draft,
+                ..
+            }))) if target == &SessionId::from("$1") && draft.cwd == "/original"
+        ));
+    }
+
+    #[test]
+    fn creation_progress_requires_order_and_a_bound_matching_pane() {
+        let mut app = state(Vec::new());
+        reduce(&mut app, key(KeyCode::Char('n')));
+        let start = reduce(&mut app, key(KeyCode::Enter));
+        let id = match start.actions.as_slice() {
+            [Action::StartCreation { id, .. }] => *id,
+            actions => panic!("expected start action, got {actions:?}"),
+        };
+        reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::Created {
+                id,
+                pane_id: "%1".into(),
+            }),
+        );
+
+        let cases = [
+            (CreateStage::SendCommand, Some("%1"), false),
+            (CreateStage::Tag, Some("%2"), false),
+            (CreateStage::Tag, Some("%1"), true),
+            (CreateStage::Tag, Some("%1"), false),
+            (CreateStage::SendEnter, Some("%1"), false),
+            (CreateStage::SendCommand, Some("%2"), false),
+            (CreateStage::SendCommand, Some("%1"), true),
+            (CreateStage::SendEnter, Some("%1"), true),
+        ];
+        for (stage, pane_id, changes) in cases {
+            let result = reduce(
+                &mut app,
+                Event::CreationProgress(CreationProgress::Stage {
+                    id,
+                    stage,
+                    pane_id: pane_id.map(PaneId::from),
+                }),
+            );
+            assert_eq!(result.changed, changes, "{stage:?} {pane_id:?}");
+            assert!(result.actions.is_empty());
+        }
+    }
+
+    #[test]
+    fn creation_timeout_derives_the_active_stage_and_rejects_illegal_terminals() {
+        let start = |app: &mut AppState| {
+            reduce(app, key(KeyCode::Char('n')));
+            match reduce(app, key(KeyCode::Enter)).actions.as_slice() {
+                [Action::StartCreation { id, .. }] => *id,
+                actions => panic!("expected start action, got {actions:?}"),
+            }
+        };
+        let enter_stage = |app: &mut AppState, id, stage| {
+            reduce(
+                app,
+                Event::CreationProgress(CreationProgress::Stage {
+                    id,
+                    stage,
+                    pane_id: Some("%1".into()),
+                }),
+            );
+        };
+        let states = [
+            (Vec::new(), CreateStage::Tag),
+            (vec![CreateStage::Tag], CreateStage::Tag),
+            (
+                vec![CreateStage::Tag, CreateStage::SendCommand],
+                CreateStage::SendCommand,
+            ),
+            (
+                vec![
+                    CreateStage::Tag,
+                    CreateStage::SendCommand,
+                    CreateStage::SendEnter,
+                ],
+                CreateStage::SendEnter,
+            ),
+        ];
+        for (stages, expected_stage) in states {
+            let mut app = state(Vec::new());
+            let id = start(&mut app);
+            reduce(
+                &mut app,
+                Event::CreationProgress(CreationProgress::Created {
+                    id,
+                    pane_id: "%1".into(),
+                }),
+            );
+            for stage in stages {
+                enter_stage(&mut app, id, stage);
+            }
+            let result = reduce(
+                &mut app,
+                Event::CreationProgress(CreationProgress::TimedOut { id }),
+            );
+            assert_eq!(
+                result.actions,
+                vec![Action::CreationMutation, Action::RefreshNow]
+            );
+            assert!(matches!(
+                app.pending_creation,
+                Some(PendingCreation {
+                    state: PendingCreationState::AwaitingSnapshot {
+                        pane_id: ref actual_pane,
+                        resolution: CreationResolution::TimedOut { stage },
+                    },
+                    ..
+                }) if actual_pane == &PaneId::from("%1") && stage == expected_stage
+            ));
+            assert!(
+                !reduce(
+                    &mut app,
+                    Event::CreationProgress(CreationProgress::TimedOut { id })
+                )
+                .changed
+            );
+        }
+
+        let mut precreate = state(Vec::new());
+        let id = start(&mut precreate);
+        let timeout = reduce(
+            &mut precreate,
+            Event::CreationProgress(CreationProgress::TimedOut { id }),
+        );
+        assert!(timeout.actions.is_empty());
+        assert!(matches!(
+            precreate.pending_creation,
+            Some(PendingCreation {
+                state: PendingCreationState::Error(_),
+                ..
+            })
+        ));
+
+        let mut terminal = state(Vec::new());
+        let id = start(&mut terminal);
+        reduce(
+            &mut terminal,
+            Event::CreationProgress(CreationProgress::Created {
+                id,
+                pane_id: "%1".into(),
+            }),
+        );
+        enter_stage(&mut terminal, id, CreateStage::Tag);
+        let wrong = reduce(
+            &mut terminal,
+            Event::CreationProgress(CreationProgress::Finished {
+                id,
+                pane_id: "%2".into(),
+                resolution: CreationResolution::Success,
+            }),
+        );
+        assert!(!wrong.changed);
+        assert!(wrong.actions.is_empty());
     }
 
     #[test]

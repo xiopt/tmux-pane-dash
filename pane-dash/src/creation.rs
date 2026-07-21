@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use crate::app::CreationId;
 use crate::model::{PaneId, SessionId};
 use crate::tmux_arg::{self, Field};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CreationId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitDirection {
