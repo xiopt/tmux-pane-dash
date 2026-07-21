@@ -1289,7 +1289,8 @@ fn reduce_creation_progress(state: &mut AppState, progress: CreationProgress) ->
         | CreationProgress::CreateFailed { id, .. }
         | CreationProgress::Created { id, .. }
         | CreationProgress::Finished { id, .. }
-        | CreationProgress::TimedOut { id } => *id,
+        | CreationProgress::TimedOut { id }
+        | CreationProgress::TaskFailed { id, .. } => *id,
     };
     if state.pending_creation.as_ref().map(|pending| pending.id) != Some(id) {
         return ReduceResult::default();
@@ -1390,6 +1391,30 @@ fn reduce_creation_progress(state: &mut AppState, progress: CreationProgress) ->
             };
             finish_creation(state, pane_id, CreationResolution::TimedOut { stage })
         }
+        CreationProgress::TaskFailed { error, .. } => {
+            if matches!(
+                state
+                    .pending_creation
+                    .as_ref()
+                    .map(|pending| &pending.state),
+                Some(PendingCreationState::Creating)
+            ) {
+                return reduce_creation_progress(
+                    state,
+                    CreationProgress::CreateFailed { id, error },
+                );
+            }
+            let Some((pane_id, stage)) = pending_timeout_target(state.pending_creation.as_ref())
+            else {
+                return ReduceResult::default();
+            };
+            let resolution = if stage == CreateStage::Tag {
+                CreationResolution::TagFailed(error)
+            } else {
+                CreationResolution::CommandFailed { stage, error }
+            };
+            finish_creation(state, pane_id, resolution)
+        }
     }
 }
 
@@ -1452,6 +1477,7 @@ fn finish_creation(
     if !matches!(
         (&pending.state, &resolution),
         (PendingCreationState::Created { pane_id: bound }, CreationResolution::TimedOut { stage: CreateStage::Tag })
+            | (PendingCreationState::Created { pane_id: bound }, CreationResolution::TagFailed(_))
             | (PendingCreationState::Tagging { pane_id: bound }, CreationResolution::Success)
             | (PendingCreationState::Tagging { pane_id: bound }, CreationResolution::TagFailed(_))
             | (PendingCreationState::Tagging { pane_id: bound }, CreationResolution::TimedOut { stage: CreateStage::Tag })
@@ -2159,6 +2185,64 @@ mod tests {
         );
         assert!(!wrong.changed);
         assert!(wrong.actions.is_empty());
+    }
+
+    #[test]
+    fn creation_worker_failure_unlocks_precreate_and_finishes_postcreate_once() {
+        let start = |app: &mut AppState| {
+            reduce(app, key(KeyCode::Char('n')));
+            match reduce(app, key(KeyCode::Enter)).actions.as_slice() {
+                [Action::StartCreation { id, .. }] => *id,
+                actions => panic!("expected start action, got {actions:?}"),
+            }
+        };
+        let mut precreate = state(Vec::new());
+        let id = start(&mut precreate);
+        assert!(
+            reduce(
+                &mut precreate,
+                Event::CreationProgress(CreationProgress::TaskFailed {
+                    id,
+                    error: "panic".into()
+                })
+            )
+            .changed
+        );
+        assert!(matches!(
+            precreate.modal,
+            Some(Modal::Create(CreateModal::Form(ref form))) if !form.submitting && form.error.as_deref() == Some("panic")
+        ));
+
+        let mut postcreate = state(Vec::new());
+        let id = start(&mut postcreate);
+        reduce(
+            &mut postcreate,
+            Event::CreationProgress(CreationProgress::Created {
+                id,
+                pane_id: "%1".into(),
+            }),
+        );
+        let result = reduce(
+            &mut postcreate,
+            Event::CreationProgress(CreationProgress::TaskFailed {
+                id,
+                error: "panic".into(),
+            }),
+        );
+        assert_eq!(
+            result.actions,
+            vec![Action::CreationMutation, Action::RefreshNow]
+        );
+        assert!(
+            !reduce(
+                &mut postcreate,
+                Event::CreationProgress(CreationProgress::TaskFailed {
+                    id,
+                    error: "panic".into()
+                })
+            )
+            .changed
+        );
     }
 
     #[test]

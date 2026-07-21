@@ -58,6 +58,10 @@ pub enum CreationProgress {
     TimedOut {
         id: CreationId,
     },
+    TaskFailed {
+        id: CreationId,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -43,6 +43,7 @@ struct PreviewResponse {
 }
 
 struct CreationTask {
+    id: CreationId,
     cancel: oneshot::Sender<()>,
     join: JoinHandle<()>,
 }
@@ -316,6 +317,7 @@ async fn main() -> Result<()> {
         &snapshot_generation,
         &mut in_flight_snapshot,
     );
+    let result = async {
     let _ = apply_event(
         &mut terminal,
         &mut app,
@@ -519,8 +521,10 @@ async fn main() -> Result<()> {
             },
         }
     }
-    cleanup_creation_task(&mut creation_task).await;
     Ok(())
+    }
+    .await;
+    finish_creation_task_result(&mut creation_task, result).await
 }
 
 fn preview_interval() -> tokio::time::Interval {
@@ -720,7 +724,13 @@ where
         .is_some_and(|task| task.join.is_finished())
         && let Some(task) = creation_task.take()
     {
-        let _ = task.join.await;
+        let id = task.id;
+        if let Err(error) = task.join.await {
+            let _ = creation_tx.send(CreationProgress::TaskFailed {
+                id,
+                error: format!("creation worker ended abnormally: {error}"),
+            });
+        }
     }
     let result = reduce(app, event);
     let mut effects = ActionEffects::default();
@@ -781,7 +791,7 @@ where
             }
             Action::Quit => {}
             Action::StartCreation { id, request } => {
-                start_creation(creation_task, creation_tx, tmux.clone(), id, request);
+                start_creation(creation_task, creation_tx, tmux.clone(), id, request).await;
             }
             Action::CreationMutation => effects.mutated = true,
             Action::RefreshNow => effects.refresh_now = true,
@@ -793,7 +803,7 @@ where
     Ok(effects)
 }
 
-fn start_creation(
+async fn start_creation(
     task: &mut Option<CreationTask>,
     progress: &mpsc::UnboundedSender<CreationProgress>,
     tmux: TmuxExec,
@@ -801,21 +811,38 @@ fn start_creation(
     request: CreateRequest,
 ) {
     if let Some(previous) = task.take() {
+        let id = previous.id;
         let _ = previous.cancel.send(());
+        if let Err(error) = previous.join.await {
+            let _ = progress.send(CreationProgress::TaskFailed {
+                id,
+                error: format!("creation worker ended abnormally: {error}"),
+            });
+        }
     }
     let (cancel, cancellation) = oneshot::channel();
     let progress = progress.clone();
     let join = tokio::spawn(async move {
         run_creation(tmux, id, request, progress, cancellation).await;
     });
-    *task = Some(CreationTask { cancel, join });
+    *task = Some(CreationTask { id, cancel, join });
 }
 
 async fn cleanup_creation_task(task: &mut Option<CreationTask>) {
     if let Some(task) = task.take() {
         let _ = task.cancel.send(());
-        let _ = task.join.await;
+        if let Err(error) = task.join.await {
+            eprintln!("creation worker ended abnormally during cleanup: {error}");
+        }
     }
+}
+
+async fn finish_creation_task_result<T>(
+    task: &mut Option<CreationTask>,
+    result: Result<T>,
+) -> Result<T> {
+    cleanup_creation_task(task).await;
+    result
 }
 
 fn start_preview_capture(
@@ -1654,13 +1681,18 @@ mod tests {
             TmuxExec::new(executable),
             pane_dash::creation::CreationId(9),
             request,
-        );
+        )
+        .await;
         assert!(matches!(
             progress.recv().await,
             Some(CreationProgress::Stage { .. })
         ));
         tokio::time::timeout(Duration::from_secs(1), async {
-            while !pid_file.exists() {
+            while fs::read_to_string(&pid_file)
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
                 tokio::task::yield_now().await;
             }
         })
@@ -1683,6 +1715,71 @@ mod tests {
             events.as_slice(),
             [CreationProgress::TimedOut { .. }]
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loop_error_cleanup_reaps_the_active_creation_child_and_preserves_error() {
+        let dir = TempDir::new().unwrap();
+        let pid_file = dir.path().join("pid");
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nwhile :; do sleep 1; done\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let request = build_request(
+            CreateContext::NewSession,
+            &CreateDraft {
+                name: String::new(),
+                cwd: String::new(),
+                command: String::new(),
+            },
+        )
+        .unwrap();
+        let (tx, mut progress) = mpsc::unbounded_channel();
+        let mut task = None;
+        start_creation(
+            &mut task,
+            &tx,
+            TmuxExec::new(executable),
+            pane_dash::creation::CreationId(10),
+            request,
+        )
+        .await;
+        let _ = progress.recv().await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while fs::read_to_string(&pid_file)
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let pid = fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+
+        let error = super::finish_creation_task_result(
+            &mut task,
+            Err::<(), _>(anyhow::anyhow!("loop failed")),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "loop failed");
+        assert!(task.is_none());
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 
     #[test]

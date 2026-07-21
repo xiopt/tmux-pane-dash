@@ -138,6 +138,15 @@ impl TmuxExec {
         deadline: Instant,
         cancellation: &mut oneshot::Receiver<()>,
     ) -> std::result::Result<Vec<u8>, TmuxCommandError> {
+        match cancellation.try_recv() {
+            Ok(()) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                return Err(TmuxCommandError::Cancelled);
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(TmuxCommandError::TimedOut);
+        }
         if let Some(cwd) = cwd {
             cwd.revalidate()?;
         }
@@ -164,24 +173,57 @@ impl TmuxExec {
         })?;
         let stdout_reader = tokio::spawn(read_stream(stdout));
         let stderr_reader = tokio::spawn(read_stream(stderr));
+        let stdout_abort = stdout_reader.abort_handle();
+        let stderr_abort = stderr_reader.abort_handle();
         enum Completion {
             Exited(std::result::Result<ExitStatus, io::Error>),
             TimedOut,
             Cancelled,
         }
         let completion = tokio::select! {
-            result = child.wait() => Completion::Exited(result),
-            _ = tokio::time::sleep_until(deadline) => Completion::TimedOut,
+            biased;
             _ = &mut *cancellation => Completion::Cancelled,
+            _ = tokio::time::sleep_until(deadline) => Completion::TimedOut,
+            result = child.wait() => Completion::Exited(result),
         };
         if matches!(completion, Completion::TimedOut | Completion::Cancelled) {
             let _ = child.kill().await;
             let _ = child.wait().await;
+            stdout_abort.abort();
+            stderr_abort.abort();
+            let _ = stdout_reader.await;
+            let _ = stderr_reader.await;
+            return Err(match completion {
+                Completion::TimedOut => TmuxCommandError::TimedOut,
+                Completion::Cancelled => TmuxCommandError::Cancelled,
+                Completion::Exited(_) => unreachable!(),
+            });
         }
-        let (stdout, stderr) = tokio::join!(
-            collect_stream(stdout_reader, "stdout"),
-            collect_stream(stderr_reader, "stderr")
-        );
+        let mut streams = tokio::spawn(async move {
+            tokio::join!(
+                collect_stream(stdout_reader, "stdout"),
+                collect_stream(stderr_reader, "stderr")
+            )
+        });
+        let (stdout, stderr) = tokio::select! {
+            biased;
+            _ = &mut *cancellation => {
+                stdout_abort.abort();
+                stderr_abort.abort();
+                let _ = streams.await;
+                return Err(TmuxCommandError::Cancelled);
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                stdout_abort.abort();
+                stderr_abort.abort();
+                let _ = streams.await;
+                return Err(TmuxCommandError::TimedOut);
+            }
+            streams = &mut streams => streams.map_err(|source| TmuxCommandError::ReaderJoin {
+                stream: "collection",
+                source,
+            })?,
+        };
         let stdout = stdout?;
         let stderr = stderr?;
         match completion {
@@ -297,6 +339,75 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, TmuxCommandError::Exit { .. }));
+    }
+
+    #[tokio::test]
+    async fn creation_runner_bounds_retained_descendant_streams_after_child_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("fake-tmux");
+        fs::write(&executable, "#!/bin/sh\n(sleep 60) &\nprintf '%%44\\n'\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let (_cancel, mut cancellation) = tokio::sync::oneshot::channel();
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            TmuxExec::new(executable).run_argv_until(
+                &["anything".into()],
+                None,
+                tokio::time::Instant::now() + std::time::Duration::from_millis(25),
+                &mut cancellation,
+            ),
+        )
+        .await
+        .expect("retained descendant must not hold stream collection open")
+        .unwrap_err();
+
+        assert!(matches!(error, TmuxCommandError::TimedOut));
+    }
+
+    #[tokio::test]
+    async fn creation_runner_does_not_spawn_after_an_expired_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("spawned");
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let (_cancel, mut cancellation) = tokio::sync::oneshot::channel();
+
+        let error = TmuxExec::new(executable)
+            .run_argv_until(
+                &["anything".into()],
+                None,
+                tokio::time::Instant::now() - std::time::Duration::from_millis(1),
+                &mut cancellation,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TmuxCommandError::TimedOut));
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn creation_runner_prefers_cancellation_when_deadline_and_cancel_are_ready() {
+        let (_cancel, mut cancellation) = tokio::sync::oneshot::channel::<()>();
+        drop(_cancel);
+
+        let error = TmuxExec::new("/must-not-spawn")
+            .run_argv_until(
+                &["anything".into()],
+                None,
+                tokio::time::Instant::now() - std::time::Duration::from_millis(1),
+                &mut cancellation,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TmuxCommandError::Cancelled));
     }
 
     struct ScratchServer<'a> {
