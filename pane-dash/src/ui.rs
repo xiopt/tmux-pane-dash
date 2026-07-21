@@ -347,9 +347,8 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
             )
         })
         .collect::<Vec<_>>();
-    let mut lines = field_lines.clone();
-    if form.linked_session_count > 1 {
-        lines.push(Line::styled(
+    let linked_notice = (form.linked_session_count > 1).then(|| {
+        Line::styled(
             truncate_to_width(
                 &format!(
                     "linked window: split appears in {} sessions",
@@ -358,17 +357,17 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
                 usize::from(inner.width),
             ),
             Style::default().fg(palette::DIM),
-        ));
-    }
-    if let Some(error) = &form.error {
-        lines.push(Line::styled(
+        )
+    });
+    let validation_error = form.error.as_ref().map(|error| {
+        Line::styled(
             truncate_to_width(
                 &format!("ERROR: {}", literal_input(&display_error(error))),
                 usize::from(inner.width),
             ),
             Style::default().fg(palette::ERROR),
-        ));
-    }
+        )
+    });
     let footer = Line::styled(
         truncate_to_width(
             if form.submitting {
@@ -380,6 +379,13 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
         ),
         Style::default().fg(palette::DIM),
     );
+    let mut lines = field_lines.clone();
+    if let Some(linked_notice) = &linked_notice {
+        lines.push(linked_notice.clone());
+    }
+    if let Some(validation_error) = &validation_error {
+        lines.push(validation_error.clone());
+    }
     lines.push(footer.clone());
     let visible = if lines.len() <= inner.height as usize {
         lines
@@ -388,8 +394,25 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
         lines.into_iter().skip(start).collect()
     } else {
         let mut visible = vec![field_lines[active_index].clone()];
-        if inner.height > 1 {
-            visible.push(footer);
+        for line in [
+            validation_error.as_ref(),
+            linked_notice.as_ref(),
+            Some(&footer),
+        ] {
+            if visible.len() >= inner.height as usize {
+                break;
+            }
+            if let Some(line) = line {
+                visible.push(line.clone());
+            }
+        }
+        for (index, line) in field_lines.iter().enumerate() {
+            if visible.len() >= inner.height as usize {
+                break;
+            }
+            if index != active_index {
+                visible.push(line.clone());
+            }
         }
         visible
     };

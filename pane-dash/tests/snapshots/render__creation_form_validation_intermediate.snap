@@ -1,0 +1,10 @@
+---
+source: tests/render.rs
+expression: intermediate
+---
+┌Create split──────┐
+│command: d command│
+│ERROR: invalid com│
+│linked window: spl│
+│Tab/↑↓ field | Ent│
+└──────────────────┘

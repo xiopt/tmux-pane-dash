@@ -914,6 +914,41 @@ fn creation_viewports_and_styles_keep_interaction_visible() {
 }
 
 #[test]
+fn overflowing_non_submitting_form_prioritizes_validation_context() {
+    let mut state = app(Vec::new());
+    state.modal = Some(Modal::Create(CreateModal::Form(CreateForm {
+        kind: CreateContext::Split {
+            target: "%1".into(),
+            initiating_session: "$dash".into(),
+            linked_session_count: 2,
+            direction: SplitDirection::Right,
+        },
+        field: CreateField::Command,
+        draft: CreateDraft {
+            name: String::new(),
+            cwd: "/tmp".into(),
+            command: "edited command".into(),
+        },
+        submitting: false,
+        error: Some("invalid command".into()),
+        linked_session_count: 2,
+    })));
+
+    let tiny = draw(&state, 20, 4);
+    assert!(tiny.contains("command:"));
+    assert!(tiny.contains("ERROR:"));
+    assert!(!tiny.contains("Tab/"));
+    insta::assert_snapshot!("creation_form_validation_tiny", tiny);
+
+    let intermediate = draw(&state, 20, 6);
+    for text in ["command:", "ERROR:", "linked window:", "Tab/"] {
+        assert!(intermediate.contains(text), "missing {text}");
+    }
+    assert_eq!(intermediate.matches("command:").count(), 1);
+    insta::assert_snapshot!("creation_form_validation_intermediate", intermediate);
+}
+
+#[test]
 fn creation_choice_form_and_pending_overlay_render_safely() {
     let mut state = app(vec![record("dash", "%1", "working", "Task")]);
     state.modal = Some(Modal::Create(CreateModal::Choice {
