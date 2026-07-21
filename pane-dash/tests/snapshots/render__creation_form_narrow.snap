@@ -1,0 +1,8 @@
+---
+source: tests/render.rs
+expression: "draw(&state, 20, 4)"
+---
+┌Create session────┐
+│me: 東 京 é␛東 京 é␛  │
+│d: /tmp           │
+└──────────────────┘

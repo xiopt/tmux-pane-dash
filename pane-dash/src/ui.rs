@@ -5,7 +5,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{AppState, Modal, Mode, status_index};
+use crate::app::{
+    AppState, CreateField, CreateModal, Modal, Mode, PendingCreationState, status_index,
+};
+use crate::creation::{CreateContext, display_error};
 use crate::model::{Row, Status};
 
 pub use crate::app::format_age;
@@ -89,10 +92,24 @@ fn preview_block(horizontal: bool) -> Block<'static> {
 pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
     let layout = full_layout(app, frame.area());
     let list_area = layout.dashboard.list;
+    let pending_height = u16::from(app.pending_creation.is_some() && list_area.height > 0);
+    if let Some(pending) = &app.pending_creation {
+        let pending_area = Rect::new(list_area.x, list_area.y, list_area.width, pending_height);
+        frame.render_widget(
+            Paragraph::new(pending_line(pending, now, list_area.width)),
+            pending_area,
+        );
+    }
+    let list_area = Rect::new(
+        list_area.x,
+        list_area.y.saturating_add(pending_height),
+        list_area.width,
+        list_area.height.saturating_sub(pending_height),
+    );
     let grouped = matches!(app.mode, Mode::Grouped);
     let rows = app.model.rows(grouped);
     let cache = app.render_cache();
-    if cache.visible_rows.is_empty() {
+    if cache.visible_rows.is_empty() && list_area.height > 0 {
         let hint_area = Rect::new(
             list_area.x,
             list_area.y.saturating_add(list_area.height / 2),
@@ -155,22 +172,15 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let width = area.width.clamp(1, 70);
-    let height = area.height.clamp(1, 5);
-    let modal_area = Rect::new(
-        area.x.saturating_add(area.width.saturating_sub(width) / 2),
-        area.y
-            .saturating_add(area.height.saturating_sub(height) / 2),
-        width,
-        height,
-    );
-    frame.render_widget(Clear, modal_area);
     match modal {
         Modal::Send {
             pane_id,
             command,
             text,
         } => {
+            let modal_area = centered_modal_rect(area, 70, 5);
+            frame.render_widget(Clear, modal_area);
+            let width = modal_area.width;
             let title = truncate_to_width(
                 &format!("Send to {} (running: {})", pane_id.0, command),
                 usize::from(width.saturating_sub(4)),
@@ -192,6 +202,9 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
             frame.render_widget(Paragraph::new(lines), inner);
         }
         Modal::Kill { pane_id } => {
+            let modal_area = centered_modal_rect(area, 70, 5);
+            frame.render_widget(Clear, modal_area);
+            let width = modal_area.width;
             let title = truncate_to_width(
                 &format!("Kill pane {}? [y/N]", pane_id.0),
                 usize::from(width.saturating_sub(4)),
@@ -201,12 +214,194 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
                 modal_area,
             );
         }
-        Modal::Create(_) => {}
+        Modal::Create(CreateModal::Choice { choices, selected }) => {
+            let modal_area = centered_modal_rect(area, 70, choices.len().saturating_add(4) as u16);
+            frame.render_widget(Clear, modal_area);
+            render_create_choice(frame, modal_area, choices, *selected);
+        }
+        Modal::Create(CreateModal::Form(form)) => {
+            let modal_area = centered_modal_rect(area, 70, 10);
+            frame.render_widget(Clear, modal_area);
+            render_create_form(frame, modal_area, form);
+        }
     }
 }
 
+fn centered_modal_rect(area: Rect, desired_width: u16, desired_height: u16) -> Rect {
+    let width = area.width.min(desired_width);
+    let height = area.height.min(desired_height);
+    Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    )
+}
+
+fn render_create_choice(
+    frame: &mut Frame,
+    area: Rect,
+    choices: &[crate::app::CreateChoice],
+    selected: usize,
+) {
+    let block = Block::default().borders(Borders::ALL).title("Create");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let mut lines = choices
+        .iter()
+        .enumerate()
+        .take(inner.height.saturating_sub(1) as usize)
+        .map(|(index, choice)| {
+            Line::from(Span::styled(
+                truncate_to_width(choice.label, usize::from(inner.width)),
+                if index == selected {
+                    Style::default()
+                        .fg(palette::ACCENT)
+                        .add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default().fg(palette::TEXT)
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    if lines.len() < inner.height as usize {
+        lines.push(Line::styled(
+            truncate_to_width(
+                "↑↓ select | Enter choose | Esc cancel",
+                usize::from(inner.width),
+            ),
+            Style::default().fg(palette::DIM),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateForm) {
+    let title = match form.kind {
+        CreateContext::Split { .. } => "Create split",
+        CreateContext::NewWindow { .. } => "Create window",
+        CreateContext::NewSession => "Create session",
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let mut fields = Vec::new();
+    if !matches!(form.kind, CreateContext::Split { .. }) {
+        fields.push((CreateField::Name, "name", &form.draft.name));
+    }
+    fields.extend([
+        (CreateField::Cwd, "cwd", &form.draft.cwd),
+        (CreateField::Command, "command", &form.draft.command),
+    ]);
+    let mut lines = fields
+        .into_iter()
+        .map(|(field, label, value)| {
+            let text = truncate_to_width(
+                &format!("{label}: {}", literal_input(value)),
+                usize::from(inner.width),
+            );
+            let active = field == form.field && !form.submitting;
+            Line::styled(
+                text,
+                if active {
+                    Style::default()
+                        .fg(palette::ACCENT)
+                        .add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default().fg(if form.submitting {
+                        palette::DIM
+                    } else {
+                        palette::TEXT
+                    })
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    if form.linked_session_count > 1 {
+        lines.push(Line::styled(
+            truncate_to_width(
+                &format!(
+                    "linked window: split appears in {} sessions",
+                    form.linked_session_count
+                ),
+                usize::from(inner.width),
+            ),
+            Style::default().fg(palette::DIM),
+        ));
+    }
+    if let Some(error) = &form.error {
+        lines.push(Line::styled(
+            truncate_to_width(
+                &format!("ERROR: {}", literal_input(&display_error(error))),
+                usize::from(inner.width),
+            ),
+            Style::default().fg(palette::ERROR),
+        ));
+    }
+    lines.push(Line::styled(
+        truncate_to_width(
+            if form.submitting {
+                "submitting... (locked)"
+            } else {
+                "Tab/↑↓ field | Enter submit | Esc cancel"
+            },
+            usize::from(inner.width),
+        ),
+        Style::default().fg(palette::DIM),
+    ));
+    let scroll = lines.len().saturating_sub(inner.height as usize) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((0, scroll)), inner);
+}
+
+fn pending_line(pending: &crate::app::PendingCreation, now: u64, width: u16) -> Line<'static> {
+    let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let (text, style) = match &pending.state {
+        PendingCreationState::Creating => (
+            format!("{} creating...", spinner[now as usize % spinner.len()]),
+            Style::default().fg(palette::WORKING),
+        ),
+        PendingCreationState::Created { .. } | PendingCreationState::Tagging { .. } => (
+            format!("{} tagging...", spinner[now as usize % spinner.len()]),
+            Style::default().fg(palette::WORKING),
+        ),
+        PendingCreationState::Sending { .. } => (
+            format!(
+                "{} sending command...",
+                spinner[now as usize % spinner.len()]
+            ),
+            Style::default().fg(palette::WORKING),
+        ),
+        PendingCreationState::Entering { .. } => (
+            format!("{} sending Enter...", spinner[now as usize % spinner.len()]),
+            Style::default().fg(palette::WORKING),
+        ),
+        PendingCreationState::AwaitingSnapshot { .. } => (
+            format!(
+                "{} waiting for snapshot...",
+                spinner[now as usize % spinner.len()]
+            ),
+            Style::default().fg(palette::WORKING),
+        ),
+        PendingCreationState::Error(error) => (
+            format!("ERROR: {}", literal_input(&display_error(error))),
+            Style::default().fg(palette::ERROR),
+        ),
+    };
+    Line::styled(truncate_to_width(&text, usize::from(width)), style)
+}
+
 fn literal_input(text: &str) -> String {
+    const MAX_SCALARS: usize = 512;
+
     text.chars()
+        .take(MAX_SCALARS)
         .map(|character| match character {
             '\0'..='\u{1f}' => char::from_u32(0x2400 + character as u32).unwrap(),
             '\u{7f}' => '␡',

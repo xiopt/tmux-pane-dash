@@ -1,5 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pane_dash::app::{AppState, Event, Modal, Mode, reduce};
+use pane_dash::app::{
+    AppState, CreateChoice, CreateChoiceKind, CreateField, CreateForm, CreateModal, Event, Modal,
+    Mode, PendingCreation, PendingCreationState, reduce,
+};
+use pane_dash::creation::{
+    CreateContext, CreateDraft, CreationId, CreationResolution, SplitDirection,
+};
 use pane_dash::model::{Model, ModelConfig, PaneId};
 use pane_dash::options::DashConfig;
 use pane_dash::preview::PreviewFrame;
@@ -803,4 +809,161 @@ fn truncation_respects_display_width_for_wide_characters() {
     assert_eq!(truncate_to_width("東京abc", 5), "東京a");
     assert_eq!(truncate_to_width("東京abc", 4), "東京");
     assert_eq!(truncate_to_width("東京abc", 3), "東");
+}
+
+#[test]
+fn creation_choice_form_and_pending_overlay_render_safely() {
+    let mut state = app(vec![record("dash", "%1", "working", "Task")]);
+    state.modal = Some(Modal::Create(CreateModal::Choice {
+        choices: vec![
+            CreateChoice {
+                label: "split right",
+                kind: CreateChoiceKind::Right,
+                context: CreateContext::Split {
+                    target: "%1".into(),
+                    initiating_session: "$dash".into(),
+                    linked_session_count: 2,
+                    direction: SplitDirection::Right,
+                },
+                cwd: "/tmp".into(),
+            },
+            CreateChoice {
+                label: "new session",
+                kind: CreateChoiceKind::NewSession,
+                context: CreateContext::NewSession,
+                cwd: String::new(),
+            },
+        ],
+        selected: 0,
+    }));
+    let choice = draw(&state, 80, 24);
+    assert!(choice.contains("split right"));
+    assert!(choice.contains("new session"));
+
+    state.modal = Some(Modal::Create(CreateModal::Form(CreateForm {
+        kind: CreateContext::Split {
+            target: "%1".into(),
+            initiating_session: "$dash".into(),
+            linked_session_count: 2,
+            direction: SplitDirection::Right,
+        },
+        field: CreateField::Command,
+        draft: CreateDraft {
+            name: "ignored".into(),
+            cwd: "/tmp\u{1b}[31m東京".into(),
+            command: "echo 東京\nnext".into(),
+        },
+        submitting: true,
+        error: Some("bad\u{1b}[31m\n東京".into()),
+        linked_session_count: 2,
+    })));
+    let form = draw(&state, 80, 24);
+    assert!(form.contains("linked window: split appears in 2 sessions"));
+    assert!(form.contains("submitting"));
+    assert!(form.contains("\\u{1b}"));
+    assert!(!form.contains('\u{1b}'));
+
+    state.modal = None;
+    state.pending_creation = Some(PendingCreation {
+        id: CreationId(1),
+        initiating_session: None,
+        state: PendingCreationState::AwaitingSnapshot {
+            pane_id: "%2".into(),
+            resolution: CreationResolution::Success,
+        },
+    });
+    assert!(draw_at(&state, 80, 24, 1_001).contains("waiting for snapshot..."));
+
+    state.pending_creation.as_mut().unwrap().state =
+        PendingCreationState::Error("bad\n東京".into());
+    let error = draw(&state, 20, 4);
+    assert!(error.contains("ERROR"));
+    assert!(
+        error
+            .lines()
+            .any(|line| line.contains("ERROR") && !line.contains('\u{1b}'))
+    );
+    insta::assert_snapshot!("creation_choice", choice);
+    insta::assert_snapshot!("creation_form", form);
+    insta::assert_snapshot!("creation_pending_error_tiny", error);
+}
+
+#[test]
+fn creation_pending_stages_and_modal_sizes_are_deterministic() {
+    let mut state = app(Vec::new());
+    state.pending_creation = Some(PendingCreation {
+        id: CreationId(9),
+        initiating_session: None,
+        state: PendingCreationState::Creating,
+    });
+    let stages = [
+        PendingCreationState::Creating,
+        PendingCreationState::Created {
+            pane_id: "%9".into(),
+        },
+        PendingCreationState::Sending {
+            pane_id: "%9".into(),
+        },
+        PendingCreationState::Entering {
+            pane_id: "%9".into(),
+        },
+        PendingCreationState::AwaitingSnapshot {
+            pane_id: "%9".into(),
+            resolution: CreationResolution::Success,
+        },
+        PendingCreationState::Error("bad\u{1b}[31m\n東京".into()),
+    ];
+    let rendered = stages
+        .into_iter()
+        .map(|stage| {
+            state.pending_creation.as_mut().unwrap().state = stage;
+            draw_at(&state, 80, 8, 1_000)
+        })
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    for text in [
+        "creating...",
+        "tagging...",
+        "sending command...",
+        "sending Enter...",
+        "waiting for snapshot...",
+        "ERROR",
+    ] {
+        assert!(rendered.contains(text), "missing {text}");
+    }
+    assert!(rendered.contains("no opencode panes found"));
+    assert!(!rendered.contains('\u{1b}'));
+    insta::assert_snapshot!("creation_pending_stages_empty", rendered);
+
+    let mut filtered = app(vec![record("dash", "%1", "working", "Task")]);
+    enter_query(&mut filtered, "absent");
+    filtered.pending_creation = Some(PendingCreation {
+        id: CreationId(10),
+        initiating_session: None,
+        state: PendingCreationState::Creating,
+    });
+    let retained_filter = draw_at(&filtered, 80, 8, 1_000);
+    assert!(retained_filter.contains("creating..."));
+    assert!(retained_filter.contains("no panes match filter"));
+    assert!(retained_filter.contains("FILTER: absent"));
+    insta::assert_snapshot!("creation_pending_filter_retained", retained_filter);
+
+    state.pending_creation = None;
+    state.modal = Some(Modal::Create(CreateModal::Form(CreateForm {
+        kind: CreateContext::NewSession,
+        field: CreateField::Name,
+        draft: CreateDraft {
+            name: "東京e\u{301}\u{1b}".repeat(20),
+            cwd: "/tmp".into(),
+            command: "echo 東京".into(),
+        },
+        submitting: false,
+        error: None,
+        linked_session_count: 0,
+    })));
+    insta::assert_snapshot!("creation_form_wide", draw(&state, 160, 50));
+    insta::assert_snapshot!("creation_form_narrow", draw(&state, 20, 4));
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { draw(&state, 0, 0) })).is_ok()
+    );
 }

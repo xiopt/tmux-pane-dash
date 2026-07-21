@@ -1,0 +1,8 @@
+---
+source: tests/render.rs
+expression: error
+---
+ERROR: bad\u{a}東 京
+────────────────────
+select a pane to pre
+W1P1  grouped | NAV

@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: form
+---
+▾ dash (1)                                                             1 working
+  ◐ working      2m    1.2  tmp          sonnet  Task
+
+
+
+
+
+     ┌Create split────────────────────────────────────────────────────────┐
+     │cwd: /tmp␛[31m東 京                                                   │
+     │command: echo 東 京 ␊next                                             │
+─────│linked window: split appears in 2 sessions                          │─────
+selec│ERROR: bad\u{1b}[31m\u{a}東 京                                        │
+     │submitting... (locked)                                              │
+     │                                                                    │
+     │                                                                    │
+     │                                                                    │
+     └────────────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+working 1  1 panes  grouped | NAV

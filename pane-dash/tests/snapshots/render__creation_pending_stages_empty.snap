@@ -1,0 +1,57 @@
+---
+source: tests/render.rs
+expression: rendered
+---
+⠋ creating...
+
+                             no opencode panes found
+────────────────────────────────────────────────────────────────────────────────
+select a pane to preview
+
+
+0 panes  grouped | NAV
+---
+⠋ tagging...
+
+                             no opencode panes found
+────────────────────────────────────────────────────────────────────────────────
+select a pane to preview
+
+
+0 panes  grouped | NAV
+---
+⠋ sending command...
+
+                             no opencode panes found
+────────────────────────────────────────────────────────────────────────────────
+select a pane to preview
+
+
+0 panes  grouped | NAV
+---
+⠋ sending Enter...
+
+                             no opencode panes found
+────────────────────────────────────────────────────────────────────────────────
+select a pane to preview
+
+
+0 panes  grouped | NAV
+---
+⠋ waiting for snapshot...
+
+                             no opencode panes found
+────────────────────────────────────────────────────────────────────────────────
+select a pane to preview
+
+
+0 panes  grouped | NAV
+---
+ERROR: bad\u{1b}[31m\u{a}東 京
+
+                             no opencode panes found
+────────────────────────────────────────────────────────────────────────────────
+select a pane to preview
+
+
+0 panes  grouped | NAV

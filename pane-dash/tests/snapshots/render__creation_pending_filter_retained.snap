@@ -1,0 +1,12 @@
+---
+source: tests/render.rs
+expression: retained_filter
+---
+⠋ creating...
+
+                              no panes match filter
+────────────────────────────────────────────────────────────────────────────────
+select a pane to preview
+
+
+working 1  1 panes  grouped | FILTER: absent

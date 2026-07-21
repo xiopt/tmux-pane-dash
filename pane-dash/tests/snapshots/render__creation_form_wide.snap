@@ -1,0 +1,54 @@
+---
+source: tests/render.rs
+expression: "draw(&state, 160, 50)"
+---
+                                                                        │select a pane to preview
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                             ┌Create session──────────────────────────────────────────────────────┐
+                                             │name: 東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 │
+                                             │cwd: /tmp                                                           │
+                                             │command: echo 東 京                                                   │
+                         no opencode panes fo│Tab/↑↓ field | Enter submit | Esc cancel                            │
+                                             │                                                                    │
+                                             │                                                                    │
+                                             │                                                                    │
+                                             │                                                                    │
+                                             └────────────────────────────────────────────────────────────────────┘
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+0 panes  grouped | NAV
