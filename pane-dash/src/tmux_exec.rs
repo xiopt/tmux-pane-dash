@@ -48,6 +48,25 @@ pub enum TmuxCommandError {
     Cancelled,
 }
 
+enum CreationCompletion<T> {
+    Exited(T),
+    TimedOut,
+    Cancelled,
+}
+
+async fn arbitrate_creation_completion<T>(
+    cancellation: &mut oneshot::Receiver<()>,
+    deadline: Instant,
+    child_exit: impl std::future::Future<Output = T>,
+) -> CreationCompletion<T> {
+    tokio::select! {
+        biased;
+        _ = &mut *cancellation => CreationCompletion::Cancelled,
+        _ = tokio::time::sleep_until(deadline) => CreationCompletion::TimedOut,
+        result = child_exit => CreationCompletion::Exited(result),
+    }
+}
+
 impl TmuxExec {
     pub fn new(bin: impl Into<PathBuf>) -> Self {
         Self { bin: bin.into() }
@@ -175,18 +194,11 @@ impl TmuxExec {
         let stderr_reader = tokio::spawn(read_stream(stderr));
         let stdout_abort = stdout_reader.abort_handle();
         let stderr_abort = stderr_reader.abort_handle();
-        enum Completion {
-            Exited(std::result::Result<ExitStatus, io::Error>),
-            TimedOut,
-            Cancelled,
-        }
-        let completion = tokio::select! {
-            biased;
-            _ = &mut *cancellation => Completion::Cancelled,
-            _ = tokio::time::sleep_until(deadline) => Completion::TimedOut,
-            result = child.wait() => Completion::Exited(result),
-        };
-        if matches!(completion, Completion::TimedOut | Completion::Cancelled) {
+        let completion = arbitrate_creation_completion(cancellation, deadline, child.wait()).await;
+        if matches!(
+            completion,
+            CreationCompletion::TimedOut | CreationCompletion::Cancelled
+        ) {
             let _ = child.kill().await;
             let _ = child.wait().await;
             stdout_abort.abort();
@@ -194,9 +206,9 @@ impl TmuxExec {
             let _ = stdout_reader.await;
             let _ = stderr_reader.await;
             return Err(match completion {
-                Completion::TimedOut => TmuxCommandError::TimedOut,
-                Completion::Cancelled => TmuxCommandError::Cancelled,
-                Completion::Exited(_) => unreachable!(),
+                CreationCompletion::TimedOut => TmuxCommandError::TimedOut,
+                CreationCompletion::Cancelled => TmuxCommandError::Cancelled,
+                CreationCompletion::Exited(_) => unreachable!(),
             });
         }
         let mut streams = tokio::spawn(async move {
@@ -227,17 +239,17 @@ impl TmuxExec {
         let stdout = stdout?;
         let stderr = stderr?;
         match completion {
-            Completion::Exited(Ok(status)) if status.success() => Ok(stdout),
-            Completion::Exited(Ok(status)) => Err(TmuxCommandError::Exit {
+            CreationCompletion::Exited(Ok(status)) if status.success() => Ok(stdout),
+            CreationCompletion::Exited(Ok(status)) => Err(TmuxCommandError::Exit {
                 status,
                 stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
             }),
-            Completion::Exited(Err(source)) => Err(TmuxCommandError::Read {
+            CreationCompletion::Exited(Err(source)) => Err(TmuxCommandError::Read {
                 stream: "child",
                 source,
             }),
-            Completion::TimedOut => Err(TmuxCommandError::TimedOut),
-            Completion::Cancelled => Err(TmuxCommandError::Cancelled),
+            CreationCompletion::TimedOut => Err(TmuxCommandError::TimedOut),
+            CreationCompletion::Cancelled => Err(TmuxCommandError::Cancelled),
         }
     }
 
@@ -300,9 +312,10 @@ async fn collect_stream(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::future;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
     use crate::model::{Model, ModelConfig};
     use crate::snapshot::parse;
@@ -344,8 +357,16 @@ mod tests {
     #[tokio::test]
     async fn creation_runner_bounds_retained_descendant_streams_after_child_exit() {
         let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("retained-pipe.pid");
         let executable = dir.path().join("fake-tmux");
-        fs::write(&executable, "#!/bin/sh\n(sleep 60) &\nprintf '%%44\\n'\n").unwrap();
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n(sleep 60) &\necho $! > '{}'\nprintf '%%44\\n'\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let (_cancel, mut cancellation) = tokio::sync::oneshot::channel();
 
@@ -361,6 +382,31 @@ mod tests {
         .await
         .expect("retained descendant must not hold stream collection open")
         .unwrap_err();
+
+        let pid = fs::read_to_string(&pid_file)
+            .expect("retained pipe descendant pid")
+            .trim()
+            .to_owned();
+        assert!(
+            Command::new("kill")
+                .args(["-TERM", &pid])
+                .status()
+                .expect("terminate retained pipe descendant")
+                .success()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(Stdio::null())
+                .status()
+                .expect("check retained pipe descendant")
+                .success()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retained pipe descendant must be reaped after cleanup");
 
         assert!(matches!(error, TmuxCommandError::TimedOut));
     }
@@ -408,6 +454,20 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, TmuxCommandError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn creation_completion_arbitration_prefers_deadline_over_an_already_ready_child_exit() {
+        let (_cancel, mut cancellation) = tokio::sync::oneshot::channel::<()>();
+
+        let completion = super::arbitrate_creation_completion(
+            &mut cancellation,
+            tokio::time::Instant::now() - std::time::Duration::from_millis(1),
+            future::ready(()),
+        )
+        .await;
+
+        assert!(matches!(completion, super::CreationCompletion::TimedOut));
     }
 
     struct ScratchServer<'a> {

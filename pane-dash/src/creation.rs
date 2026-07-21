@@ -493,6 +493,51 @@ mod tests {
         }
     }
 
+    fn fake_workflow_tmux(
+        dir: &tempfile::TempDir,
+        fail_at: Option<usize>,
+    ) -> (TmuxExec, std::path::PathBuf) {
+        let log = dir.path().join("argv.log");
+        let count = dir.path().join("invocation-count");
+        let executable = dir.path().join("fake-tmux");
+        let fail = fail_at.map_or(0, |value| value);
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\ncount=0\nif [ -f '{count}' ]; then count=$(cat '{count}'); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{count}'\nprintf '%s\\t' \"$@\" >> '{log}'\nprintf '\\n' >> '{log}'\nif [ \"$count\" -eq {fail} ]; then echo \"failure-$count\" >&2; exit 17; fi\nif [ \"$1\" = new-session ]; then printf '%%44\\n'; fi\n",
+                count = count.display(),
+                log = log.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        (TmuxExec::new(executable), log)
+    }
+
+    fn logged_argv(log: &Path) -> Vec<Vec<String>> {
+        fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                line.strip_suffix('\t')
+                    .expect("fake tmux records a trailing argument delimiter")
+                    .split('\t')
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .collect()
+    }
+
+    async fn run_workflow(
+        tmux: TmuxExec,
+        request: super::CreateRequest,
+    ) -> Vec<super::CreationProgress> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_cancel, cancellation) = tokio::sync::oneshot::channel();
+        run_creation(tmux, super::CreationId(99), request, tx, cancellation).await;
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
     #[test]
     fn builds_exact_new_session_argv_with_trimmed_name() {
         let request = build_request(
@@ -799,5 +844,183 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn workflow_failures_stop_at_the_failed_invocation_with_exact_argv() {
+        let expected = [
+            vec!["new-session", "-d", "-P", "-F", "#{pane_id}"],
+            vec![
+                "set-option",
+                "-p",
+                "-t",
+                "%44",
+                "@pane_dash_tag",
+                "dash-created",
+            ],
+            vec!["send-keys", "-l", "-t", "%44", "--", "echo hi"],
+            vec!["send-keys", "-t", "%44", "Enter"],
+        ];
+
+        for fail_at in 1..=4 {
+            let dir = tempfile::tempdir().unwrap();
+            let (tmux, log) = fake_workflow_tmux(&dir, Some(fail_at));
+            let progress = run_workflow(
+                tmux,
+                build_request(CreateContext::NewSession, &draft("", "", "echo hi")).unwrap(),
+            )
+            .await;
+
+            assert_eq!(
+                logged_argv(&log),
+                expected[..fail_at]
+                    .iter()
+                    .map(|argv| argv.iter().map(|argument| (*argument).to_owned()).collect())
+                    .collect::<Vec<Vec<_>>>(),
+                "failure at invocation {fail_at} must not run later stages"
+            );
+            let terminal: Vec<_> = progress
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        super::CreationProgress::CreateFailed { .. }
+                            | super::CreationProgress::Finished { .. }
+                            | super::CreationProgress::TimedOut { .. }
+                    )
+                })
+                .collect();
+            assert_eq!(terminal.len(), 1, "failure at invocation {fail_at}");
+            match (fail_at, terminal[0]) {
+                (1, super::CreationProgress::CreateFailed { .. }) => {}
+                (
+                    2,
+                    super::CreationProgress::Finished {
+                        resolution: super::CreationResolution::TagFailed(error),
+                        ..
+                    },
+                ) if error.contains("failure-2") => {}
+                (
+                    3,
+                    super::CreationProgress::Finished {
+                        resolution:
+                            super::CreationResolution::CommandFailed {
+                                stage: super::CreateStage::SendCommand,
+                                error,
+                            },
+                        ..
+                    },
+                ) if error.contains("failure-3") => {}
+                (
+                    4,
+                    super::CreationProgress::Finished {
+                        resolution:
+                            super::CreationResolution::CommandFailed {
+                                stage: super::CreateStage::SendEnter,
+                                error,
+                            },
+                        ..
+                    },
+                ) if error.contains("failure-4") => {}
+                (_, event) => {
+                    panic!("unexpected terminal event for invocation {fail_at}: {event:?}")
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_empty_command_skips_send_command_and_enter() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tmux, log) = fake_workflow_tmux(&dir, None);
+        let progress = run_workflow(
+            tmux,
+            build_request(CreateContext::NewSession, &draft("", "", "")).unwrap(),
+        )
+        .await;
+
+        assert_eq!(
+            logged_argv(&log),
+            vec![
+                vec!["new-session", "-d", "-P", "-F", "#{pane_id}"],
+                vec![
+                    "set-option",
+                    "-p",
+                    "-t",
+                    "%44",
+                    "@pane_dash_tag",
+                    "dash-created",
+                ],
+            ]
+            .into_iter()
+            .map(|argv| argv.into_iter().map(str::to_owned).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            progress.last(),
+            Some(super::CreationProgress::Finished {
+                resolution: super::CreationResolution::Success,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn workflow_stops_after_malformed_pane_output_or_invalid_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let malformed_log = dir.path().join("malformed.log");
+        let malformed = dir.path().join("malformed-tmux");
+        fs::write(
+            &malformed,
+            format!(
+                "#!/bin/sh\nprintf '%s\\t' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nprintf 'not-a-pane\\n'\n",
+                malformed_log.display(),
+                malformed_log.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&malformed, fs::Permissions::from_mode(0o755)).unwrap();
+        let malformed_progress = run_workflow(
+            TmuxExec::new(malformed),
+            build_request(CreateContext::NewSession, &draft("", "", "echo hi")).unwrap(),
+        )
+        .await;
+        assert_eq!(logged_argv(&malformed_log).len(), 1);
+        assert!(matches!(
+            malformed_progress.as_slice(),
+            [
+                super::CreationProgress::Stage {
+                    stage: super::CreateStage::Create,
+                    ..
+                },
+                super::CreationProgress::CreateFailed { .. },
+            ]
+        ));
+
+        let (tmux, workflow_log) = fake_workflow_tmux(&dir, None);
+        let invalid_cwd = dir.path().join("deleted-before-spawn");
+        let invalid_progress = run_workflow(
+            tmux,
+            build_request(
+                CreateContext::NewSession,
+                &draft("", invalid_cwd.to_str().unwrap(), "echo hi"),
+            )
+            .unwrap(),
+        )
+        .await;
+        assert!(
+            !workflow_log.exists(),
+            "invalid cwd must fail before invoking tmux"
+        );
+        assert!(matches!(
+            invalid_progress.as_slice(),
+            [
+                super::CreationProgress::Stage {
+                    stage: super::CreateStage::Create,
+                    ..
+                },
+                super::CreationProgress::CreateFailed { .. },
+            ]
+        ));
     }
 }

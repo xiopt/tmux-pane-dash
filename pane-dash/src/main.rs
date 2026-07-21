@@ -719,19 +719,7 @@ where
     B: Backend,
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    if creation_task
-        .as_ref()
-        .is_some_and(|task| task.join.is_finished())
-        && let Some(task) = creation_task.take()
-    {
-        let id = task.id;
-        if let Err(error) = task.join.await {
-            let _ = creation_tx.send(CreationProgress::TaskFailed {
-                id,
-                error: format!("creation worker ended abnormally: {error}"),
-            });
-        }
-    }
+    let _ = reap_finished_creation_task(creation_task, creation_tx).await;
     let result = reduce(app, event);
     let mut effects = ActionEffects::default();
     for action in result.actions {
@@ -801,6 +789,24 @@ where
         redraw(terminal, app)?;
     }
     Ok(effects)
+}
+
+async fn reap_finished_creation_task(
+    task: &mut Option<CreationTask>,
+    progress: &mpsc::UnboundedSender<CreationProgress>,
+) -> bool {
+    if !task.as_ref().is_some_and(|task| task.join.is_finished()) {
+        return false;
+    }
+    let task = task.take().expect("finished creation task is present");
+    let id = task.id;
+    if let Err(error) = task.join.await {
+        let _ = progress.send(CreationProgress::TaskFailed {
+            id,
+            error: format!("creation worker ended abnormally: {error}"),
+        });
+    }
+    true
 }
 
 async fn start_creation(
@@ -1573,7 +1579,7 @@ mod tests {
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = split-window ]; then while [ ! -f '{}' ]; do sleep 0.01; done; printf '%44\\n'; fi\n",
+                    "#!/bin/sh\ncase \"$1\" in\nsplit-window) while [ ! -f '{}' ]; do sleep 0.01; done; printf '%%44\\n' ;;\ncapture-pane) printf 'preview advanced\\n' ;;\nesac\n",
                 release.display()
             ),
         )
@@ -1583,7 +1589,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let mut app = preview_app();
         let mut preview_tick = preview_interval();
-        let (preview_tx, _) = mpsc::unbounded_channel();
+        let (preview_tx, mut preview_responses) = mpsc::unbounded_channel();
         let (creation_tx, mut progress) = mpsc::unbounded_channel();
         let mut task = None;
 
@@ -1606,6 +1612,100 @@ mod tests {
         assert!(task.is_some());
         assert!(!app.should_quit);
 
+        let old_snapshot_hash = app.model.content_hash();
+        let (sequence, pane_id) = app
+            .preview
+            .in_flight
+            .clone()
+            .expect("initial model selection requests a preview");
+        start_preview_capture(
+            &mut preview_tick,
+            &preview_tx,
+            tmux.clone(),
+            sequence,
+            pane_id,
+        );
+        let response = tokio::time::timeout(Duration::from_secs(1), preview_responses.recv())
+            .await
+            .expect("initial preview must be captured while creation is blocked")
+            .expect("preview response channel remains open");
+        apply_event(
+            &mut terminal,
+            &mut app,
+            Event::PreviewCaptured {
+                sequence: response.sequence,
+                pane_id: response.pane_id,
+                result: response.result,
+            },
+            &tmux,
+            None,
+            "/dev/ttys001",
+            &mut preview_tick,
+            &preview_tx,
+            &creation_tx,
+            &mut task,
+        )
+        .await
+        .unwrap();
+        apply_event(
+            &mut terminal,
+            &mut app,
+            Event::PreviewTick,
+            &tmux,
+            None,
+            "/dev/ttys001",
+            &mut preview_tick,
+            &preview_tx,
+            &creation_tx,
+            &mut task,
+        )
+        .await
+        .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(1), preview_responses.recv())
+            .await
+            .expect("preview must be captured while creation is blocked")
+            .expect("preview response channel remains open");
+        apply_event(
+            &mut terminal,
+            &mut app,
+            Event::PreviewCaptured {
+                sequence: response.sequence,
+                pane_id: response.pane_id,
+                result: response.result,
+            },
+            &tmux,
+            None,
+            "/dev/ttys001",
+            &mut preview_tick,
+            &preview_tx,
+            &creation_tx,
+            &mut task,
+        )
+        .await
+        .unwrap();
+        let snapshot = String::from_utf8(valid_record())
+            .unwrap()
+            .replace("working", "idle");
+        apply_event(
+            &mut terminal,
+            &mut app,
+            Event::Snapshot {
+                outcome: parse(snapshot.as_bytes()),
+                observed_at: 1,
+            },
+            &tmux,
+            None,
+            "/dev/ttys001",
+            &mut preview_tick,
+            &preview_tx,
+            &creation_tx,
+            &mut task,
+        )
+        .await
+        .unwrap();
+        assert!(app.preview.frame.is_some());
+        assert_ne!(app.model.content_hash(), old_snapshot_hash);
+
         apply_event(
             &mut terminal,
             &mut app,
@@ -1623,8 +1723,12 @@ mod tests {
         assert!(!app.should_quit);
 
         fs::write(release, "").unwrap();
-        while let Ok(item) = tokio::time::timeout(Duration::from_secs(1), progress.recv()).await {
-            let Some(item) = item else { break };
+        let mut finished = false;
+        while !finished {
+            let item = tokio::time::timeout(Duration::from_secs(1), progress.recv())
+                .await
+                .expect("creation worker must report progress before the test deadline")
+                .expect("creation worker progress channel must remain open until Finished");
             let terminal_event = matches!(item, CreationProgress::Finished { .. });
             apply_event(
                 &mut terminal,
@@ -1640,14 +1744,86 @@ mod tests {
             )
             .await
             .unwrap();
-            if terminal_event {
-                break;
+            finished = terminal_event;
+        }
+        assert!(
+            finished,
+            "creation worker must emit a terminal Finished event"
+        );
+        assert!(progress.try_recv().is_err());
+        if let Some(task) = task.take() {
+            task.join.await.expect("creation worker join must succeed");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn panicking_creation_task_reports_once_and_unlocks_the_correlated_form() {
+        let mut app = preview_app();
+        let mut id = None;
+        for key in [KeyCode::Char('n'), KeyCode::Enter, KeyCode::Enter] {
+            let result = reduce(&mut app, Event::Key(KeyEvent::new(key, KeyModifiers::NONE)));
+            if let Some(Action::StartCreation { id: started, .. }) = result.actions.first() {
+                id = Some(*started);
             }
         }
+        let id = id.expect("create submission emits its correlated start action");
+        let (cancel, _cancellation) = tokio::sync::oneshot::channel();
+        let mut task = Some(super::CreationTask {
+            id,
+            cancel,
+            join: tokio::spawn(async { panic!("creation test panic") }),
+        });
+        let (creation_tx, mut progress) = mpsc::unbounded_channel();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !task.as_ref().is_some_and(|task| task.join.is_finished()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("panicking creation task must finish");
+        assert!(super::reap_finished_creation_task(&mut task, &creation_tx).await);
+        assert!(!super::reap_finished_creation_task(&mut task, &creation_tx).await);
+
+        let task_progress = tokio::time::timeout(Duration::from_secs(1), progress.recv())
+            .await
+            .expect("supervision must forward the failed task")
+            .expect("creation progress channel remains open");
+        assert!(matches!(
+            task_progress,
+            CreationProgress::TaskFailed { id: failed, .. } if failed == id
+        ));
         assert!(progress.try_recv().is_err());
-        if let Some(task) = task {
-            let _ = task.join.await;
-        }
+
+        let dir = TempDir::new().unwrap();
+        let (tmux, _) = fake_snapshot_tmux(&dir);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut preview_tick = preview_interval();
+        let (preview_tx, _) = mpsc::unbounded_channel();
+        let (creation_tx, _) = mpsc::unbounded_channel();
+        let effects = apply_event(
+            &mut terminal,
+            &mut app,
+            Event::CreationProgress(task_progress),
+            &tmux,
+            None,
+            "/dev/ttys001",
+            &mut preview_tick,
+            &preview_tx,
+            &creation_tx,
+            &mut task,
+        )
+        .await
+        .unwrap();
+
+        assert!(!effects.mutated);
+        assert!(!effects.refresh_now);
+        assert!(matches!(
+            app.pending_creation.as_ref().map(|pending| &pending.state),
+            Some(pane_dash::app::PendingCreationState::Error(error))
+                if error.contains("creation worker ended abnormally")
+        ));
+        assert!(progress.try_recv().is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
