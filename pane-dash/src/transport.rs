@@ -378,6 +378,31 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn silent_focus_subscription_fails_without_connecting_or_events() {
+            let dir = TempDir::new().unwrap();
+            let fake = fake_tmux(
+                &dir,
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\nsleep 10",
+            );
+            let (tx, mut rx) = mpsc::unbounded_channel();
+
+            spawn_connection_attempt(fake, "$7".into(), "/dev/ttys001".into(), 24, tx);
+
+            let Some(ConnectionMessage::Failed {
+                generation: 24,
+                error,
+            }) = timeout(Duration::from_secs(4), rx.recv()).await.unwrap()
+            else {
+                panic!("expected focus subscription timeout failure");
+            };
+            assert_eq!(error, "tmux control response timed out");
+            assert!(matches!(
+                timeout(Duration::from_millis(100), rx.recv()).await,
+                Ok(None)
+            ));
+        }
+
+        #[tokio::test]
         async fn late_events_keep_the_generation_of_the_connection_that_emitted_them() {
             let dir = TempDir::new().unwrap();
             let fake = fake_tmux(

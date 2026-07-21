@@ -85,6 +85,28 @@ mod actor_tests {
     }
 
     #[tokio::test]
+    async fn silent_attach_handshake_times_out_and_reaps_the_child() {
+        let dir = TempDir::new().unwrap();
+        let pid = dir.path().join("pid");
+        let fake = fake_tmux(&dir, &format!("echo $$ > '{}'\nsleep 10", pid.display()));
+
+        timeout(Duration::from_secs(4), async {
+            let error = connect_control(fake, "$7").await.unwrap_err().to_string();
+            assert_eq!(error, "tmux control attach handshake timed out");
+        })
+        .await
+        .expect("silent attach handshake did not time out");
+        let child_pid = marker(&pid).await;
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", child_pid.trim()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[tokio::test]
     async fn serializes_concurrent_requests_fifo_and_preserves_binary_snapshot() {
         let dir = TempDir::new().unwrap();
         let commands = dir.path().join("commands");
@@ -182,6 +204,99 @@ mod actor_tests {
         })
         .await
         .expect("control requests did not complete");
+    }
+
+    #[tokio::test]
+    async fn response_timeout_fails_active_and_queued_requests_once() {
+        let dir = TempDir::new().unwrap();
+        let command = dir.path().join("command");
+        let pid = dir.path().join("pid");
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\necho $$ > '{}'\nIFS= read -r command\nprintf '%s\\n' \"$command\" > '{}'\nsleep 10",
+                pid.display(),
+                command.display(),
+            ),
+        );
+        let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
+        let first_handle = handle.clone();
+        let first = tokio::spawn(async move { first_handle.snapshot().await });
+        marker(&command).await;
+        let second_handle = handle.clone();
+        let second = tokio::spawn(async move { second_handle.jump("/dev/ttys001", "%2").await });
+
+        timeout(Duration::from_secs(4), async {
+            let first = first.await.unwrap().unwrap_err().to_string();
+            let second = second.await.unwrap().unwrap_err().to_string();
+            assert_eq!(first, "tmux control response timed out");
+            assert_eq!(second, first);
+            assert_eq!(events.recv().await, Some(ControlEvent::Terminated(first)));
+            assert_eq!(events.recv().await, None);
+        })
+        .await
+        .expect("response timeout left requests or events hanging");
+        let child_pid = marker(&pid).await;
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", child_pid.trim()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[tokio::test]
+    async fn notifications_do_not_extend_an_active_response_deadline() {
+        let dir = TempDir::new().unwrap();
+        let command = dir.path().join("command");
+        let fake = fake_tmux(
+            &dir,
+            &format!(
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r command\nprintf '%s\\n' \"$command\" > '{}'\nwhile :; do printf '%s\\n' '%layout-change @1 0 0'; sleep 0.01; done",
+                command.display(),
+            ),
+        );
+        let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
+        let snapshot = tokio::spawn(async move { handle.snapshot().await });
+        marker(&command).await;
+
+        timeout(Duration::from_secs(4), async {
+            assert_eq!(
+                snapshot.await.unwrap().unwrap_err().to_string(),
+                "tmux control response timed out"
+            );
+            loop {
+                match events.recv().await {
+                    Some(ControlEvent::Terminated(reason)) => {
+                        assert_eq!(reason, "tmux control response timed out");
+                        break;
+                    }
+                    Some(ControlEvent::TopologyChanged) => {}
+                    event => panic!("unexpected control event: {event:?}"),
+                }
+            }
+            assert_eq!(events.recv().await, None);
+        })
+        .await
+        .expect("notifications postponed the response timeout");
+    }
+
+    #[tokio::test]
+    async fn response_before_deadline_completes_and_allows_next_fifo_request() {
+        let dir = TempDir::new().unwrap();
+        let fake = fake_tmux(
+            &dir,
+            "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nn=1\nwhile IFS= read -r _; do\n  n=$((n + 1))\n  if [ \"$n\" = 2 ]; then sleep 1; fi\n  printf '%%begin 2 %s 1\\n' \"$n\"\n  if [ \"$n\" = 2 ]; then printf '\\036$7\\037%%1\\n'; fi\n  printf '%%end 2 %s 1\\n' \"$n\"\ndone",
+        );
+        let (handle, _events) = connect_control(fake, "$7").await.unwrap();
+
+        timeout(Duration::from_secs(4), async {
+            assert_eq!(handle.snapshot().await.unwrap(), b"\x1e$7\x1f%1\n");
+            assert!(handle.jump("/dev/ttys001", "%2").await.unwrap());
+        })
+        .await
+        .expect("response before deadline did not preserve FIFO progress");
     }
 
     #[tokio::test]

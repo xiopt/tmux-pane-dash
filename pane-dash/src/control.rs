@@ -2,6 +2,10 @@
 /// escapes so the protocol command itself contains no raw record separators.
 pub const CONTROL_SNAPSHOT_COMMAND: &str = "list-panes -a -F \"\\036#{session_id}\\037#{session_name}\\037#{window_id}\\037#{window_index}\\037#{window_name}\\037#{pane_id}\\037#{pane_index}\\037#{pane_active}\\037#{pane_current_command}\\037#{pane_current_path}\\037#{pane_dead}\\037#{@pane_dash_status}\\037#{@pane_dash_status_since}\\037#{@pane_dash_heartbeat}\\037#{@pane_dash_title}\\037#{@pane_dash_model}\\037#{@pane_dash_tag}\\037#{@pane_dash_group}\"\n";
 
+/// Every attach handshake and written control command has exactly two seconds
+/// to receive its matching response; `tokio::time` provides the monotonic clock.
+pub const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlEvent {
     TopologyChanged,
@@ -13,6 +17,7 @@ pub enum ControlEvent {
 #[derive(Debug, Clone)]
 pub struct ControlHandle {
     requests: mpsc::Sender<Request>,
+    termination: Arc<Mutex<Option<String>>>,
 }
 
 impl ControlHandle {
@@ -21,7 +26,7 @@ impl ControlHandle {
         self.requests
             .send(Request::Snapshot { reply })
             .await
-            .map_err(|_| anyhow!("tmux control actor is not running"))?;
+            .map_err(|_| self.termination_error())?;
         response
             .await
             .map_err(|_| anyhow!("tmux control actor stopped before replying"))?
@@ -34,7 +39,7 @@ impl ControlHandle {
         self.requests
             .send(Request::Jump { command, reply })
             .await
-            .map_err(|_| anyhow!("tmux control actor is not running"))?;
+            .map_err(|_| self.termination_error())?;
         response
             .await
             .map_err(|_| anyhow!("tmux control actor stopped before replying"))?
@@ -47,10 +52,21 @@ impl ControlHandle {
         self.requests
             .send(Request::SubscribeFocus { command, reply })
             .await
-            .map_err(|_| anyhow!("tmux control actor is not running"))?;
+            .map_err(|_| self.termination_error())?;
         response
             .await
             .map_err(|_| anyhow!("tmux control actor stopped before replying"))?
+    }
+
+    fn termination_error(&self) -> anyhow::Error {
+        anyhow!(
+            "{}",
+            self.termination
+                .lock()
+                .expect("control termination state poisoned")
+                .as_deref()
+                .unwrap_or("tmux control actor is not running")
+        )
     }
 }
 
@@ -86,23 +102,48 @@ pub async fn connect_control(
         .ok_or_else(|| anyhow!("tmux stdout was not piped"))?;
     let mut stdout = BufReader::new(stdout);
 
-    let initial_events = match consume_attach_handshake(&mut stdout).await {
-        Ok(events) => events,
-        Err(error) => {
+    let initial_events = match tokio::time::timeout(
+        CONTROL_RESPONSE_TIMEOUT,
+        consume_attach_handshake(&mut stdout),
+    )
+    .await
+    {
+        Ok(Ok(events)) => events,
+        Ok(Err(error)) => {
             drop(stdin);
             let _ = child.start_kill();
             let _ = child.wait().await;
             return Err(error);
         }
+        Err(_) => {
+            drop(stdin);
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            bail!("tmux control attach handshake timed out");
+        }
     };
 
     let (requests, request_rx) = mpsc::channel(32);
     let (events, event_rx) = mpsc::unbounded_channel();
+    let termination = Arc::new(Mutex::new(None));
     for event in initial_events {
         let _ = events.send(event);
     }
-    tokio::spawn(control_actor(child, stdin, stdout, request_rx, events));
-    Ok((ControlHandle { requests }, event_rx))
+    tokio::spawn(control_actor(
+        child,
+        stdin,
+        stdout,
+        request_rx,
+        events,
+        termination.clone(),
+    ));
+    Ok((
+        ControlHandle {
+            requests,
+            termination,
+        },
+        event_rx,
+    ))
 }
 
 #[derive(Debug)]
@@ -201,15 +242,26 @@ async fn control_actor(
     mut stdout: BufReader<tokio::process::ChildStdout>,
     mut requests: mpsc::Receiver<Request>,
     events: mpsc::UnboundedSender<ControlEvent>,
+    termination: Arc<Mutex<Option<String>>>,
 ) {
     let mut parser = ProtocolParser::default();
     let mut active: Option<Request> = None;
     let mut line = Vec::new();
     let mut terminated = None;
+    let mut response_deadline = None;
 
     loop {
         tokio::select! {
-            biased;
+            _ = async {
+                if let Some(deadline) = response_deadline {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                terminated = Some("tmux control response timed out".into());
+                break;
+            },
             read = stdout.read_until(b'\n', &mut line) => match read {
                 Ok(0) => {
                     let malformed = parser
@@ -235,6 +287,7 @@ async fn control_actor(
                         match event {
                             ProtocolEvent::Response { ok, data, .. } => {
                                 if let Some(request) = active.take() {
+                                    response_deadline = None;
                                     request.complete(ok, data);
                                 }
                             }
@@ -271,6 +324,7 @@ async fn control_actor(
                         break;
                     }
                     active = Some(request);
+                    response_deadline = Some(tokio::time::Instant::now() + CONTROL_RESPONSE_TIMEOUT);
                 }
                 None => break,
             },
@@ -278,6 +332,9 @@ async fn control_actor(
     }
 
     if let Some(reason) = terminated {
+        *termination
+            .lock()
+            .expect("control termination state poisoned") = Some(reason.clone());
         requests.close();
         fail_requests(active, &mut requests, &reason);
         drop(requests);
@@ -528,7 +585,12 @@ pub fn is_safe_client_tty(value: &str) -> bool {
 fn is_machine_session_id(value: &str) -> bool {
     value.starts_with('$') && value.len() > 1 && is_safe_control_argument(value)
 }
-use std::{path::PathBuf, process::Stdio};
+use std::{
+    path::PathBuf,
+    process::Stdio,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::{Result, anyhow, bail};
 use tokio::{
