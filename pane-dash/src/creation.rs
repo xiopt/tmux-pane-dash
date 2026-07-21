@@ -1,0 +1,501 @@
+use std::path::{Path, PathBuf};
+
+use crate::model::{PaneId, SessionId};
+use crate::tmux_arg::{self, Field};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitDirection {
+    Right,
+    Left,
+    Bottom,
+    Top,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateStage {
+    Create,
+    Tag,
+    SendCommand,
+    SendEnter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateContext {
+    Split {
+        target: PaneId,
+        initiating_session: SessionId,
+        linked_session_count: usize,
+        direction: SplitDirection,
+    },
+    NewWindow {
+        target: SessionId,
+    },
+    NewSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDraft {
+    pub name: String,
+    pub cwd: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreationField {
+    Name,
+    Cwd,
+    Command,
+}
+
+impl std::fmt::Display for CreationField {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Name => "name",
+            Self::Cwd => "cwd",
+            Self::Command => "command",
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CreationError {
+    #[error("{field} is invalid: {reason}")]
+    Field {
+        field: CreationField,
+        reason: String,
+    },
+    #[error("invalid tmux {kind} target: {value}")]
+    InvalidTarget { kind: &'static str, value: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedCwd(PathBuf);
+
+impl ValidatedCwd {
+    pub fn new(path: PathBuf) -> Result<Self, CreationError> {
+        validate_cwd(&path)?;
+        Ok(Self(path))
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn revalidate(&self) -> Result<(), CreationError> {
+        validate_cwd(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateRequest {
+    pub context: CreateContext,
+    pub argv: Vec<String>,
+    pub cwd: Option<ValidatedCwd>,
+    pub command: Option<String>,
+}
+
+pub fn build_request(
+    context: CreateContext,
+    draft: &CreateDraft,
+) -> Result<CreateRequest, CreationError> {
+    let cwd = if draft.cwd.is_empty() {
+        None
+    } else {
+        Some(ValidatedCwd::new(PathBuf::from(&draft.cwd))?)
+    };
+    let command = optional_command(&draft.command)?;
+
+    let argv = match &context {
+        CreateContext::NewSession => {
+            let mut argv = argv(["new-session", "-d", "-P", "-F", "#{pane_id}"]);
+            if let Some(name) = optional_name(&draft.name)? {
+                argv.extend(["-s".into(), name]);
+            }
+            argv
+        }
+        CreateContext::NewWindow { target } => {
+            validate_target("session", &target.0, '$')?;
+            let mut argv = argv([
+                "new-window",
+                "-d",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                &target.0,
+            ]);
+            if let Some(name) = optional_name(&draft.name)? {
+                argv.extend(["-n".into(), name]);
+            }
+            argv
+        }
+        CreateContext::Split {
+            target, direction, ..
+        } => {
+            validate_target("pane", &target.0, '%')?;
+            let mut argv = argv(["split-window", "-d", "-P", "-F", "#{pane_id}"]);
+            argv.extend(
+                match direction {
+                    SplitDirection::Right => ["-h"].as_slice(),
+                    SplitDirection::Left => ["-b", "-h"].as_slice(),
+                    SplitDirection::Bottom => ["-v"].as_slice(),
+                    SplitDirection::Top => ["-b", "-v"].as_slice(),
+                }
+                .iter()
+                .map(|flag| (*flag).to_owned()),
+            );
+            argv.extend(["-t".into(), target.0.clone()]);
+            argv
+        }
+    };
+
+    Ok(CreateRequest {
+        context,
+        argv,
+        cwd,
+        command,
+    })
+}
+
+pub fn display_error(raw: &str) -> String {
+    const MAX_SCALARS: usize = 512;
+
+    let mut display = String::new();
+    let mut scalar_count = 0;
+    for character in raw.chars() {
+        let visible = if character.is_control() {
+            format!("\\u{{{:x}}}", character as u32)
+        } else {
+            character.to_string()
+        };
+        let visible_scalars = visible.chars().count();
+        if scalar_count + visible_scalars > MAX_SCALARS {
+            break;
+        }
+        display.push_str(&visible);
+        scalar_count += visible_scalars;
+    }
+    display
+}
+
+fn argv<const N: usize>(arguments: [&str; N]) -> Vec<String> {
+    arguments.into_iter().map(str::to_owned).collect()
+}
+
+fn optional_name(value: &str) -> Result<Option<String>, CreationError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    tmux_arg::encode(value, Field::Expanded)
+        .map(Some)
+        .map_err(|error| CreationError::Field {
+            field: CreationField::Name,
+            reason: error.to_string(),
+        })
+}
+
+fn optional_command(value: &str) -> Result<Option<String>, CreationError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    tmux_arg::encode(value, Field::Plain)
+        .map(Some)
+        .map_err(|error| CreationError::Field {
+            field: CreationField::Command,
+            reason: error.to_string(),
+        })
+}
+
+fn validate_cwd(path: &Path) -> Result<(), CreationError> {
+    if path
+        .as_os_str()
+        .to_string_lossy()
+        .chars()
+        .any(|character| matches!(character as u32, 0x00..=0x1f))
+    {
+        return Err(CreationError::Field {
+            field: CreationField::Cwd,
+            reason: "contains C0 control bytes".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_target(kind: &'static str, value: &str, prefix: char) -> Result<(), CreationError> {
+    if value.starts_with(prefix)
+        && value.len() > prefix.len_utf8()
+        && value[1..].bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Ok(());
+    }
+    Err(CreationError::InvalidTarget {
+        kind,
+        value: value.to_owned(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{
+        CreateContext, CreateDraft, CreationError, CreationField, SplitDirection, ValidatedCwd,
+        build_request, display_error,
+    };
+    use crate::model::{PaneId, SessionId};
+
+    fn draft(name: &str, cwd: &str, command: &str) -> CreateDraft {
+        CreateDraft {
+            name: name.into(),
+            cwd: cwd.into(),
+            command: command.into(),
+        }
+    }
+
+    fn split(direction: SplitDirection) -> CreateContext {
+        CreateContext::Split {
+            target: PaneId::from("%7"),
+            initiating_session: SessionId::from("$3"),
+            linked_session_count: 2,
+            direction,
+        }
+    }
+
+    #[test]
+    fn builds_exact_new_session_argv_with_trimmed_name() {
+        let request = build_request(
+            CreateContext::NewSession,
+            &draft("  team  ", "/tmp/a b", "opencode"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.argv,
+            ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "team"]
+        );
+        assert_eq!(request.cwd.unwrap().as_path(), Path::new("/tmp/a b"));
+        assert_eq!(request.command.as_deref(), Some("opencode"));
+    }
+
+    #[test]
+    fn whitespace_only_name_omits_name_flags() {
+        let session =
+            build_request(CreateContext::NewSession, &draft(" \u{2003} ", "", "")).unwrap();
+        let window = build_request(
+            CreateContext::NewWindow {
+                target: SessionId::from("$3"),
+            },
+            &draft(" \u{2003} ", "", ""),
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.argv,
+            ["new-session", "-d", "-P", "-F", "#{pane_id}"]
+        );
+        assert_eq!(
+            window.argv,
+            ["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "$3"]
+        );
+    }
+
+    #[test]
+    fn builds_exact_new_window_argv() {
+        let request = build_request(
+            CreateContext::NewWindow {
+                target: SessionId::from("$3"),
+            },
+            &draft("window", "", ""),
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.argv,
+            [
+                "new-window",
+                "-d",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "$3",
+                "-n",
+                "window"
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_exact_split_argv_for_every_direction() {
+        let expected = [
+            (SplitDirection::Right, vec!["-h"]),
+            (SplitDirection::Left, vec!["-b", "-h"]),
+            (SplitDirection::Bottom, vec!["-v"]),
+            (SplitDirection::Top, vec!["-b", "-v"]),
+        ];
+
+        for (direction, flags) in expected {
+            let request = build_request(split(direction), &draft("ignored", "", "")).unwrap();
+            let mut argv = vec!["split-window", "-d", "-P", "-F", "#{pane_id}"];
+            argv.extend(flags);
+            argv.extend(["-t", "%7"]);
+            assert_eq!(request.argv, argv, "{direction:?}");
+        }
+    }
+
+    #[test]
+    fn names_encode_hash_and_trailing_semicolon_in_every_named_context() {
+        let expected_name = "a##{x}\\;";
+        let session = build_request(CreateContext::NewSession, &draft("a#{x};", "", "")).unwrap();
+        let window = build_request(
+            CreateContext::NewWindow {
+                target: SessionId::from("$3"),
+            },
+            &draft("a#{x};", "", ""),
+        )
+        .unwrap();
+
+        assert_eq!(session.argv.last(), Some(&expected_name.to_owned()));
+        assert_eq!(window.argv.last(), Some(&expected_name.to_owned()));
+    }
+
+    #[test]
+    fn leading_dash_name_is_accepted() {
+        let request = build_request(CreateContext::NewSession, &draft("-team", "", "")).unwrap();
+
+        assert_eq!(request.argv.last(), Some(&"-team".to_owned()));
+    }
+
+    #[test]
+    fn name_rejections_identify_the_name_field() {
+        for value in ["bad#[style]", "bad\\name", "bad\0name"] {
+            assert!(matches!(
+                build_request(CreateContext::NewSession, &draft(value, "", "")),
+                Err(CreationError::Field {
+                    field: CreationField::Name,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn cwd_is_verbatim_not_an_argv_element_and_never_uses_c_flag() {
+        let cwd = " /tmp/#[ space\\;ü ";
+        let request = build_request(CreateContext::NewSession, &draft("", cwd, "")).unwrap();
+
+        assert_eq!(request.cwd.unwrap().as_path(), Path::new(cwd));
+        assert!(
+            !request
+                .argv
+                .iter()
+                .any(|argument| argument == "-c" || argument == cwd)
+        );
+    }
+
+    #[test]
+    fn empty_cwd_is_none() {
+        let request = build_request(CreateContext::NewSession, &draft("", "", "")).unwrap();
+
+        assert_eq!(request.cwd, None);
+    }
+
+    #[test]
+    fn every_c0_byte_in_cwd_is_rejected_but_del_is_accepted() {
+        for byte in 0_u8..=0x1f {
+            let cwd = format!("/tmp/a{}b", char::from(byte));
+            assert!(matches!(
+                build_request(CreateContext::NewSession, &draft("", &cwd, "")),
+                Err(CreationError::Field {
+                    field: CreationField::Cwd,
+                    ..
+                })
+            ));
+        }
+
+        let cwd = "/tmp/a\u{7f}b";
+        assert_eq!(
+            build_request(CreateContext::NewSession, &draft("", cwd, ""))
+                .unwrap()
+                .cwd
+                .unwrap()
+                .as_path(),
+            Path::new(cwd)
+        );
+    }
+
+    #[test]
+    fn validated_cwd_revalidates_the_original_path() {
+        let cwd = ValidatedCwd::new("/tmp/hostile #[ \\ ü;".into()).unwrap();
+
+        assert!(cwd.revalidate().is_ok());
+    }
+
+    #[test]
+    fn command_is_plain_encoded_or_omitted() {
+        let request =
+            build_request(CreateContext::NewSession, &draft("", "", "echo #hash;")).unwrap();
+        let empty = build_request(CreateContext::NewSession, &draft("", "", "")).unwrap();
+
+        assert_eq!(request.command.as_deref(), Some("echo #hash\\;"));
+        assert_eq!(empty.command, None);
+    }
+
+    #[test]
+    fn command_whitespace_is_preserved() {
+        let request =
+            build_request(CreateContext::NewSession, &draft("", "", "  echo hi  ")).unwrap();
+
+        assert_eq!(request.command.as_deref(), Some("  echo hi  "));
+    }
+
+    #[test]
+    fn nul_command_identifies_the_command_field() {
+        assert!(matches!(
+            build_request(CreateContext::NewSession, &draft("", "", "echo\0no")),
+            Err(CreationError::Field {
+                field: CreationField::Command,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn malformed_machine_targets_are_rejected() {
+        assert!(matches!(
+            build_request(
+                CreateContext::NewWindow {
+                    target: SessionId::from("not-a-session"),
+                },
+                &draft("", "", ""),
+            ),
+            Err(CreationError::InvalidTarget { .. })
+        ));
+        assert!(matches!(
+            build_request(
+                CreateContext::Split {
+                    target: PaneId::from("not-a-pane"),
+                    initiating_session: SessionId::from("$3"),
+                    linked_session_count: 0,
+                    direction: SplitDirection::Right,
+                },
+                &draft("", "", ""),
+            ),
+            Err(CreationError::InvalidTarget { .. })
+        ));
+    }
+
+    #[test]
+    fn display_error_escapes_controls_preserves_unicode_and_caps_scalars() {
+        assert_eq!(
+            display_error("bad\u{1b}[31mred\nπ"),
+            "bad\\u{1b}[31mred\\u{a}π"
+        );
+        assert_eq!(display_error(&"é".repeat(513)), "é".repeat(512));
+        assert_eq!(
+            display_error(&format!("{}\n", "x".repeat(511))),
+            "x".repeat(511)
+        );
+    }
+}
