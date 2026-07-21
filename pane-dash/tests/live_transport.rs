@@ -173,6 +173,7 @@ async fn live_transport_freshness_harness() {
     drain_events(&mut events);
     let mut fallback_tick = tokio::time::interval(Duration::from_secs(1));
     fallback_tick.tick().await;
+    let fallback_started = Instant::now();
     let other_pane = harness.split("other:0", "exec sleep 60");
     harness.set_pane_option(&other_pane, "@pane_dash_tag", "live-other-split");
     let quiet = timeout(Duration::from_millis(100), events.recv()).await;
@@ -180,7 +181,6 @@ async fn live_transport_freshness_harness() {
         quiet.is_err(),
         "other-session change unexpectedly drove a relied-upon notification: {quiet:?}"
     );
-    let fallback_started = Instant::now();
     timeout(FALLBACK_BUDGET, fallback_tick.tick())
         .await
         .expect("other-session fallback tick timed out");
@@ -194,9 +194,10 @@ async fn live_transport_freshness_harness() {
         FALLBACK_BUDGET,
     );
 
-    let status_since = unix_seconds();
     let mut status_tick = tokio::time::interval(Duration::from_secs(1));
     status_tick.tick().await;
+    let status_started = Instant::now();
+    let status_since = unix_seconds();
     harness.set_pane_option(&initial_pane, "@pane_dash_status", "working");
     harness.set_pane_option(
         &initial_pane,
@@ -213,7 +214,6 @@ async fn live_transport_freshness_harness() {
         quiet.is_err(),
         "pane-option update unexpectedly drove a relied-upon notification: {quiet:?}"
     );
-    let status_started = Instant::now();
     timeout(FALLBACK_BUDGET, status_tick.tick())
         .await
         .expect("pane-status fallback tick timed out");
@@ -232,23 +232,12 @@ async fn live_transport_freshness_harness() {
     );
 
     let marker = "LIVE_PREVIEW_MARKER_42; tmux kill-server #[literal]";
+    let preview_started = Instant::now();
     assert_eq!(
         send_text(&exec, &initial_pane, marker).await,
         ActionOutcome::Success
     );
-    let preview_started = Instant::now();
-    let capture = timeout(PREVIEW_BUDGET, exec.capture_pane(&initial_pane))
-        .await
-        .expect("preview capture timed out")
-        .expect("preview capture failed");
-    let preview = parse_preview(initial_pane.clone(), capture);
-    assert!(
-        preview
-            .lines
-            .iter()
-            .any(|line| line.to_string().contains(marker))
-    );
-    metric("preview_capture", preview_started.elapsed(), PREVIEW_BUDGET);
+    wait_preview_marker(&exec, &initial_pane, marker, preview_started).await;
     assert_eq!(kill_pane(&exec, &linked_pane).await, ActionOutcome::Success);
     assert!(
         exec.capture_pane(&linked_pane).await.is_err(),
@@ -269,13 +258,11 @@ async fn live_transport_freshness_harness() {
         .expect("control termination timed out")
         .expect("control event channel closed before termination");
     assert!(matches!(terminated, ControlEvent::Terminated(_)));
-    assert!(
-        timeout(Duration::from_millis(200), termination_events.recv())
-            .await
-            .expect("control emitted a duplicate termination")
-            .is_none(),
-        "control event channel remained open after termination"
-    );
+    match timeout(Duration::from_millis(200), termination_events.recv()).await {
+        Ok(None) => {}
+        Ok(Some(event)) => panic!("control emitted a duplicate termination: {event:?}"),
+        Err(_) => panic!("control event channel remained open after termination"),
+    }
     assert!(
         terminating.snapshot().await.is_err(),
         "terminated control accepted a snapshot"
@@ -327,6 +314,49 @@ async fn channel_model(control: &ControlHandle, transport: &mut TransportCoordin
         Vec::<TransportDirective>::new()
     );
     model
+}
+
+async fn wait_preview_marker(exec: &TmuxExec, pane_id: &PaneId, marker: &str, started: Instant) {
+    let mut last_capture = "no capture attempted".to_owned();
+    loop {
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < PREVIEW_BUDGET,
+            "preview marker was not visible within {PREVIEW_BUDGET:?}; last_capture={last_capture}"
+        );
+        let remaining = PREVIEW_BUDGET.saturating_sub(elapsed);
+        match timeout(remaining, exec.capture_pane(pane_id)).await {
+            Ok(Ok(bytes)) => {
+                let byte_count = bytes.len();
+                let preview = parse_preview(pane_id.clone(), bytes);
+                if preview
+                    .lines
+                    .iter()
+                    .any(|line| line.to_string().contains(marker))
+                {
+                    metric("preview_capture", started.elapsed(), PREVIEW_BUDGET);
+                    return;
+                }
+                last_capture = format!(
+                    "capture succeeded without marker (bytes={byte_count}, lines={})",
+                    preview.lines.len()
+                );
+            }
+            Ok(Err(error)) => last_capture = format!("capture failed: {error:#}"),
+            Err(_) => {
+                panic!(
+                    "preview capture timed out within {PREVIEW_BUDGET:?}; last_capture={last_capture}"
+                )
+            }
+        }
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < PREVIEW_BUDGET,
+            "preview marker was not visible within {PREVIEW_BUDGET:?}; last_capture={last_capture}"
+        );
+        tokio::time::sleep(Duration::from_millis(5).min(PREVIEW_BUDGET - elapsed)).await;
+    }
 }
 
 async fn raw_channel_model(control: &ControlHandle) -> Model {
