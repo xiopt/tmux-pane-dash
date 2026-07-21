@@ -48,6 +48,12 @@ struct CreationTask {
     join: JoinHandle<()>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeTimer {
+    Snapshot,
+    Preview,
+}
+
 #[derive(Default)]
 struct ActionEffects {
     mutated: bool,
@@ -355,22 +361,15 @@ async fn main() -> Result<()> {
                 Some(Err(error)) => return Err(error).context("read terminal event"),
                 None => app.should_quit = true,
             },
-            _ = tick.tick() => {
-                dispatch_directives(
-                    coordinator.input(pane_dash::transport::TransportInput::FallbackTick),
-                    &mut coordinator,
-                    &tmux, &session_id, &client_tty, &connection_tx, &mut control,
-                    &mut pending_connection_generation, &mut active_connection_generation,
-                    &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
-                    &mut next_snapshot_seq, &snapshot_generation,
-                    &mut in_flight_snapshot,
-                );
-                if apply_event(&mut terminal, &mut app, Event::Tick { now: now_secs() }, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?.mutated {
-                    snapshot_generation.record_successful_mutation();
-                }
-            },
-            _ = preview_tick.tick() => {
-                let _ = apply_event(&mut terminal, &mut app, Event::PreviewTick, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
+            timer = next_runtime_timer(&mut tick, &mut preview_tick) => {
+                run_runtime_timer_step(
+                    timer, &mut terminal, &mut app, &mut coordinator, &tmux, &session_id,
+                    &mut control, &client_tty, &connection_tx, &mut pending_connection_generation,
+                    &mut active_connection_generation, &mut next_connection_generation,
+                    &mut debounce_deadline, &snapshot_tx, &mut next_snapshot_seq,
+                    &mut snapshot_generation, &mut in_flight_snapshot, &mut preview_tick,
+                    &preview_tx, &creation_tx, &mut creation_task,
+                ).await?;
             },
             message = connection_messages.recv() => if let Some(message) = message {
                 let (kind, generation) = match &message {
@@ -543,6 +542,100 @@ fn snapshot_interval() -> tokio::time::Interval {
     );
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval
+}
+
+async fn next_runtime_timer(
+    snapshot: &mut tokio::time::Interval,
+    preview: &mut tokio::time::Interval,
+) -> RuntimeTimer {
+    tokio::select! {
+        _ = snapshot.tick() => RuntimeTimer::Snapshot,
+        _ = preview.tick() => RuntimeTimer::Preview,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_runtime_timer_step<B>(
+    timer: RuntimeTimer,
+    terminal: &mut Terminal<B>,
+    app: &mut AppState,
+    coordinator: &mut TransportCoordinator,
+    tmux: &TmuxExec,
+    session_id: &str,
+    control: &mut Option<ControlHandle>,
+    client_tty: &str,
+    connection_tx: &mpsc::UnboundedSender<ConnectionMessage>,
+    pending_connection_generation: &mut Option<u64>,
+    active_connection_generation: &mut Option<u64>,
+    next_connection_generation: &mut u64,
+    debounce_deadline: &mut Option<tokio::time::Instant>,
+    snapshot_tx: &mpsc::UnboundedSender<SnapshotResponse>,
+    next_snapshot_seq: &mut u64,
+    snapshot_generation: &mut SnapshotGeneration,
+    in_flight_snapshot: &mut SnapshotInFlight,
+    preview_tick: &mut tokio::time::Interval,
+    preview_tx: &mpsc::UnboundedSender<PreviewResponse>,
+    creation_tx: &mpsc::UnboundedSender<CreationProgress>,
+    creation_task: &mut Option<CreationTask>,
+) -> Result<()>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    match timer {
+        RuntimeTimer::Snapshot => {
+            dispatch_directives(
+                coordinator.input(pane_dash::transport::TransportInput::FallbackTick),
+                coordinator,
+                tmux,
+                session_id,
+                client_tty,
+                connection_tx,
+                control,
+                pending_connection_generation,
+                active_connection_generation,
+                next_connection_generation,
+                debounce_deadline,
+                snapshot_tx,
+                next_snapshot_seq,
+                snapshot_generation,
+                in_flight_snapshot,
+            );
+            if apply_event(
+                terminal,
+                app,
+                Event::Tick { now: now_secs() },
+                tmux,
+                control.as_ref(),
+                client_tty,
+                preview_tick,
+                preview_tx,
+                creation_tx,
+                creation_task,
+            )
+            .await?
+            .mutated
+            {
+                snapshot_generation.record_successful_mutation();
+            }
+        }
+        RuntimeTimer::Preview => {
+            let _ = apply_event(
+                terminal,
+                app,
+                Event::PreviewTick,
+                tmux,
+                control.as_ref(),
+                client_tty,
+                preview_tick,
+                preview_tx,
+                creation_tx,
+                creation_task,
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 fn bench_first_frame_message(elapsed_ms: f64) -> String {
@@ -947,13 +1040,13 @@ fn install_panic_cleanup() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionEffects, ConnectionMessageKind, ConnectionRoute, SnapshotGeneration,
+        ActionEffects, ConnectionMessageKind, ConnectionRoute, RuntimeTimer, SnapshotGeneration,
         SnapshotInFlight, SnapshotSource, apply_event, bench_first_frame_message,
         classify_connection_message, classify_snapshot_payload, cleanup_creation_task,
-        clear_terminated_connection_state, dispatch_directives, parse_args_from, preview_interval,
-        process_action_effects, snapshot_interval, snapshot_keeps_launch_session,
-        source_session_changed_requires_quit, spawn_preview_capture, start_creation,
-        start_preview_capture, sync_transport_degraded,
+        clear_terminated_connection_state, dispatch_directives, next_runtime_timer,
+        parse_args_from, preview_interval, process_action_effects, run_runtime_timer_step,
+        snapshot_interval, snapshot_keeps_launch_session, source_session_changed_requires_quit,
+        spawn_preview_capture, start_creation, start_preview_capture, sync_transport_degraded,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pane_dash::app::{Action, AppState, Event, reduce};
@@ -967,9 +1060,9 @@ mod tests {
         SnapshotCompletion, TransportCoordinator, TransportDirective, TransportInput, TransportMode,
     };
     use ratatui::{Terminal, backend::TestBackend};
-    use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
+    use std::{fs, process::Command};
     use tempfile::TempDir;
     use tokio::sync::mpsc;
 
@@ -1051,6 +1144,22 @@ mod tests {
                 result: response.result,
             },
         );
+    }
+
+    async fn recv_without_advancing<T>(
+        rx: &mut mpsc::UnboundedReceiver<T>,
+        description: &str,
+    ) -> T {
+        for _ in 0..10_000 {
+            match rx.try_recv() {
+                Ok(value) => return value,
+                Err(mpsc::error::TryRecvError::Empty) => tokio::task::yield_now().await,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    panic!("{description} channel closed")
+                }
+            }
+        }
+        panic!("{description} did not arrive while Tokio time was paused")
     }
 
     #[tokio::test(start_paused = true, flavor = "current_thread")]
@@ -1152,6 +1261,19 @@ mod tests {
         )
         .await;
         assert!(app.preview.error.is_some());
+    }
+
+    #[tokio::test(start_paused = true, flavor = "current_thread")]
+    async fn runtime_timer_selector_dispatches_preview_before_snapshot() {
+        let mut snapshot = snapshot_interval();
+        let mut preview = preview_interval();
+
+        tokio::time::advance(Duration::from_millis(500)).await;
+
+        assert_eq!(
+            next_runtime_timer(&mut snapshot, &mut preview).await,
+            RuntimeTimer::Preview
+        );
     }
 
     #[tokio::test(start_paused = true, flavor = "current_thread")]
@@ -1571,16 +1693,20 @@ mod tests {
         assert_eq!(next_snapshot_seq, next_snapshot_seq_before);
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn apply_event_starts_creation_without_blocking_and_consumes_input_while_submitting() {
+    #[tokio::test(start_paused = true, flavor = "current_thread")]
+    async fn runtime_timers_advance_while_creation_is_blocked() {
         let dir = TempDir::new().unwrap();
         let release = dir.path().join("release");
+        let pid = dir.path().join("creation.pid");
+        let log = dir.path().join("tmux.log");
         let executable = dir.path().join("fake-tmux");
         fs::write(
             &executable,
             format!(
-                    "#!/bin/sh\ncase \"$1\" in\nsplit-window) while [ ! -f '{}' ]; do sleep 0.01; done; printf '%%44\\n' ;;\ncapture-pane) printf 'preview advanced\\n' ;;\nesac\n",
-                release.display()
+                "#!/bin/sh\nprintf '%s\\n' \"$1\" >> '{}'\ncase \"$1\" in\nsplit-window) printf '%s' \"$$\" > '{}'; while [ ! -f '{}' ]; do sleep 0.01; done; printf '%%44\\n' ;;\ncapture-pane) printf 'preview advanced\\n' ;;\nlist-panes) printf '%b' '\\036$1\\037session\\037@1\\0370\\037window\\037%1\\0370\\0371\\037opencode\\037/tmp\\0370\\037idle\\0371\\0371\\037\\037\\037\\0371\\n' ;;\nesac\n",
+                log.display(),
+                pid.display(),
+                release.display(),
             ),
         )
         .unwrap();
@@ -1591,6 +1717,21 @@ mod tests {
         let mut preview_tick = preview_interval();
         let (preview_tx, mut preview_responses) = mpsc::unbounded_channel();
         let (creation_tx, mut progress) = mpsc::unbounded_channel();
+        let (snapshot_tx, mut snapshots) = mpsc::unbounded_channel();
+        let (connection_tx, _connection_messages) = mpsc::unbounded_channel();
+        let (mut coordinator, _) = TransportCoordinator::new();
+        coordinator.input(TransportInput::ConnectionFailed);
+        coordinator.input(TransportInput::ConnectionFailed);
+        assert_eq!(coordinator.mode(), TransportMode::Degraded);
+        let mut control = None;
+        let mut pending_connection_generation = None;
+        let mut active_connection_generation = None;
+        let mut next_connection_generation = 0;
+        let mut debounce_deadline = None;
+        let mut next_snapshot_seq = 0;
+        let mut snapshot_generation = SnapshotGeneration::default();
+        let mut in_flight_snapshot = SnapshotInFlight::default();
+        let mut snapshot_tick = snapshot_interval();
         let mut task = None;
 
         for key in [KeyCode::Char('n'), KeyCode::Enter, KeyCode::Enter] {
@@ -1612,7 +1753,6 @@ mod tests {
         assert!(task.is_some());
         assert!(!app.should_quit);
 
-        let old_snapshot_hash = app.model.content_hash();
         let (sequence, pane_id) = app
             .preview
             .in_flight
@@ -1625,10 +1765,11 @@ mod tests {
             sequence,
             pane_id,
         );
-        let response = tokio::time::timeout(Duration::from_secs(1), preview_responses.recv())
-            .await
-            .expect("initial preview must be captured while creation is blocked")
-            .expect("preview response channel remains open");
+        let response = recv_without_advancing(
+            &mut preview_responses,
+            "initial preview while creation is blocked",
+        )
+        .await;
         apply_event(
             &mut terminal,
             &mut app,
@@ -1647,13 +1788,30 @@ mod tests {
         )
         .await
         .unwrap();
-        apply_event(
+
+        tokio::time::advance(Duration::from_millis(500)).await;
+        assert_eq!(
+            next_runtime_timer(&mut snapshot_tick, &mut preview_tick).await,
+            RuntimeTimer::Preview
+        );
+        run_runtime_timer_step(
+            RuntimeTimer::Preview,
             &mut terminal,
             &mut app,
-            Event::PreviewTick,
+            &mut coordinator,
             &tmux,
-            None,
+            "session",
+            &mut control,
             "/dev/ttys001",
+            &connection_tx,
+            &mut pending_connection_generation,
+            &mut active_connection_generation,
+            &mut next_connection_generation,
+            &mut debounce_deadline,
+            &snapshot_tx,
+            &mut next_snapshot_seq,
+            &mut snapshot_generation,
+            &mut in_flight_snapshot,
             &mut preview_tick,
             &preview_tx,
             &creation_tx,
@@ -1661,10 +1819,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let response = tokio::time::timeout(Duration::from_secs(1), preview_responses.recv())
-            .await
-            .expect("preview must be captured while creation is blocked")
-            .expect("preview response channel remains open");
+        let response = recv_without_advancing(
+            &mut preview_responses,
+            "production preview timer capture while creation is blocked",
+        )
+        .await;
         apply_event(
             &mut terminal,
             &mut app,
@@ -1672,26 +1831,6 @@ mod tests {
                 sequence: response.sequence,
                 pane_id: response.pane_id,
                 result: response.result,
-            },
-            &tmux,
-            None,
-            "/dev/ttys001",
-            &mut preview_tick,
-            &preview_tx,
-            &creation_tx,
-            &mut task,
-        )
-        .await
-        .unwrap();
-        let snapshot = String::from_utf8(valid_record())
-            .unwrap()
-            .replace("working", "idle");
-        apply_event(
-            &mut terminal,
-            &mut app,
-            Event::Snapshot {
-                outcome: parse(snapshot.as_bytes()),
-                observed_at: 1,
             },
             &tmux,
             None,
@@ -1704,7 +1843,143 @@ mod tests {
         .await
         .unwrap();
         assert!(app.preview.frame.is_some());
+
+        let old_snapshot_hash = app.model.content_hash();
+        tokio::time::advance(Duration::from_millis(500)).await;
+        let mut snapshot_completed = false;
+        for _ in 0..2 {
+            match next_runtime_timer(&mut snapshot_tick, &mut preview_tick).await {
+                RuntimeTimer::Preview => {
+                    run_runtime_timer_step(
+                        RuntimeTimer::Preview,
+                        &mut terminal,
+                        &mut app,
+                        &mut coordinator,
+                        &tmux,
+                        "session",
+                        &mut control,
+                        "/dev/ttys001",
+                        &connection_tx,
+                        &mut pending_connection_generation,
+                        &mut active_connection_generation,
+                        &mut next_connection_generation,
+                        &mut debounce_deadline,
+                        &snapshot_tx,
+                        &mut next_snapshot_seq,
+                        &mut snapshot_generation,
+                        &mut in_flight_snapshot,
+                        &mut preview_tick,
+                        &preview_tx,
+                        &creation_tx,
+                        &mut task,
+                    )
+                    .await
+                    .unwrap();
+                    let response = recv_without_advancing(
+                        &mut preview_responses,
+                        "ready preview response before retrying the timer selector",
+                    )
+                    .await;
+                    apply_event(
+                        &mut terminal,
+                        &mut app,
+                        Event::PreviewCaptured {
+                            sequence: response.sequence,
+                            pane_id: response.pane_id,
+                            result: response.result,
+                        },
+                        &tmux,
+                        None,
+                        "/dev/ttys001",
+                        &mut preview_tick,
+                        &preview_tx,
+                        &creation_tx,
+                        &mut task,
+                    )
+                    .await
+                    .unwrap();
+                }
+                RuntimeTimer::Snapshot => {
+                    run_runtime_timer_step(
+                        RuntimeTimer::Snapshot,
+                        &mut terminal,
+                        &mut app,
+                        &mut coordinator,
+                        &tmux,
+                        "session",
+                        &mut control,
+                        "/dev/ttys001",
+                        &connection_tx,
+                        &mut pending_connection_generation,
+                        &mut active_connection_generation,
+                        &mut next_connection_generation,
+                        &mut debounce_deadline,
+                        &snapshot_tx,
+                        &mut next_snapshot_seq,
+                        &mut snapshot_generation,
+                        &mut in_flight_snapshot,
+                        &mut preview_tick,
+                        &preview_tx,
+                        &creation_tx,
+                        &mut task,
+                    )
+                    .await
+                    .unwrap();
+                    let response = recv_without_advancing(
+                        &mut snapshots,
+                        "production fallback timer snapshot",
+                    )
+                    .await;
+                    assert!(in_flight_snapshot.accepts(response.seq));
+                    let (completion, outcome) =
+                        classify_snapshot_payload(response.source, response.result);
+                    assert_eq!(completion, SnapshotCompletion::Valid);
+                    let event = Event::Snapshot {
+                        outcome: outcome.expect("fallback snapshot must parse"),
+                        observed_at: response.observed_at,
+                    };
+                    dispatch_directives(
+                        coordinator.snapshot_completed(completion),
+                        &mut coordinator,
+                        &tmux,
+                        "session",
+                        "/dev/ttys001",
+                        &connection_tx,
+                        &mut control,
+                        &mut pending_connection_generation,
+                        &mut active_connection_generation,
+                        &mut next_connection_generation,
+                        &mut debounce_deadline,
+                        &snapshot_tx,
+                        &mut next_snapshot_seq,
+                        &snapshot_generation,
+                        &mut in_flight_snapshot,
+                    );
+                    apply_event(
+                        &mut terminal,
+                        &mut app,
+                        event,
+                        &tmux,
+                        None,
+                        "/dev/ttys001",
+                        &mut preview_tick,
+                        &preview_tx,
+                        &creation_tx,
+                        &mut task,
+                    )
+                    .await
+                    .unwrap();
+                    snapshot_completed = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            snapshot_completed,
+            "snapshot must not be starved by the preview timer"
+        );
         assert_ne!(app.model.content_hash(), old_snapshot_hash);
+        assert!(fs::read_to_string(&log).unwrap().contains("list-panes"));
 
         apply_event(
             &mut terminal,
@@ -1721,14 +1996,28 @@ mod tests {
         .await
         .unwrap();
         assert!(!app.should_quit);
+        assert!(
+            task.is_some(),
+            "creation task ended before input; fake tmux calls: {:?}; progress: {:?}",
+            fs::read_to_string(&log).unwrap(),
+            progress.try_recv()
+        );
+        let creation_pid = fs::read_to_string(&pid).unwrap();
+        assert!(
+            Command::new("kill")
+                .args(["-0", creation_pid.trim()])
+                .status()
+                .unwrap()
+                .success(),
+            "creation worker must remain blocked while input is processed"
+        );
 
         fs::write(release, "").unwrap();
         let mut finished = false;
         while !finished {
-            let item = tokio::time::timeout(Duration::from_secs(1), progress.recv())
-                .await
-                .expect("creation worker must report progress before the test deadline")
-                .expect("creation worker progress channel must remain open until Finished");
+            let item =
+                recv_without_advancing(&mut progress, "creation worker progress before Finished")
+                    .await;
             let terminal_event = matches!(item, CreationProgress::Finished { .. });
             apply_event(
                 &mut terminal,
@@ -1751,9 +2040,16 @@ mod tests {
             "creation worker must emit a terminal Finished event"
         );
         assert!(progress.try_recv().is_err());
-        if let Some(task) = task.take() {
-            task.join.await.expect("creation worker join must succeed");
-        }
+        cleanup_creation_task(&mut task).await;
+        assert!(task.is_none());
+        assert!(
+            !Command::new("kill")
+                .args(["-0", creation_pid.trim()])
+                .status()
+                .unwrap()
+                .success(),
+            "terminal cleanup must reap the creation child"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
