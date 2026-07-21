@@ -201,6 +201,7 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
                 modal_area,
             );
         }
+        Modal::Create(_) => {}
     }
 }
 

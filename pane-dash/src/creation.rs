@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::app::CreationId;
 use crate::model::{PaneId, SessionId};
 use crate::tmux_arg::{self, Field};
 
@@ -17,6 +18,39 @@ pub enum CreateStage {
     Tag,
     SendCommand,
     SendEnter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreationResolution {
+    Success,
+    TagFailed(String),
+    CommandFailed { stage: CreateStage, error: String },
+    TimedOut { stage: CreateStage },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreationProgress {
+    Stage {
+        id: CreationId,
+        stage: CreateStage,
+        pane_id: Option<PaneId>,
+    },
+    CreateFailed {
+        id: CreationId,
+        error: String,
+    },
+    Created {
+        id: CreationId,
+        pane_id: PaneId,
+    },
+    Finished {
+        id: CreationId,
+        pane_id: PaneId,
+        resolution: CreationResolution,
+    },
+    TimedOut {
+        id: CreationId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

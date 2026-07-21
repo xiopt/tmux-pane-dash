@@ -3,6 +3,10 @@ use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::creation::{
+    CreateContext, CreateDraft, CreateStage, CreationProgress, CreationResolution, SplitDirection,
+    build_request, display_error,
+};
 use crate::filter::ranked_row_indices;
 use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, WindowId};
 use crate::options::DashConfig;
@@ -25,11 +29,28 @@ pub enum InputMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    Jump { target: JumpTarget, zoom: bool },
+    Jump {
+        target: JumpTarget,
+        zoom: bool,
+    },
     ToggleGroup(bool),
-    CapturePreview { sequence: u64, pane_id: PaneId },
-    SendText { pane_id: PaneId, text: String },
-    KillPane { pane_id: PaneId },
+    CapturePreview {
+        sequence: u64,
+        pane_id: PaneId,
+    },
+    SendText {
+        pane_id: PaneId,
+        text: String,
+    },
+    KillPane {
+        pane_id: PaneId,
+    },
+    StartCreation {
+        id: CreationId,
+        request: crate::creation::CreateRequest,
+    },
+    CreationMutation,
+    RefreshNow,
     Quit,
 }
 
@@ -49,6 +70,96 @@ pub enum Modal {
     Kill {
         pane_id: PaneId,
     },
+    Create(CreateModal),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CreationId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateChoiceKind {
+    Right,
+    Left,
+    Bottom,
+    Top,
+    NewWindow,
+    NewSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateChoice {
+    pub label: &'static str,
+    pub kind: CreateChoiceKind,
+}
+
+impl CreateChoice {
+    pub const fn new(kind: CreateChoiceKind) -> Self {
+        let label = match kind {
+            CreateChoiceKind::Right => "Split right",
+            CreateChoiceKind::Left => "Split left",
+            CreateChoiceKind::Bottom => "Split bottom",
+            CreateChoiceKind::Top => "Split top",
+            CreateChoiceKind::NewWindow => "New window",
+            CreateChoiceKind::NewSession => "New session",
+        };
+        Self { label, kind }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateField {
+    Name,
+    Cwd,
+    Command,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateForm {
+    pub kind: CreateContext,
+    pub field: CreateField,
+    pub draft: CreateDraft,
+    pub submitting: bool,
+    pub error: Option<String>,
+    pub linked_session_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateModal {
+    Choice {
+        choices: Vec<CreateChoice>,
+        selected: usize,
+        cwd: String,
+    },
+    Form(CreateForm),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingCreationState {
+    Creating,
+    Created {
+        pane_id: PaneId,
+    },
+    Tagging {
+        pane_id: PaneId,
+    },
+    Sending {
+        pane_id: PaneId,
+    },
+    Entering {
+        pane_id: PaneId,
+    },
+    AwaitingSnapshot {
+        pane_id: PaneId,
+        resolution: CreationResolution,
+    },
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingCreation {
+    pub id: CreationId,
+    pub initiating_session: Option<SessionId>,
+    pub state: PendingCreationState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +199,7 @@ pub enum Event {
         pane_id: PaneId,
         outcome: ActionOutcome,
     },
+    CreationProgress(CreationProgress),
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -157,12 +269,15 @@ pub struct AppState {
     pub transport_degraded: bool,
     pub preview: PreviewState,
     pub modal: Option<Modal>,
+    pub pending_creation: Option<PendingCreation>,
+    pub ephemeral_panes: HashSet<PaneId>,
     focus: Option<Focus>,
     pending_key: Option<KeyCode>,
     render_cache: RefCell<RenderCache>,
     render_revision: u64,
     next_age_deadline: Option<u64>,
     age_deadline_revision: Option<u64>,
+    next_creation_id: u64,
     #[cfg(test)]
     age_deadline_rebuild_count: usize,
 }
@@ -190,12 +305,15 @@ impl AppState {
             transport_degraded: false,
             preview: PreviewState::default(),
             modal: None,
+            pending_creation: None,
+            ephemeral_panes: HashSet::new(),
             focus: None,
             pending_key: None,
             render_cache: RefCell::new(RenderCache::default()),
             render_revision: 0,
             next_age_deadline: None,
             age_deadline_revision: None,
+            next_creation_id: 1,
             #[cfg(test)]
             age_deadline_rebuild_count: 0,
         }
@@ -371,6 +489,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> ReduceResult {
             pane_id,
             outcome,
         } => reduce_action_finished(state, kind, pane_id, outcome),
+        Event::CreationProgress(progress) => reduce_creation_progress(state, progress),
     };
     sync_preview_target(state, &mut result);
     result
@@ -702,6 +821,9 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
         KeyCode::Char('x') if key.modifiers == KeyModifiers::NONE => {
             return open_kill_modal(state);
         }
+        KeyCode::Char('n') if key.modifiers == KeyModifiers::NONE => {
+            return open_create_modal(state);
+        }
         KeyCode::Char('z') if key.modifiers == KeyModifiers::CONTROL => {
             emit_jump(state, true, &mut result)
         }
@@ -763,68 +885,576 @@ fn open_kill_modal(state: &mut AppState) -> ReduceResult {
     }
 }
 
+fn open_create_modal(state: &mut AppState) -> ReduceResult {
+    if state.pending_creation.is_some() {
+        return ReduceResult::default();
+    }
+    let modal = if state.model.panes().is_empty() {
+        CreateModal::Form(create_form(CreateContext::NewSession, String::new()))
+    } else {
+        let (choices, cwd) = match &state.focus {
+            Some(Focus::Pane((_, _, pane_id))) => (
+                vec![
+                    CreateChoice::new(CreateChoiceKind::Right),
+                    CreateChoice::new(CreateChoiceKind::Left),
+                    CreateChoice::new(CreateChoiceKind::Bottom),
+                    CreateChoice::new(CreateChoiceKind::Top),
+                    CreateChoice::new(CreateChoiceKind::NewWindow),
+                    CreateChoice::new(CreateChoiceKind::NewSession),
+                ],
+                state
+                    .model
+                    .panes()
+                    .get(pane_id)
+                    .map(|pane| pane.path.clone())
+                    .unwrap_or_default(),
+            ),
+            Some(Focus::Header(session_id)) => (
+                vec![
+                    CreateChoice::new(CreateChoiceKind::NewWindow),
+                    CreateChoice::new(CreateChoiceKind::NewSession),
+                ],
+                session_default_cwd(state, session_id),
+            ),
+            None => (
+                vec![CreateChoice::new(CreateChoiceKind::NewSession)],
+                String::new(),
+            ),
+        };
+        CreateModal::Choice {
+            choices,
+            selected: 0,
+            cwd,
+        }
+    };
+    state.modal = Some(Modal::Create(modal));
+    ReduceResult {
+        actions: Vec::new(),
+        changed: true,
+    }
+}
+
+fn session_default_cwd(state: &AppState, session_id: &SessionId) -> String {
+    let mut memberships: Vec<_> = state
+        .model
+        .memberships()
+        .iter()
+        .filter(|membership| &membership.session_id == session_id)
+        .collect();
+    memberships.sort_by_key(|membership| {
+        (
+            membership.window_index,
+            membership.pane_index,
+            membership.window_id.clone(),
+            membership.pane_id.clone(),
+        )
+    });
+    memberships
+        .iter()
+        .find(|membership| membership.pane_active)
+        .or_else(|| memberships.first())
+        .and_then(|membership| state.model.panes().get(&membership.pane_id))
+        .map(|pane| pane.path.clone())
+        .unwrap_or_default()
+}
+
+fn create_form(kind: CreateContext, cwd: String) -> CreateForm {
+    let linked_session_count = match &kind {
+        CreateContext::Split {
+            linked_session_count,
+            ..
+        } => *linked_session_count,
+        CreateContext::NewWindow { .. } | CreateContext::NewSession => 0,
+    };
+    let field = if matches!(kind, CreateContext::Split { .. }) {
+        CreateField::Cwd
+    } else {
+        CreateField::Name
+    };
+    CreateForm {
+        kind,
+        field,
+        draft: CreateDraft {
+            name: String::new(),
+            cwd,
+            command: String::new(),
+        },
+        submitting: false,
+        error: None,
+        linked_session_count,
+    }
+}
+
 fn reduce_modal_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
-    let Some(modal) = state.modal.as_mut() else {
+    let Some(modal) = state.modal.take() else {
         return ReduceResult::default();
     };
     match modal {
-        Modal::Send { pane_id, text, .. } => match key.code {
-            KeyCode::Esc => {
-                state.modal = None;
+        Modal::Send {
+            pane_id,
+            command,
+            mut text,
+        } => match key.code {
+            KeyCode::Esc => ReduceResult {
+                actions: Vec::new(),
+                changed: true,
+            },
+            KeyCode::Backspace if !text.is_empty() => {
+                text.pop();
+                state.modal = Some(Modal::Send {
+                    pane_id,
+                    command,
+                    text,
+                });
                 ReduceResult {
                     actions: Vec::new(),
                     changed: true,
                 }
             }
-            KeyCode::Backspace if !text.is_empty() => {
-                text.pop();
+            KeyCode::Enter => ReduceResult {
+                actions: (!text.is_empty())
+                    .then_some(Action::SendText { pane_id, text })
+                    .into_iter()
+                    .collect(),
+                changed: true,
+            },
+            KeyCode::Char(character)
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                text.push(character);
+                state.modal = Some(Modal::Send {
+                    pane_id,
+                    command,
+                    text,
+                });
+                ReduceResult {
+                    actions: Vec::new(),
+                    changed: true,
+                }
+            }
+            _ => {
+                state.modal = Some(Modal::Send {
+                    pane_id,
+                    command,
+                    text,
+                });
+                ReduceResult::default()
+            }
+        },
+        Modal::Kill { pane_id } => match key.code {
+            KeyCode::Char('y' | 'Y')
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                ReduceResult {
+                    actions: vec![Action::KillPane { pane_id }],
+                    changed: true,
+                }
+            }
+            _ => ReduceResult {
+                actions: Vec::new(),
+                changed: true,
+            },
+        },
+        Modal::Create(modal) => reduce_create_modal_key(state, modal, key),
+    }
+}
+
+fn reduce_create_modal_key(
+    state: &mut AppState,
+    modal: CreateModal,
+    key: KeyEvent,
+) -> ReduceResult {
+    match modal {
+        CreateModal::Choice {
+            choices,
+            mut selected,
+            cwd,
+        } => match key.code {
+            KeyCode::Esc => ReduceResult {
+                actions: Vec::new(),
+                changed: true,
+            },
+            KeyCode::Char('j') | KeyCode::Down => {
+                selected = (selected + 1).min(choices.len().saturating_sub(1));
+                state.modal = Some(Modal::Create(CreateModal::Choice {
+                    choices,
+                    selected,
+                    cwd,
+                }));
+                ReduceResult {
+                    actions: Vec::new(),
+                    changed: true,
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                selected = selected.saturating_sub(1);
+                state.modal = Some(Modal::Create(CreateModal::Choice {
+                    choices,
+                    selected,
+                    cwd,
+                }));
                 ReduceResult {
                     actions: Vec::new(),
                     changed: true,
                 }
             }
             KeyCode::Enter => {
-                let text = std::mem::take(text);
-                let pane_id = pane_id.clone();
-                state.modal = None;
-                ReduceResult {
-                    actions: (!text.is_empty())
-                        .then_some(Action::SendText { pane_id, text })
-                        .into_iter()
-                        .collect(),
-                    changed: true,
-                }
-            }
-            KeyCode::Char(character)
-                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                text.push(character);
-                ReduceResult {
-                    actions: Vec::new(),
-                    changed: true,
-                }
-            }
-            _ => ReduceResult::default(),
-        },
-        Modal::Kill { pane_id } => {
-            let pane_id = pane_id.clone();
-            state.modal = None;
-            match key.code {
-                KeyCode::Char('y' | 'Y')
-                    if key.modifiers == KeyModifiers::NONE
-                        || key.modifiers == KeyModifiers::SHIFT =>
-                {
-                    ReduceResult {
-                        actions: vec![Action::KillPane { pane_id }],
-                        changed: true,
+                let Some(choice) = choices.get(selected) else {
+                    state.modal = Some(Modal::Create(CreateModal::Choice {
+                        choices,
+                        selected,
+                        cwd,
+                    }));
+                    return ReduceResult::default();
+                };
+                let context = match choice.kind {
+                    CreateChoiceKind::Right => split_context(state, SplitDirection::Right),
+                    CreateChoiceKind::Left => split_context(state, SplitDirection::Left),
+                    CreateChoiceKind::Bottom => split_context(state, SplitDirection::Bottom),
+                    CreateChoiceKind::Top => split_context(state, SplitDirection::Top),
+                    CreateChoiceKind::NewWindow => {
+                        session_at_focus(state).map(|target| CreateContext::NewWindow { target })
                     }
-                }
-                _ => ReduceResult {
+                    CreateChoiceKind::NewSession => Some(CreateContext::NewSession),
+                };
+                let Some(context) = context else {
+                    state.modal = Some(Modal::Create(CreateModal::Choice {
+                        choices,
+                        selected,
+                        cwd,
+                    }));
+                    return ReduceResult::default();
+                };
+                state.modal = Some(Modal::Create(CreateModal::Form(create_form(
+                    context,
+                    cwd.clone(),
+                ))));
+                ReduceResult {
                     actions: Vec::new(),
                     changed: true,
-                },
+                }
+            }
+            _ => {
+                state.modal = Some(Modal::Create(CreateModal::Choice {
+                    choices,
+                    selected,
+                    cwd,
+                }));
+                ReduceResult::default()
+            }
+        },
+        CreateModal::Form(form) if form.submitting => {
+            state.modal = Some(Modal::Create(CreateModal::Form(form)));
+            ReduceResult::default()
+        }
+        CreateModal::Form(mut form) => reduce_create_form_key(state, &mut form, key),
+    }
+}
+
+fn split_context(state: &AppState, direction: SplitDirection) -> Option<CreateContext> {
+    let (initiating_session, _, pane_id) = match &state.focus {
+        Some(Focus::Pane(selection)) => selection,
+        Some(Focus::Header(_)) | None => return None,
+    };
+    let linked_session_count = state
+        .model
+        .memberships()
+        .iter()
+        .filter(|membership| membership.pane_id == *pane_id)
+        .map(|membership| &membership.session_id)
+        .collect::<HashSet<_>>()
+        .len();
+    Some(CreateContext::Split {
+        target: pane_id.clone(),
+        initiating_session: initiating_session.clone(),
+        linked_session_count,
+        direction,
+    })
+}
+
+fn reduce_create_form_key(
+    state: &mut AppState,
+    form: &mut CreateForm,
+    key: KeyEvent,
+) -> ReduceResult {
+    match key.code {
+        KeyCode::Esc => {
+            if matches!(
+                state.pending_creation,
+                Some(PendingCreation {
+                    state: PendingCreationState::Error(_),
+                    ..
+                })
+            ) {
+                state.pending_creation = None;
+            }
+            ReduceResult {
+                actions: Vec::new(),
+                changed: true,
             }
         }
+        KeyCode::Tab | KeyCode::Down => {
+            form.field = next_create_field(&form.kind, form.field, true);
+            state.modal = Some(Modal::Create(CreateModal::Form(form.clone())));
+            ReduceResult {
+                actions: Vec::new(),
+                changed: true,
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = next_create_field(&form.kind, form.field, false);
+            state.modal = Some(Modal::Create(CreateModal::Form(form.clone())));
+            ReduceResult {
+                actions: Vec::new(),
+                changed: true,
+            }
+        }
+        KeyCode::Backspace => {
+            create_field_value_mut(form).pop();
+            state.modal = Some(Modal::Create(CreateModal::Form(form.clone())));
+            ReduceResult {
+                actions: Vec::new(),
+                changed: true,
+            }
+        }
+        KeyCode::Char(character)
+            if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            create_field_value_mut(form).push(character);
+            state.modal = Some(Modal::Create(CreateModal::Form(form.clone())));
+            ReduceResult {
+                actions: Vec::new(),
+                changed: true,
+            }
+        }
+        KeyCode::Enter => match build_request(form.kind.clone(), &form.draft) {
+            Err(error) => {
+                form.error = Some(display_error(&error.to_string()));
+                state.modal = Some(Modal::Create(CreateModal::Form(form.clone())));
+                ReduceResult {
+                    actions: Vec::new(),
+                    changed: true,
+                }
+            }
+            Ok(request) => {
+                let id = CreationId(state.next_creation_id);
+                state.next_creation_id = state
+                    .next_creation_id
+                    .checked_add(1)
+                    .expect("creation ID exhausted");
+                state.pending_creation = Some(PendingCreation {
+                    id,
+                    initiating_session: match &form.kind {
+                        CreateContext::Split {
+                            initiating_session, ..
+                        } => Some(initiating_session.clone()),
+                        CreateContext::NewWindow { target } => Some(target.clone()),
+                        CreateContext::NewSession => None,
+                    },
+                    state: PendingCreationState::Creating,
+                });
+                form.submitting = true;
+                form.error = None;
+                state.modal = Some(Modal::Create(CreateModal::Form(form.clone())));
+                ReduceResult {
+                    actions: vec![Action::StartCreation { id, request }],
+                    changed: true,
+                }
+            }
+        },
+        _ => {
+            state.modal = Some(Modal::Create(CreateModal::Form(form.clone())));
+            ReduceResult::default()
+        }
+    }
+}
+
+fn create_field_value_mut(form: &mut CreateForm) -> &mut String {
+    match form.field {
+        CreateField::Name => &mut form.draft.name,
+        CreateField::Cwd => &mut form.draft.cwd,
+        CreateField::Command => &mut form.draft.command,
+    }
+}
+
+fn next_create_field(context: &CreateContext, field: CreateField, forward: bool) -> CreateField {
+    let fields = if matches!(context, CreateContext::Split { .. }) {
+        [CreateField::Cwd, CreateField::Command].as_slice()
+    } else {
+        [CreateField::Name, CreateField::Cwd, CreateField::Command].as_slice()
+    };
+    let index = fields
+        .iter()
+        .position(|candidate| *candidate == field)
+        .unwrap_or(0);
+    let next = if forward {
+        (index + 1) % fields.len()
+    } else {
+        (index + fields.len() - 1) % fields.len()
+    };
+    fields[next]
+}
+
+fn reduce_creation_progress(state: &mut AppState, progress: CreationProgress) -> ReduceResult {
+    let id = match &progress {
+        CreationProgress::Stage { id, .. }
+        | CreationProgress::CreateFailed { id, .. }
+        | CreationProgress::Created { id, .. }
+        | CreationProgress::Finished { id, .. }
+        | CreationProgress::TimedOut { id } => *id,
+    };
+    if state.pending_creation.as_ref().map(|pending| pending.id) != Some(id) {
+        return ReduceResult::default();
+    }
+
+    match progress {
+        CreationProgress::CreateFailed { error, .. } => {
+            if !matches!(
+                state
+                    .pending_creation
+                    .as_ref()
+                    .map(|pending| &pending.state),
+                Some(PendingCreationState::Creating)
+            ) {
+                return ReduceResult::default();
+            }
+            let error = display_error(&error);
+            if let Some(pending) = state.pending_creation.as_mut() {
+                pending.state = PendingCreationState::Error(error.clone());
+            }
+            if let Some(Modal::Create(CreateModal::Form(form))) = state.modal.as_mut() {
+                form.submitting = false;
+                form.error = Some(error);
+            }
+            state.invalidate_render_cache();
+            ReduceResult {
+                actions: Vec::new(),
+                changed: true,
+            }
+        }
+        CreationProgress::Created { pane_id, .. } => {
+            if !matches!(
+                state
+                    .pending_creation
+                    .as_ref()
+                    .map(|pending| &pending.state),
+                Some(PendingCreationState::Creating)
+            ) {
+                return ReduceResult::default();
+            }
+            if let Some(pending) = state.pending_creation.as_mut() {
+                pending.state = PendingCreationState::Created { pane_id };
+            }
+            state.modal = None;
+            state.invalidate_render_cache();
+            ReduceResult {
+                actions: Vec::new(),
+                changed: true,
+            }
+        }
+        CreationProgress::Stage { stage, pane_id, .. } => {
+            let Some(pane_id) = pane_id.or_else(|| pending_pane_id(state)) else {
+                return ReduceResult::default();
+            };
+            let next = match stage {
+                CreateStage::Create => return ReduceResult::default(),
+                CreateStage::Tag => PendingCreationState::Tagging { pane_id },
+                CreateStage::SendCommand => PendingCreationState::Sending { pane_id },
+                CreateStage::SendEnter => PendingCreationState::Entering { pane_id },
+            };
+            if let Some(pending) = state.pending_creation.as_mut()
+                && matches!(
+                    pending.state,
+                    PendingCreationState::Created { .. }
+                        | PendingCreationState::Tagging { .. }
+                        | PendingCreationState::Sending { .. }
+                )
+            {
+                pending.state = next;
+                state.invalidate_render_cache();
+                return ReduceResult {
+                    actions: Vec::new(),
+                    changed: true,
+                };
+            }
+            ReduceResult::default()
+        }
+        CreationProgress::Finished {
+            pane_id,
+            resolution,
+            ..
+        } => finish_creation(state, pane_id, resolution),
+        CreationProgress::TimedOut { .. } => {
+            let Some(pane_id) = pending_pane_id(state) else {
+                if !matches!(
+                    state
+                        .pending_creation
+                        .as_ref()
+                        .map(|pending| &pending.state),
+                    Some(PendingCreationState::Creating)
+                ) {
+                    return ReduceResult::default();
+                }
+                let error = "creation timed out".to_owned();
+                if let Some(pending) = state.pending_creation.as_mut() {
+                    pending.state = PendingCreationState::Error(error.clone());
+                }
+                if let Some(Modal::Create(CreateModal::Form(form))) = state.modal.as_mut() {
+                    form.submitting = false;
+                    form.error = Some(error);
+                }
+                state.invalidate_render_cache();
+                return ReduceResult {
+                    actions: Vec::new(),
+                    changed: true,
+                };
+            };
+            finish_creation(
+                state,
+                pane_id,
+                CreationResolution::TimedOut {
+                    stage: CreateStage::Create,
+                },
+            )
+        }
+    }
+}
+
+fn pending_pane_id(state: &AppState) -> Option<PaneId> {
+    match state.pending_creation.as_ref()?.state {
+        PendingCreationState::Created { ref pane_id }
+        | PendingCreationState::Tagging { ref pane_id }
+        | PendingCreationState::Sending { ref pane_id }
+        | PendingCreationState::Entering { ref pane_id }
+        | PendingCreationState::AwaitingSnapshot { ref pane_id, .. } => Some(pane_id.clone()),
+        PendingCreationState::Creating | PendingCreationState::Error(_) => None,
+    }
+}
+
+fn finish_creation(
+    state: &mut AppState,
+    pane_id: PaneId,
+    resolution: CreationResolution,
+) -> ReduceResult {
+    let Some(pending) = state.pending_creation.as_mut() else {
+        return ReduceResult::default();
+    };
+    if matches!(
+        pending.state,
+        PendingCreationState::Creating
+            | PendingCreationState::Error(_)
+            | PendingCreationState::AwaitingSnapshot { .. }
+    ) {
+        return ReduceResult::default();
+    }
+    pending.state = PendingCreationState::AwaitingSnapshot {
+        pane_id,
+        resolution,
+    };
+    state.invalidate_render_cache();
+    ReduceResult {
+        actions: vec![Action::CreationMutation, Action::RefreshNow],
+        changed: true,
     }
 }
 
@@ -986,9 +1616,11 @@ mod tests {
     };
 
     use crate::app::{
-        Action, ActionOutcome, AppState, CompletedAction, Event, Focus, InputMode, JumpTarget,
-        Modal, Mode, reduce,
+        Action, ActionOutcome, AppState, CompletedAction, CreateChoice, CreateChoiceKind,
+        CreateModal, CreationId, Event, Focus, InputMode, JumpTarget, Modal, Mode,
+        PendingCreationState, reduce,
     };
+    use crate::creation::{CreateContext, CreationProgress, CreationResolution};
     use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, Status, WindowId};
     use crate::preview::{PreviewFrame, parse_preview};
     use crate::snapshot::{ParseOutcome, RawRecord};
@@ -1044,6 +1676,279 @@ mod tests {
         for character in query.chars() {
             reduce(app, key(KeyCode::Char(character)));
         }
+    }
+
+    #[test]
+    fn n_opens_contextual_creation_choices_and_uses_pane_cwd() {
+        let mut app = state(vec![record("$1", "@1", "%1", 0)]);
+        app.focus = Some(Focus::Pane(("$1".into(), "@1".into(), "%1".into())));
+        app.sync_selection();
+
+        let result = reduce(&mut app, key(KeyCode::Char('n')));
+
+        assert!(result.changed);
+        assert_eq!(
+            app.modal,
+            Some(Modal::Create(CreateModal::Choice {
+                choices: vec![
+                    CreateChoice::new(CreateChoiceKind::Right),
+                    CreateChoice::new(CreateChoiceKind::Left),
+                    CreateChoice::new(CreateChoiceKind::Bottom),
+                    CreateChoice::new(CreateChoiceKind::Top),
+                    CreateChoice::new(CreateChoiceKind::NewWindow),
+                    CreateChoice::new(CreateChoiceKind::NewSession),
+                ],
+                selected: 0,
+                cwd: "/tmp".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn n_uses_header_active_pane_cwd_and_empty_and_retained_no_focus_contexts() {
+        let mut active = record("$1", "@1", "%1", 0);
+        active.pane_current_path = "/active".into();
+        let mut fallback = record("$1", "@2", "%2", 1);
+        fallback.window_index = 1;
+        fallback.pane_active = false;
+        fallback.pane_current_path = "/fallback".into();
+        let mut app = state(vec![fallback, active]);
+        app.focus = Some(Focus::Header("$1".into()));
+        reduce(&mut app, key(KeyCode::Char('n')));
+        assert_eq!(
+            app.modal,
+            Some(Modal::Create(CreateModal::Choice {
+                choices: vec![
+                    CreateChoice::new(CreateChoiceKind::NewWindow),
+                    CreateChoice::new(CreateChoiceKind::NewSession),
+                ],
+                selected: 0,
+                cwd: "/active".into(),
+            }))
+        );
+
+        let mut empty = state(Vec::new());
+        reduce(&mut empty, key(KeyCode::Char('n')));
+        assert!(matches!(
+            empty.modal,
+            Some(Modal::Create(CreateModal::Form(_)))
+        ));
+
+        let mut retained = state(vec![record("$1", "@1", "%1", 0)]);
+        enter_query(&mut retained, "does-not-match");
+        reduce(&mut retained, key(KeyCode::Esc));
+        reduce(&mut retained, key(KeyCode::Char('n')));
+        assert_eq!(
+            retained.modal,
+            Some(Modal::Create(CreateModal::Choice {
+                choices: vec![CreateChoice::new(CreateChoiceKind::NewSession)],
+                selected: 0,
+                cwd: String::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn creation_form_validates_edits_and_correlates_stage_one_failures() {
+        let mut app = state(Vec::new());
+        reduce(&mut app, key(KeyCode::Char('n')));
+        reduce(&mut app, key(KeyCode::Char('λ')));
+        reduce(&mut app, shift_key(KeyCode::Char('X')));
+        reduce(&mut app, key(KeyCode::Backspace));
+        reduce(&mut app, key(KeyCode::Tab));
+        reduce(&mut app, key(KeyCode::Char('\u{1}')));
+        let validation = reduce(&mut app, key(KeyCode::Enter));
+        assert!(validation.actions.is_empty());
+        assert!(
+            matches!(app.modal, Some(Modal::Create(CreateModal::Form(ref form))) if form.error.is_some())
+        );
+
+        reduce(&mut app, key(KeyCode::Backspace));
+        let submitted = reduce(&mut app, key(KeyCode::Enter));
+        assert!(matches!(
+            submitted.actions.as_slice(),
+            [Action::StartCreation {
+                id: CreationId(1),
+                ..
+            }]
+        ));
+        assert!(matches!(
+            app.pending_creation.as_ref().map(|pending| &pending.state),
+            Some(PendingCreationState::Creating)
+        ));
+        assert!(
+            matches!(app.modal, Some(Modal::Create(CreateModal::Form(ref form))) if form.submitting)
+        );
+
+        reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::CreateFailed {
+                id: CreationId(1),
+                error: "bad\u{1b}error".into(),
+            }),
+        );
+        assert!(
+            matches!(app.modal, Some(Modal::Create(CreateModal::Form(ref form))) if !form.submitting && form.error.as_deref() == Some("bad\\u{1b}error"))
+        );
+        let retry = reduce(&mut app, key(KeyCode::Enter));
+        assert!(matches!(
+            retry.actions.as_slice(),
+            [Action::StartCreation {
+                id: CreationId(2),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn creation_terminal_progress_is_correlated_and_emits_once_in_order() {
+        let mut app = state(Vec::new());
+        reduce(&mut app, key(KeyCode::Char('n')));
+        let start = reduce(&mut app, key(KeyCode::Enter));
+        let id = match start.actions.as_slice() {
+            [Action::StartCreation { id, .. }] => *id,
+            actions => panic!("expected start action, got {actions:?}"),
+        };
+        assert_eq!(
+            reduce(
+                &mut app,
+                Event::CreationProgress(CreationProgress::Created {
+                    id,
+                    pane_id: "%9".into(),
+                }),
+            )
+            .actions,
+            []
+        );
+        assert!(app.modal.is_none());
+        let finished = reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::Finished {
+                id,
+                pane_id: "%9".into(),
+                resolution: CreationResolution::Success,
+            }),
+        );
+        assert_eq!(
+            finished.actions,
+            vec![Action::CreationMutation, Action::RefreshNow]
+        );
+        assert_eq!(
+            reduce(
+                &mut app,
+                Event::CreationProgress(CreationProgress::Finished {
+                    id,
+                    pane_id: "%9".into(),
+                    resolution: CreationResolution::Success,
+                }),
+            )
+            .actions,
+            []
+        );
+        assert!(matches!(
+            app.pending_creation.as_ref().map(|pending| &pending.state),
+            Some(PendingCreationState::AwaitingSnapshot { .. })
+        ));
+        assert!(!reduce(&mut app, key(KeyCode::Char('n'))).changed);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn creation_split_form_counts_linked_sessions_and_cycles_only_relevant_fields() {
+        let first = record("$1", "@1", "%1", 0);
+        let mut linked = first.clone();
+        linked.session_id = "$2".into();
+        linked.window_id = "@2".into();
+        let mut app = state(vec![first, linked]);
+        app.focus = Some(Focus::Pane(("$1".into(), "@1".into(), "%1".into())));
+        app.sync_selection();
+
+        reduce(&mut app, key(KeyCode::Char('n')));
+        reduce(&mut app, key(KeyCode::Enter));
+        let form = match app.modal.as_ref() {
+            Some(Modal::Create(CreateModal::Form(form))) => form,
+            modal => panic!("expected split form, got {modal:?}"),
+        };
+        assert!(matches!(form.kind, CreateContext::Split { .. }));
+        assert_eq!(form.linked_session_count, 2);
+        assert_eq!(form.field, crate::app::CreateField::Cwd);
+        assert!(form.draft.name.is_empty());
+
+        reduce(&mut app, key(KeyCode::Tab));
+        assert!(
+            matches!(app.modal, Some(Modal::Create(CreateModal::Form(ref form))) if form.field == crate::app::CreateField::Command)
+        );
+        reduce(&mut app, key(KeyCode::BackTab));
+        assert!(
+            matches!(app.modal, Some(Modal::Create(CreateModal::Form(ref form))) if form.field == crate::app::CreateField::Cwd)
+        );
+    }
+
+    #[test]
+    fn creation_header_cwd_falls_back_to_lowest_topology_and_modal_input_is_exclusive() {
+        let mut later = record("$1", "@2", "%2", 3);
+        later.window_index = 2;
+        later.pane_active = false;
+        later.pane_current_path = "/later".into();
+        let mut first = record("$1", "@1", "%1", 1);
+        first.window_index = 1;
+        first.pane_active = false;
+        first.pane_current_path = "/first".into();
+        let mut app = state(vec![later, first]);
+        app.focus = Some(Focus::Header("$1".into()));
+        let before_mode = app.mode;
+
+        reduce(&mut app, key(KeyCode::Char('n')));
+        assert!(
+            matches!(app.modal, Some(Modal::Create(CreateModal::Choice { ref cwd, .. })) if cwd == "/first")
+        );
+        reduce(&mut app, key(KeyCode::Char('s')));
+        assert_eq!(app.mode, before_mode);
+        reduce(&mut app, key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn creation_stage_failures_ignore_stale_ids_and_error_dismissal_allows_reopen() {
+        let mut app = state(Vec::new());
+        let original_hash = app.model.content_hash();
+        reduce(&mut app, key(KeyCode::Char('n')));
+        let start = reduce(&mut app, key(KeyCode::Enter));
+        assert!(matches!(
+            start.actions.as_slice(),
+            [Action::StartCreation {
+                id: CreationId(1),
+                ..
+            }]
+        ));
+        let stale = reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::CreateFailed {
+                id: CreationId(99),
+                error: "stale".into(),
+            }),
+        );
+        assert!(!stale.changed);
+        assert!(
+            matches!(app.modal, Some(Modal::Create(CreateModal::Form(ref form))) if form.submitting)
+        );
+
+        reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::CreateFailed {
+                id: CreationId(1),
+                error: "failed".into(),
+            }),
+        );
+        reduce(&mut app, key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert!(app.pending_creation.is_none());
+        assert_eq!(app.model.content_hash(), original_hash);
+        reduce(&mut app, key(KeyCode::Char('n')));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Create(CreateModal::Form(_)))
+        ));
     }
 
     #[test]

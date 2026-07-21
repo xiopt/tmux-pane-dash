@@ -747,6 +747,9 @@ async fn apply_event(
                 }
             }
             Action::Quit => {}
+            // Creation execution is introduced in Phase 5 Task 4. Task 2 only
+            // defines reducer effects, which remain inert at this boundary.
+            Action::StartCreation { .. } | Action::CreationMutation | Action::RefreshNow => {}
         }
     }
     if result.changed {
