@@ -263,6 +263,80 @@ task9_scenarios() {
   task9_killed_between_resize_and_switch
 }
 
+destroy_popup_setup() { # detach-on-destroy value label
+  local mode="$1" label="$2" source pane index
+  source="destroy-source-${label}-${RANDOM}${RANDOM}"
+  admin new-session -d -s "$source" -x 120 -y 40 'exec cat'
+  admin set-option -t "$source" detach-on-destroy "$mode"
+  pane="$(admin display-message -p -t "$source:0.0" '#{pane_id}')"
+  admin set-option -p -t "$pane" @pane_dash_tag "destroy-${label}"
+  start_client "$source" "destroy-${label}"
+  index=$((${#CLIENT_PIDS[@]} - 1))
+  open_popup "$index"
+  wait_for "destroy ${label} popup frame" 3 ansi_has "$index" "destroy-${label}"
+  DESTROY_SOURCE="$source" DESTROY_INDEX="$index" DESTROY_TTY="${CLIENT_TTYS[index]}" DESTROY_CONTROL="${POPUP_CONTROLS[index]}"
+}
+
+destroy_popup_detach_off() {
+  local before started closed
+  destroy_popup_setup off off
+  before="$(record_count "$(now)" "$(now)" -C)"
+  started="$(now)"
+  admin kill-session -t "$DESTROY_SOURCE"
+  wait_for 'destroy off popup control closes <=2s' 2 popup_closed "$DESTROY_INDEX"
+  closed="$(now)"
+  ! control_present "$DESTROY_CONTROL" || die 'destroy off control survived'
+  ! client_gone "$DESTROY_TTY" || die 'destroy off normal client detached'
+  [[ -n "$(client_snapshot "$DESTROY_TTY")" ]] || die 'destroy off normal client was not reassigned'
+  (( $(record_count "$started" "$closed" -C)==before )) || die 'destroy off attempted control reconnect'
+  sleep .2
+  (( $(runtime_count "$closed" "$(now)")==0 )) || die 'destroy off popup runtime work after close'
+  printf 'destroy-off popup/control closed<=2s control=%s normal-client=%s reassigned=%s reconnects=0 runtime=0\n' "$DESTROY_CONTROL" "$DESTROY_TTY" "$(client_snapshot "$DESTROY_TTY")"
+}
+
+destroy_popup_detach_on() {
+  destroy_popup_setup on on
+  admin kill-session -t "$DESTROY_SOURCE"
+  wait_for 'destroy on popup control closes <=2s' 2 popup_closed "$DESTROY_INDEX"
+  wait_for 'destroy on exact normal client detaches' 2 client_gone "$DESTROY_TTY"
+  ! control_present "$DESTROY_CONTROL" || die 'destroy on control survived'
+  printf 'destroy-on popup/control closed<=2s control=%s client=%s detached\n' "$DESTROY_CONTROL" "$DESTROY_TTY"
+}
+
+destroy_popup_while_degraded() {
+  local started closed
+  destroy_popup_setup off degraded
+  : > "$REJECT"
+  admin run-shell "kill -TERM $DESTROY_CONTROL"
+  wait_for 'destroy degraded banner' 3 ansi_has "$DESTROY_INDEX" 'live updates lost — polling'
+  wait_for 'destroy degraded no control' 2 control_is_zero
+  started="$(now)"
+  admin kill-session -t "$DESTROY_SOURCE"
+  wait_for 'destroy degraded zero-drop snapshot closes <=1.1s' 1.1 popup_closed "$DESTROY_INDEX"
+  closed="$(now)"
+  sleep .2
+  (( $(record_count "$closed" "$(now)" list-panes)==0 )) || die 'destroy degraded list-panes continued after close'
+  ! client_gone "$DESTROY_TTY" || die 'destroy degraded normal client detached'
+  rm -f "$REJECT"
+  printf 'destroy-degraded popup/control closed<=1.1s control=%s list-panes-after-close=0\n' "$DESTROY_CONTROL"
+}
+
+unrelated_session_changes_keep_popup_open() {
+  local source pane index unrelated
+  source="unrelated-source-${RANDOM}${RANDOM}"; unrelated="unrelated-other-${RANDOM}${RANDOM}"
+  admin new-session -d -s "$source" 'exec cat'; admin new-session -d -s "$unrelated" 'exec cat'
+  pane="$(admin display-message -p -t "$source:0.0" '#{pane_id}')"
+  admin set-option -p -t "$pane" @pane_dash_tag unrelated-source
+  start_client "$source" unrelated
+  index=$((${#CLIENT_PIDS[@]} - 1)); open_popup "$index"; wait_for 'unrelated popup frame' 3 ansi_has "$index" unrelated-source
+  admin rename-session -t "$source" "${source}-renamed"
+  sleep .2; popup_open "$index" || die 'source session rename closed popup'
+  admin kill-session -t "$unrelated"
+  sleep .2; popup_open "$index" || die 'unrelated session kill closed popup'
+  close_popup "$index"; admin kill-session -t "${source}-renamed"
+  printf 'unrelated-kill/source-rename popup remained open\n'
+}
+
 main() {
   [[ -x "$BIN" ]] || die "missing $BIN; run make build"
   if ! command -v perl >/dev/null || ! command -v script >/dev/null; then die 'perl and script required'; fi
@@ -323,11 +397,13 @@ main() {
   wait_for 'literal hostile send reaches selected cat pane' 2 pane_contains "$pane" "$hostile"
   [[ ! -e "$sentinel" ]] || die 'hostile send sentinel'
   send_bytes 0 x; send_bytes 0 y; wait_for 'confirmed selected-pane kill' 2 target_gone "$pane"; target_present "$target" || die 'spare pane did not survive selected kill'
-  # Dedicated attached-session destruction cases remain bounded for both options.
-  for mode in off on; do admin new-session -d -s "destroy-$mode" 'exec cat'; admin set-option -t "destroy-$mode" detach-on-destroy "$mode"; admin kill-session -t "destroy-$mode"; wait_for "destroy $mode" 2 session_gone "destroy-$mode"; done
-  t="$(now)"; send_bytes 0 q; sleep .2; (( $(runtime_count "$t" "$(now)")==0 )) || die 'closed popup runtime work'
-  rm -f "$REJECT"
-  task9_scenarios
+   t="$(now)"; send_bytes 0 q; sleep .2; (( $(runtime_count "$t" "$(now)")==0 )) || die 'closed popup runtime work'
+   rm -f "$REJECT"
+   unrelated_session_changes_keep_popup_open
+   destroy_popup_detach_off
+   destroy_popup_detach_on
+   destroy_popup_while_degraded
+   task9_scenarios
   printf 'ok: controls startup=2 replacement=1 rejected=1; process budgets passed\n'
 }
 session_gone() { ! admin has-session -t "$1" 2>/dev/null; }
