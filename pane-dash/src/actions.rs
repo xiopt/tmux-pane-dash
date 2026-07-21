@@ -857,19 +857,72 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "requires tmux"]
-    async fn vanished_target_is_a_silent_unsuccessful_jump() {
-        let tmux = crate::tmux_exec::TmuxExec::new("tmux");
+    async fn real_tmux_missing_target_is_a_silent_unsuccessful_jump() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        struct ScratchServer(std::path::PathBuf);
+        impl Drop for ScratchServer {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux")
+                    .arg("-S")
+                    .arg(&self.0)
+                    .arg("kill-server")
+                    .output();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("socket");
+        let _server = ScratchServer(socket.clone());
+        assert!(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args([
+                    "-f",
+                    "/dev/null",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    "jump",
+                    "sleep 60"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let log = dir.path().join("argv");
+        let wrapper = dir.path().join("tmux-jump");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec tmux -S '{}' \"$@\"\n",
+                log.display(),
+                socket.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let tmux = crate::tmux_exec::TmuxExec::new(wrapper);
         assert!(
             !super::execute_jump(
                 &tmux,
                 None,
-                "/definitely-not-a-tmux-client",
+                "/dev/tty999999",
                 &JumpTarget::Pane("%999999".into()),
                 false,
             )
             .await
+        );
+        assert_eq!(
+            std::fs::read_to_string(log).unwrap(),
+            "switch-client\n-Z\n-c\n/dev/tty999999\n-t\n%999999\n"
         );
     }
 }
