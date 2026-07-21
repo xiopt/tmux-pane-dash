@@ -519,9 +519,9 @@ pub fn is_safe_client_tty(value: &str) -> bool {
         !component.is_empty()
             && component != "."
             && component != ".."
-            && component.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
-            })
+            && component
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     })
 }
 
