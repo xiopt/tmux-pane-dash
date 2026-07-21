@@ -26,7 +26,10 @@ use pane_dash::transport::{
     spawn_connection_attempt,
 };
 use pane_dash::ui;
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{
+    Terminal,
+    backend::{Backend, CrosstermBackend},
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
@@ -516,10 +519,7 @@ async fn main() -> Result<()> {
             },
         }
     }
-    if let Some(task) = creation_task.take() {
-        let _ = task.cancel.send(());
-        let _ = task.join.await;
-    }
+    cleanup_creation_task(&mut creation_task).await;
     Ok(())
 }
 
@@ -699,8 +699,8 @@ fn sync_transport_degraded(app: &mut AppState, coordinator: &TransportCoordinato
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn apply_event(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+async fn apply_event<B>(
+    terminal: &mut Terminal<B>,
     app: &mut AppState,
     event: Event,
     tmux: &TmuxExec,
@@ -710,7 +710,11 @@ async fn apply_event(
     preview_tx: &mpsc::UnboundedSender<PreviewResponse>,
     creation_tx: &mpsc::UnboundedSender<CreationProgress>,
     creation_task: &mut Option<CreationTask>,
-) -> Result<ActionEffects> {
+) -> Result<ActionEffects>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     if creation_task
         .as_ref()
         .is_some_and(|task| task.join.is_finished())
@@ -807,6 +811,13 @@ fn start_creation(
     *task = Some(CreationTask { cancel, join });
 }
 
+async fn cleanup_creation_task(task: &mut Option<CreationTask>) {
+    if let Some(task) = task.take() {
+        let _ = task.cancel.send(());
+        let _ = task.join.await;
+    }
+}
+
 fn start_preview_capture(
     preview_interval: &mut tokio::time::Interval,
     tx: &mpsc::UnboundedSender<PreviewResponse>,
@@ -839,7 +850,11 @@ fn spawn_preview_capture(
     });
 }
 
-fn redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut AppState) -> Result<()> {
+fn redraw<B>(terminal: &mut Terminal<B>, app: &mut AppState) -> Result<()>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     let viewport_height = ui::preview_inner_height(app, terminal.size()?.into());
     reduce(app, Event::PreviewViewport(viewport_height));
     let now = now_secs();
@@ -900,14 +915,16 @@ fn install_panic_cleanup() {
 mod tests {
     use super::{
         ActionEffects, ConnectionMessageKind, ConnectionRoute, SnapshotGeneration,
-        SnapshotInFlight, SnapshotSource, bench_first_frame_message, classify_connection_message,
-        classify_snapshot_payload, clear_terminated_connection_state, dispatch_directives,
-        parse_args_from, preview_interval, process_action_effects, snapshot_interval,
-        snapshot_keeps_launch_session, source_session_changed_requires_quit, spawn_preview_capture,
+        SnapshotInFlight, SnapshotSource, apply_event, bench_first_frame_message,
+        classify_connection_message, classify_snapshot_payload, cleanup_creation_task,
+        clear_terminated_connection_state, dispatch_directives, parse_args_from, preview_interval,
+        process_action_effects, snapshot_interval, snapshot_keeps_launch_session,
+        source_session_changed_requires_quit, spawn_preview_capture, start_creation,
         start_preview_capture, sync_transport_degraded,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pane_dash::app::{Action, AppState, Event, reduce};
+    use pane_dash::creation::{CreateContext, CreateDraft, CreationProgress, build_request};
     use pane_dash::model::{Model, ModelConfig};
     use pane_dash::options::DashConfig;
     use pane_dash::preview::parse_preview;
@@ -916,6 +933,7 @@ mod tests {
     use pane_dash::transport::{
         SnapshotCompletion, TransportCoordinator, TransportDirective, TransportInput, TransportMode,
     };
+    use ratatui::{Terminal, backend::TestBackend};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
@@ -1518,6 +1536,153 @@ mod tests {
         );
         assert_eq!(snapshot_generation.current(), 1);
         assert_eq!(next_snapshot_seq, next_snapshot_seq_before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn apply_event_starts_creation_without_blocking_and_consumes_input_while_submitting() {
+        let dir = TempDir::new().unwrap();
+        let release = dir.path().join("release");
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = split-window ]; then while [ ! -f '{}' ]; do sleep 0.01; done; printf '%44\\n'; fi\n",
+                release.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let tmux = TmuxExec::new(executable);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = preview_app();
+        let mut preview_tick = preview_interval();
+        let (preview_tx, _) = mpsc::unbounded_channel();
+        let (creation_tx, mut progress) = mpsc::unbounded_channel();
+        let mut task = None;
+
+        for key in [KeyCode::Char('n'), KeyCode::Enter, KeyCode::Enter] {
+            apply_event(
+                &mut terminal,
+                &mut app,
+                Event::Key(KeyEvent::new(key, KeyModifiers::NONE)),
+                &tmux,
+                None,
+                "/dev/ttys001",
+                &mut preview_tick,
+                &preview_tx,
+                &creation_tx,
+                &mut task,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(task.is_some());
+        assert!(!app.should_quit);
+
+        apply_event(
+            &mut terminal,
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            &tmux,
+            None,
+            "/dev/ttys001",
+            &mut preview_tick,
+            &preview_tx,
+            &creation_tx,
+            &mut task,
+        )
+        .await
+        .unwrap();
+        assert!(!app.should_quit);
+
+        fs::write(release, "").unwrap();
+        while let Ok(item) = tokio::time::timeout(Duration::from_secs(1), progress.recv()).await {
+            let Some(item) = item else { break };
+            let terminal_event = matches!(item, CreationProgress::Finished { .. });
+            apply_event(
+                &mut terminal,
+                &mut app,
+                Event::CreationProgress(item),
+                &tmux,
+                None,
+                "/dev/ttys001",
+                &mut preview_tick,
+                &preview_tx,
+                &creation_tx,
+                &mut task,
+            )
+            .await
+            .unwrap();
+            if terminal_event {
+                break;
+            }
+        }
+        assert!(progress.try_recv().is_err());
+        if let Some(task) = task {
+            let _ = task.join.await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cleanup_creation_task_cancels_and_reaps_the_active_child() {
+        let dir = TempDir::new().unwrap();
+        let pid_file = dir.path().join("pid");
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nwhile :; do sleep 1; done\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let request = build_request(
+            CreateContext::NewSession,
+            &CreateDraft {
+                name: String::new(),
+                cwd: String::new(),
+                command: String::new(),
+            },
+        )
+        .unwrap();
+        let (tx, mut progress) = mpsc::unbounded_channel();
+        let mut task = None;
+        start_creation(
+            &mut task,
+            &tx,
+            TmuxExec::new(executable),
+            pane_dash::creation::CreationId(9),
+            request,
+        );
+        assert!(matches!(
+            progress.recv().await,
+            Some(CreationProgress::Stage { .. })
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !pid_file.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let pid = fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+
+        cleanup_creation_task(&mut task).await;
+
+        assert!(task.is_none());
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let events: Vec<_> = std::iter::from_fn(|| progress.try_recv().ok()).collect();
+        assert!(matches!(
+            events.as_slice(),
+            [CreationProgress::TimedOut { .. }]
+        ));
     }
 
     #[test]

@@ -265,13 +265,38 @@ mod tests {
     use crate::model::{Model, ModelConfig};
     use crate::snapshot::parse;
 
-    use super::TmuxExec;
+    use super::{TmuxCommandError, TmuxExec};
 
     #[test]
     fn bin_returns_the_configured_executable_path() {
         let exec = TmuxExec::new("/usr/local/bin/tmux-custom");
 
         assert_eq!(exec.bin(), Path::new("/usr/local/bin/tmux-custom"));
+    }
+
+    #[tokio::test]
+    async fn creation_runner_drains_large_stdout_and_stderr_before_returning_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            "#!/bin/sh\ndd if=/dev/zero bs=1024 count=256 2>/dev/null\ndd if=/dev/zero bs=1024 count=256 1>&2 2>/dev/null\necho failed 1>&2\nexit 7\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let (_cancel, mut cancellation) = tokio::sync::oneshot::channel();
+
+        let error = TmuxExec::new(executable)
+            .run_argv_until(
+                &["anything".into()],
+                None,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+                &mut cancellation,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TmuxCommandError::Exit { .. }));
     }
 
     struct ScratchServer<'a> {
