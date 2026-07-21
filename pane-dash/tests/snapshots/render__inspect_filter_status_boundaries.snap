@@ -5,4 +5,4 @@ expression: "statuses.join(\"\\n\")"
 N1W1I1E1U1S1P6 grouped INSPECT FILTER: 東 京
 N1W1I1E1U1S1P6 grouped INSPECT FILTER: 東 京 é
 N1W1I1E1U1S1P6 grouped INSPECT FILTER: 東 京 éq
-N1W1I1E1U1S1P6  grouped | INSPECT | FILTER: 東
+N1W1I1E1U1S1P6 grouped INSPECT FILTER: 東 京 équ

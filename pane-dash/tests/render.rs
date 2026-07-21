@@ -258,7 +258,7 @@ fn inspect_navigation_status_keeps_retained_prompt_adjacent_at_boundaries() {
 
         let status = draw(&state, width, 12).lines().last().unwrap().to_owned();
         assert!(status.contains("filter: 東"), "{width}: {status}");
-        let navigation = if width < 45 { " N " } else { "NAV" };
+        let navigation = " N ";
         assert!(status.contains(navigation), "{width}: {status}");
         assert!(status.find("grouped").unwrap() < status.find(navigation).unwrap());
         assert!(status.find(navigation).unwrap() < status.find("INSPECT").unwrap());
@@ -272,6 +272,56 @@ fn inspect_navigation_status_keeps_retained_prompt_adjacent_at_boundaries() {
         statuses.push(status);
     }
     insta::assert_snapshot!("inspect_navigation_status_boundaries", statuses.join("\n"));
+}
+
+#[test]
+fn inspect_status_query_prefix_is_monotonic_across_all_tiers() {
+    let query = "東京e\u{301}abcdefghijk";
+    for retained_query in [false, true] {
+        let prompt = if retained_query {
+            "filter: "
+        } else {
+            "FILTER: "
+        };
+        let mut previous_width = 0;
+        for width in 40..=80 {
+            let mut stale = record("dash", "%6", "working", "Stale");
+            stale.heartbeat = Some(0);
+            let mut state = app(vec![
+                record("dash", "%1", "needs_input", "Input"),
+                record("dash", "%2", "working", "Work"),
+                record("dash", "%3", "idle", "Idle"),
+                record("dash", "%4", "error", "Error"),
+                record("dash", "%5", "unknown", "Unknown"),
+                stale,
+            ]);
+            enter_query(&mut state, query);
+            if retained_query {
+                reduce(
+                    &mut state,
+                    Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                );
+            }
+            state.preview.inspect = true;
+
+            let status = draw(&state, width, 12).lines().last().unwrap().to_owned();
+            let displayed = status
+                .split_once(prompt)
+                .map_or_else(String::new, |(_, suffix)| suffix.replace(' ', ""));
+            assert!(query.starts_with(&displayed), "{width}: {status}");
+            assert!(displayed.width() >= previous_width, "{width}: {status}");
+            assert!(!status.contains("INSPECT東"), "{width}: {status}");
+            assert!(
+                buffer_line_widths(&state, width, 12)
+                    .into_iter()
+                    .all(|line_width| line_width <= usize::from(width))
+            );
+            if width < 43 && retained_query {
+                assert!(status.contains("grouped N INSPECT"), "{width}: {status}");
+            }
+            previous_width = displayed.width();
+        }
+    }
 }
 
 #[test]

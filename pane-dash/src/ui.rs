@@ -423,12 +423,6 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
     };
     let query_is_visible =
         app.input_mode == crate::app::InputMode::Filter || !app.filter_query.is_empty();
-    let minimum_query_width = app
-        .filter_query
-        .chars()
-        .filter_map(|character| character.width())
-        .find(|width| *width > 0)
-        .unwrap_or(0);
     let (full_suffix, compact_suffix, narrow_suffix) = status_suffixes(app, mode, query_is_visible);
     let options = [
         (&verbose_counts, "  ", &full_suffix),
@@ -436,13 +430,23 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
         (&compact_counts, " ", &compact_suffix),
         (&compact_counts, " ", &narrow_suffix),
     ];
-    let (counts, separator, suffix) = options
-        .into_iter()
-        .find(|(counts, separator, suffix)| {
-            counts.width() + separator.width() + suffix.width() + minimum_query_width
-                <= usize::from(width)
-        })
-        .unwrap_or((&compact_counts, " ", &compact_suffix));
+    let fallback = (&compact_counts, " ", &narrow_suffix);
+    let fits = |(counts, separator, suffix): &&(&String, &str, &String), query_width| {
+        counts.width() + separator.width() + suffix.width() + query_width <= usize::from(width)
+    };
+    let (counts, separator, suffix) = if query_is_visible && !app.filter_query.is_empty() {
+        options
+            .iter()
+            .find(|option| fits(option, app.filter_query.width()))
+            .copied()
+            .unwrap_or(fallback)
+    } else {
+        options
+            .iter()
+            .find(|option| fits(option, 0))
+            .copied()
+            .unwrap_or(fallback)
+    };
     let available_query_width =
         usize::from(width).saturating_sub(counts.width() + separator.width() + suffix.width());
     let query = if query_is_visible {
