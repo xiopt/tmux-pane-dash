@@ -71,18 +71,37 @@ fn flush_record(outcome: &mut ParseOutcome, record: Option<(&[u8], bool)>) {
 
 fn record_drop(outcome: &mut ParseOutcome, record: &[u8]) {
     outcome.dropped += 1;
-    let pane_id = record.split(|byte| *byte == US).nth(5);
-    if let Some(pane_id) = pane_id.filter(|pane_id| is_numeric_pane_id(pane_id)) {
+    let fields: Vec<_> = record.split(|byte| *byte == US).collect();
+    if let Some(pane_id) = attributable_pane_id(&fields) {
         outcome.ambiguous_panes.insert(decode(pane_id));
     } else {
         outcome.unattributable_dropped += 1;
     }
 }
 
-fn is_numeric_pane_id(value: &[u8]) -> bool {
+fn attributable_pane_id<'a>(fields: &[&'a [u8]]) -> Option<&'a [u8]> {
+    if fields.len() != FIELD_COUNT
+        || !is_numeric_machine_id(fields[0], b'$')
+        || !is_numeric_machine_id(fields[2], b'@')
+        || !is_numeric_pane_id(fields[5])
+        || parse_u32(fields[3]).is_none()
+        || parse_u32(fields[6]).is_none()
+        || parse_bool(fields[7]).is_none()
+        || parse_bool(fields[10]).is_none()
+    {
+        return None;
+    }
+    Some(fields[5])
+}
+
+fn is_numeric_machine_id(value: &[u8], prefix: u8) -> bool {
     value
-        .strip_prefix(b"%")
+        .strip_prefix(&[prefix])
         .is_some_and(|digits| !digits.is_empty() && digits.iter().all(u8::is_ascii_digit))
+}
+
+fn is_numeric_pane_id(value: &[u8]) -> bool {
+    is_numeric_machine_id(value, b'%')
 }
 
 fn parse_record(record: &[u8]) -> Option<RawRecord> {
@@ -234,13 +253,13 @@ mod tests {
     fn attributes_malformed_records_only_to_syntactically_valid_numeric_pane_ids() {
         let mut target = fields("target");
         target[5] = b"%42".to_vec();
-        target[7] = b"not-a-bool".to_vec();
+        target[12] = b"not-a-number".to_vec();
         let mut unrelated = fields("unrelated");
         unrelated[5] = b"%7".to_vec();
-        unrelated[7] = b"not-a-bool".to_vec();
+        unrelated[12] = b"not-a-number".to_vec();
         let mut unattributable = fields("unattributable");
         unattributable[5] = b"%not-numeric".to_vec();
-        unattributable[7] = b"not-a-bool".to_vec();
+        unattributable[12] = b"not-a-number".to_vec();
 
         let mut bytes = record(&target);
         bytes.extend(record(&target));
@@ -253,6 +272,26 @@ mod tests {
         assert!(outcome.ambiguous_panes.contains("%42"));
         assert!(outcome.ambiguous_panes.contains("%7"));
         assert_eq!(outcome.unattributable_dropped, 1);
+    }
+
+    #[test]
+    fn structural_or_framing_damage_never_attributes_a_crafted_pane_id() {
+        let mut hostile_us = fields("hostile-us");
+        hostile_us.insert(5, b"shifted".to_vec());
+        hostile_us[6] = b"%42".to_vec();
+        let truncated = fields("truncated")[..12].to_vec();
+        let mut invalid_structural_number = fields("bad-index");
+        invalid_structural_number[3] = b"not-an-index".to_vec();
+        invalid_structural_number[5] = b"%42".to_vec();
+
+        let mut bytes = record(&hostile_us);
+        bytes.extend(record(&truncated));
+        bytes.extend(record(&invalid_structural_number));
+        let outcome = parse(&bytes);
+
+        assert_eq!(outcome.dropped, 3);
+        assert!(outcome.ambiguous_panes.is_empty());
+        assert_eq!(outcome.unattributable_dropped, 3);
     }
 
     #[test]

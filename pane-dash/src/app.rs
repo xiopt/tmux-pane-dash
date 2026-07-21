@@ -14,6 +14,7 @@ use crate::preview::PreviewFrame;
 use crate::snapshot::ParseOutcome;
 
 type Selection = (SessionId, WindowId, PaneId);
+const CREATION_VERIFICATION_TIMEOUT_SECS: u64 = 10;
 
 pub use crate::creation::CreationId;
 
@@ -276,6 +277,8 @@ pub struct AppState {
     pub modal: Option<Modal>,
     pub pending_creation: Option<PendingCreation>,
     pub ephemeral_panes: HashSet<PaneId>,
+    reducer_now: Option<u64>,
+    creation_verification_deadline: Option<u64>,
     focus: Option<Focus>,
     pending_key: Option<KeyCode>,
     render_cache: RefCell<RenderCache>,
@@ -312,6 +315,8 @@ impl AppState {
             modal: None,
             pending_creation: None,
             ephemeral_panes: HashSet::new(),
+            reducer_now: None,
+            creation_verification_deadline: None,
             focus: None,
             pending_key: None,
             render_cache: RefCell::new(RenderCache::default()),
@@ -656,16 +661,57 @@ fn clamp_preview_offset(state: &mut AppState) {
 }
 
 fn reduce_tick(state: &mut AppState, now: u64) -> ReduceResult {
-    let changed = state
+    observe_creation_time(state, now);
+    let age_changed = state
         .next_age_deadline
         .is_some_and(|deadline| now >= deadline);
-    if changed {
+    if age_changed {
         state.age_deadline_revision = None;
     }
+    let verification_changed = expire_creation_verification(state, now);
     ReduceResult {
         actions: Vec::new(),
-        changed,
+        changed: age_changed || verification_changed,
     }
+}
+
+fn observe_creation_time(state: &mut AppState, now: u64) {
+    if state.reducer_now.is_none_or(|previous| now > previous) {
+        state.reducer_now = Some(now);
+    }
+    if matches!(
+        state
+            .pending_creation
+            .as_ref()
+            .map(|pending| &pending.state),
+        Some(PendingCreationState::AwaitingSnapshot { .. })
+    ) && state.creation_verification_deadline.is_none()
+    {
+        state.creation_verification_deadline = Some(now + CREATION_VERIFICATION_TIMEOUT_SECS);
+    }
+}
+
+fn expire_creation_verification(state: &mut AppState, now: u64) -> bool {
+    if state
+        .creation_verification_deadline
+        .is_none_or(|deadline| now < deadline)
+    {
+        return false;
+    }
+    let Some(PendingCreation {
+        state: PendingCreationState::AwaitingSnapshot { pane_id, .. },
+        ..
+    }) = state.pending_creation.take()
+    else {
+        return false;
+    };
+    state.creation_verification_deadline = None;
+    state.banner = Some(format!(
+        "unable to verify pane {} after creation",
+        pane_id.0
+    ));
+    state.invalidate_render_cache();
+    true
 }
 
 fn next_age_boundary(since: u64, now: u64) -> u64 {
@@ -1504,6 +1550,9 @@ fn finish_creation(
         pane_id,
         resolution,
     };
+    state.creation_verification_deadline = state
+        .reducer_now
+        .map(|now| now + CREATION_VERIFICATION_TIMEOUT_SECS);
     state.invalidate_render_cache();
     ReduceResult {
         actions: vec![Action::CreationMutation, Action::RefreshNow],
@@ -1602,6 +1651,7 @@ fn emit_jump(state: &mut AppState, zoom: bool, result: &mut ReduceResult) {
 }
 
 fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64) -> ReduceResult {
+    observe_creation_time(state, observed_at);
     let old_visible = state.visible_rows();
     let old_focus = state.focus.clone();
     let dropped_changed = state.dropped_records != outcome.dropped;
@@ -1614,6 +1664,7 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
     );
     let model_config = state.model_config();
     let selection = reconcile_snapshot_presence(state, &outcome, &model_config);
+    let verification_expired = expire_creation_verification(state, observed_at);
     let creation_resolved = awaiting_snapshot && state.pending_creation.is_none();
     let model = Model::build_with_ephemeral(
         &outcome.records,
@@ -1633,6 +1684,7 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
         && !dropped_changed
         && selection.is_none()
         && !creation_resolved
+        && !verification_expired
     {
         return ReduceResult::default();
     }
@@ -1724,6 +1776,7 @@ fn reconcile_snapshot_presence(
             state.ephemeral_panes.insert(pane_id.clone());
         }
         state.pending_creation = None;
+        state.creation_verification_deadline = None;
         state.banner = creation_snapshot_banner(&pane_id, &resolution, false);
         return Some((pending.initiating_session, pane_id));
     }
@@ -1732,6 +1785,7 @@ fn reconcile_snapshot_presence(
     {
         state.ephemeral_panes.remove(&pane_id);
         state.pending_creation = None;
+        state.creation_verification_deadline = None;
         state.banner = creation_snapshot_banner(&pane_id, &resolution, true);
     }
     None
@@ -3194,6 +3248,88 @@ mod tests {
 
         assert!(app.ephemeral_panes.is_empty());
         assert!(app.model.panes().contains_key(&PaneId::from("%new")));
+    }
+
+    #[test]
+    fn ambiguous_snapshot_verification_expires_at_the_ten_second_tick_boundary() {
+        let mut app = state(Vec::new());
+        app.pending_creation = Some(PendingCreation {
+            id: CreationId(1),
+            initiating_session: None,
+            state: PendingCreationState::AwaitingSnapshot {
+                pane_id: "%new".into(),
+                resolution: CreationResolution::Success,
+            },
+        });
+        let ambiguous = || Event::Snapshot {
+            outcome: ParseOutcome {
+                records: Vec::new(),
+                raw_panes: Default::default(),
+                ambiguous_panes: HashSet::from(["%new".into()]),
+                dropped: 1,
+                unattributable_dropped: 0,
+            },
+            observed_at: 100,
+        };
+
+        reduce(&mut app, ambiguous());
+        reduce(&mut app, Event::Tick { now: 109 });
+        assert!(app.pending_creation.is_some());
+        let timeout = reduce(&mut app, Event::Tick { now: 110 });
+
+        assert!(app.pending_creation.is_none());
+        assert_eq!(timeout.actions, Vec::<Action>::new());
+        assert_eq!(
+            app.banner.as_deref(),
+            Some("unable to verify pane %new after creation")
+        );
+        assert!(!app.ephemeral_panes.contains(&PaneId::from("%new")));
+    }
+
+    #[test]
+    fn terminal_creation_uses_the_latest_reducer_clock_for_its_verification_deadline() {
+        let mut app = state(Vec::new());
+        reduce(&mut app, Event::Tick { now: 50 });
+        app.pending_creation = Some(PendingCreation {
+            id: CreationId(1),
+            initiating_session: None,
+            state: PendingCreationState::Tagging {
+                pane_id: "%new".into(),
+            },
+        });
+
+        reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::Finished {
+                id: CreationId(1),
+                pane_id: "%new".into(),
+                resolution: CreationResolution::Success,
+            }),
+        );
+        reduce(
+            &mut app,
+            Event::Snapshot {
+                outcome: ParseOutcome {
+                    records: Vec::new(),
+                    raw_panes: Default::default(),
+                    ambiguous_panes: HashSet::from(["%new".into()]),
+                    dropped: 1,
+                    unattributable_dropped: 0,
+                },
+                observed_at: 51,
+            },
+        );
+        assert!(app.pending_creation.is_some());
+        assert!(!reduce(&mut app, Event::Tick { now: 59 }).changed);
+        let timeout = reduce(&mut app, Event::Tick { now: 60 });
+
+        assert!(timeout.changed);
+        assert!(timeout.actions.is_empty());
+        assert!(app.pending_creation.is_none());
+        assert_eq!(
+            app.banner.as_deref(),
+            Some("unable to verify pane %new after creation")
+        );
     }
 
     #[test]
