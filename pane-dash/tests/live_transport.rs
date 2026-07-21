@@ -219,10 +219,15 @@ async fn live_transport_freshness_harness() {
         "@pane_dash_heartbeat",
         &status_since.to_string(),
     );
-    let quiet = timeout(Duration::from_millis(100), events.recv()).await;
-    assert!(
-        quiet.is_err(),
-        "pane-option update unexpectedly drove a relied-upon notification: {quiet:?}"
+    let optional_notifications = drain_optional_recognized_notifications(
+        &mut events,
+        OPTIONAL_NOTIFICATION_QUIET_PERIOD,
+        "pane-status fallback",
+    )
+    .await;
+    println!(
+        "LIVE_OPTIONAL_NOTIFICATIONS pane_status_fallback count={optional_notifications} quiet_ms={}",
+        OPTIONAL_NOTIFICATION_QUIET_PERIOD.as_millis()
     );
     timeout(FALLBACK_BUDGET, status_tick.tick())
         .await

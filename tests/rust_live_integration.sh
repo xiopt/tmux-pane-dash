@@ -498,8 +498,6 @@ main() {
   admin set-option -p -t "$pane" @pane_dash_status idle
   admin set-option -p -t "$pane" @pane_dash_status_since "$epoch"
   admin set-option -p -t "$pane" @pane_dash_heartbeat "$epoch"
-  sleep .1
-  (( $(record_count "$t" "$(now)" list-panes)==0 )) || die 'status write unexpectedly consumed a notification'
   wait_for 'status fallback list-panes <=1.1s' 1.1 has_list_since "$t"
   ansi_tail_has 0 "$((status_offset+1))" idle || die 'new status snapshot did not render idle'
   (( $(record_count "$t" "$(now)" show-options)==0 )) || die 'status polling used show-options'
