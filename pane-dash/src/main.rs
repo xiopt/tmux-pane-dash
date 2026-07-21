@@ -100,20 +100,24 @@ fn classify_connection_message(
 #[derive(Default)]
 struct SnapshotInFlight {
     seq: Option<u64>,
+    mutation_generation: Option<u64>,
 }
 
 impl SnapshotInFlight {
-    fn spawned(&mut self, seq: u64) {
+    fn spawned(&mut self, seq: u64, mutation_generation: u64) {
         self.seq = Some(seq);
+        self.mutation_generation = Some(mutation_generation);
     }
     fn reset(&mut self) {
         self.seq = None;
+        self.mutation_generation = None;
     }
     fn accepts(&mut self, seq: u64) -> bool {
         if self.seq != Some(seq) {
             return false;
         }
         self.seq = None;
+        self.mutation_generation = None;
         true
     }
 }
@@ -290,19 +294,13 @@ async fn main() -> Result<()> {
             event = input.next() => match event {
                 Some(Ok(CrosstermEvent::Key(key))) => {
                     let effects = apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
-                    if effects.refresh_now {
-                        dispatch_directives(
-                            coordinator.input(pane_dash::transport::TransportInput::RefreshNow),
-                            &mut coordinator, &tmux, &session_id, &connection_tx, &mut control,
-                            &mut pending_connection_generation, &mut active_connection_generation,
-                            &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx,
-                            &mut next_snapshot_seq, &snapshot_generation,
-                            &mut in_flight_snapshot,
-                        );
-                    }
-                    if effects.mutated {
-                        snapshot_generation.record_successful_mutation();
-                    }
+                    process_action_effects(
+                        effects, &mut coordinator, &tmux, &session_id, &connection_tx,
+                        &mut control, &mut pending_connection_generation,
+                        &mut active_connection_generation, &mut next_connection_generation,
+                        &mut debounce_deadline, &snapshot_tx, &mut next_snapshot_seq,
+                        &mut snapshot_generation, &mut in_flight_snapshot,
+                    );
                 },
                 Some(Ok(CrosstermEvent::FocusGained)) => {
                     let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(true), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
@@ -515,25 +513,29 @@ fn dispatch_directives(
                     recover_missing_channel_snapshot(coordinator);
                     continue;
                 };
-                in_flight_snapshot.spawned(spawn_snapshot(
+                let mutation_generation = snapshot_generation.current();
+                let seq = spawn_snapshot(
                     snapshot_tx,
                     next_snapshot_seq,
-                    snapshot_generation.current(),
+                    mutation_generation,
                     SnapshotSource::Channel {
                         connection_generation,
                     },
                     async move { handle.snapshot().await.map_err(|error| error.to_string()) },
-                ));
+                );
+                in_flight_snapshot.spawned(seq, mutation_generation);
             }
             TransportDirective::OneShotSnapshot => {
                 let tmux = tmux.clone();
-                in_flight_snapshot.spawned(spawn_snapshot(
+                let mutation_generation = snapshot_generation.current();
+                let seq = spawn_snapshot(
                     snapshot_tx,
                     next_snapshot_seq,
-                    snapshot_generation.current(),
+                    mutation_generation,
                     SnapshotSource::OneShot,
                     async move { tmux.snapshot().await.map_err(|error| error.to_string()) },
-                ));
+                );
+                in_flight_snapshot.spawned(seq, mutation_generation);
             }
             TransportDirective::StartDebounce => {
                 if debounce_deadline.is_none() {
@@ -542,6 +544,46 @@ fn dispatch_directives(
                 }
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_action_effects(
+    effects: ActionEffects,
+    coordinator: &mut TransportCoordinator,
+    tmux: &TmuxExec,
+    session_id: &str,
+    connection_tx: &mpsc::UnboundedSender<ConnectionMessage>,
+    control: &mut Option<ControlHandle>,
+    pending_connection_generation: &mut Option<u64>,
+    active_connection_generation: &mut Option<u64>,
+    next_connection_generation: &mut u64,
+    debounce_deadline: &mut Option<tokio::time::Instant>,
+    snapshot_tx: &mpsc::UnboundedSender<SnapshotResponse>,
+    next_snapshot_seq: &mut u64,
+    snapshot_generation: &mut SnapshotGeneration,
+    in_flight_snapshot: &mut SnapshotInFlight,
+) {
+    if effects.mutated {
+        snapshot_generation.record_successful_mutation();
+    }
+    if effects.refresh_now {
+        dispatch_directives(
+            coordinator.input(pane_dash::transport::TransportInput::RefreshNow),
+            coordinator,
+            tmux,
+            session_id,
+            connection_tx,
+            control,
+            pending_connection_generation,
+            active_connection_generation,
+            next_connection_generation,
+            debounce_deadline,
+            snapshot_tx,
+            next_snapshot_seq,
+            snapshot_generation,
+            in_flight_snapshot,
+        );
     }
 }
 
@@ -723,11 +765,11 @@ fn install_panic_cleanup() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectionMessageKind, ConnectionRoute, SnapshotGeneration, SnapshotInFlight,
-        SnapshotSource, bench_first_frame_message, classify_connection_message,
+        ActionEffects, ConnectionMessageKind, ConnectionRoute, SnapshotGeneration,
+        SnapshotInFlight, SnapshotSource, bench_first_frame_message, classify_connection_message,
         classify_snapshot_payload, clear_terminated_connection_state, dispatch_directives,
-        preview_interval, snapshot_interval, spawn_preview_capture, start_preview_capture,
-        sync_transport_degraded,
+        preview_interval, process_action_effects, snapshot_interval, spawn_preview_capture,
+        start_preview_capture, sync_transport_degraded,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pane_dash::app::{Action, AppState, Event, reduce};
@@ -1252,9 +1294,9 @@ mod tests {
     #[test]
     fn ignores_old_snapshot_after_channel_reset_until_current_seq_completes() {
         let mut in_flight = SnapshotInFlight::default();
-        in_flight.spawned(1);
+        in_flight.spawned(1, 0);
         in_flight.reset();
-        in_flight.spawned(2);
+        in_flight.spawned(2, 0);
         assert!(!in_flight.accepts(1));
         assert!(in_flight.accepts(2));
         assert_eq!(in_flight.seq, None);
@@ -1269,6 +1311,73 @@ mod tests {
 
         let fresh_generation = guard.current();
         assert!(guard.accepts(2, fresh_generation));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn successful_send_effects_bump_before_refresh_and_failures_do_nothing() {
+        let dir = TempDir::new().unwrap();
+        let (tmux, _) = fake_snapshot_tmux(&dir);
+        let (mut coordinator, _) = TransportCoordinator::new();
+        coordinator.input(TransportInput::ConnectionFailed);
+        coordinator.input(TransportInput::ConnectionFailed);
+        assert_eq!(coordinator.mode(), TransportMode::Degraded);
+        let (connection_tx, _) = mpsc::unbounded_channel();
+        let (snapshot_tx, mut snapshots) = mpsc::unbounded_channel();
+        let mut control = None;
+        let mut pending_connection_generation = None;
+        let mut active_connection_generation = None;
+        let mut next_connection_generation = 0;
+        let mut debounce_deadline = None;
+        let mut next_snapshot_seq = 1;
+        let mut snapshot_generation = SnapshotGeneration::default();
+        let mut in_flight_snapshot = SnapshotInFlight::default();
+
+        assert!(snapshot_generation.accepts(1, 0));
+        process_action_effects(
+            ActionEffects {
+                mutated: true,
+                refresh_now: true,
+            },
+            &mut coordinator,
+            &tmux,
+            "session",
+            &connection_tx,
+            &mut control,
+            &mut pending_connection_generation,
+            &mut active_connection_generation,
+            &mut next_connection_generation,
+            &mut debounce_deadline,
+            &snapshot_tx,
+            &mut next_snapshot_seq,
+            &mut snapshot_generation,
+            &mut in_flight_snapshot,
+        );
+        let response = snapshots.recv().await.expect("post-send snapshot");
+        assert_eq!(snapshot_generation.current(), 1);
+        assert_eq!(response.mutation_generation, 1);
+        assert_eq!(in_flight_snapshot.mutation_generation, Some(1));
+        assert!(snapshot_generation.accepts(response.seq, response.mutation_generation));
+        assert!(!snapshot_generation.accepts(response.seq + 1, 0));
+
+        let next_snapshot_seq_before = next_snapshot_seq;
+        process_action_effects(
+            ActionEffects::default(),
+            &mut coordinator,
+            &tmux,
+            "session",
+            &connection_tx,
+            &mut control,
+            &mut pending_connection_generation,
+            &mut active_connection_generation,
+            &mut next_connection_generation,
+            &mut debounce_deadline,
+            &snapshot_tx,
+            &mut next_snapshot_seq,
+            &mut snapshot_generation,
+            &mut in_flight_snapshot,
+        );
+        assert_eq!(snapshot_generation.current(), 1);
+        assert_eq!(next_snapshot_seq, next_snapshot_seq_before);
     }
 
     #[test]
@@ -1361,7 +1470,7 @@ mod tests {
         let mut control = Some(());
         let mut active_connection_generation = Some(3);
         let mut in_flight_snapshot = SnapshotInFlight::default();
-        in_flight_snapshot.spawned(4);
+        in_flight_snapshot.spawned(4, 0);
         let old_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         let mut debounce_deadline = Some(old_deadline);
 

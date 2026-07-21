@@ -168,14 +168,56 @@ mod tests {
         let outcome = send_text(
             &TmuxExec::new(&fake),
             &crate::model::PaneId::from("%42"),
-            "spaces 'quotes' ; #[x] \\ newline\nユニコード -leading",
+            "spaces 'quotes' x; kill-server #[x] \\ newline\nユニコード -leading;",
         )
         .await;
 
         assert_eq!(outcome, ActionOutcome::Success);
         assert_eq!(
             fs::read_to_string(log).unwrap(),
-            "<display-message>\n<-p>\n<-t>\n<%42>\n<#{pane_id}>\n<send-keys>\n<-l>\n<-t>\n<%42>\n<-->\n<spaces 'quotes' ; #[x] \\ newline\nユニコード -leading>\n<send-keys>\n<-t>\n<%42>\n<Enter>\n"
+            "<display-message>\n<-p>\n<-t>\n<%42>\n<#{pane_id}>\n<send-keys>\n<-l>\n<-t>\n<%42>\n<-->\n<spaces 'quotes' x; kill-server #[x] \\ newline\nユニコード -leading\\;>\n<send-keys>\n<-t>\n<%42>\n<Enter>\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_literal_send_does_not_invoke_enter_and_nul_stops_after_precheck() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("log");
+        let fake = dir.path().join("fake-tmux");
+        fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '<%s>\\n' \"$@\" >> '{}'\nif [ \"$1\" = display-message ]; then printf '%%42'; else exit 1; fi",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let tmux = TmuxExec::new(&fake);
+
+        assert_eq!(
+            send_text(&tmux, &crate::model::PaneId::from("%42"), "text").await,
+            ActionOutcome::Vanished
+        );
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            "<display-message>\n<-p>\n<-t>\n<%42>\n<#{pane_id}>\n<send-keys>\n<-l>\n<-t>\n<%42>\n<-->\n<text>\n"
+        );
+
+        fs::write(&log, "").unwrap();
+        assert!(matches!(
+            send_text(&tmux, &crate::model::PaneId::from("%42"), "bad\0text").await,
+            ActionOutcome::Failed(_)
+        ));
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "<display-message>\n<-p>\n<-t>\n<%42>\n<#{pane_id}>\n"
         );
     }
 
@@ -224,42 +266,38 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
 
-        struct ScratchServer(String);
+        struct ScratchServer(std::path::PathBuf);
         impl Drop for ScratchServer {
             fn drop(&mut self) {
                 let _ = Command::new("tmux")
-                    .args(["-L", &self.0, "kill-server"])
-                    .status();
+                    .arg("-S")
+                    .arg(&self.0)
+                    .arg("kill-server")
+                    .output();
             }
         }
 
-        let socket = format!("pd_send_{}", std::process::id());
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("socket");
         let _ = Command::new("tmux")
-            .args(["-L", &socket, "kill-server"])
+            .arg("-S")
+            .arg(&socket)
+            .arg("kill-server")
             .output();
         let _server = ScratchServer(socket.clone());
         assert!(
             Command::new("tmux")
-                .args([
-                    "-L",
-                    &socket,
-                    "-f",
-                    "/dev/null",
-                    "new-session",
-                    "-d",
-                    "-s",
-                    "send",
-                    "cat",
-                ])
+                .arg("-S")
+                .arg(&socket)
+                .args(["-f", "/dev/null", "new-session", "-d", "-s", "send", "cat"])
                 .status()
                 .unwrap()
                 .success()
         );
-        let dir = tempfile::tempdir().unwrap();
         let wrapper = dir.path().join("tmux-send");
         std::fs::write(
             &wrapper,
-            format!("#!/bin/sh\nexec tmux -L {socket} \"$@\"\n"),
+            format!("#!/bin/sh\nexec tmux -S '{}' \"$@\"\n", socket.display()),
         )
         .unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -267,15 +305,9 @@ mod tests {
         let pane_id = crate::model::PaneId::from(
             String::from_utf8(
                 Command::new("tmux")
-                    .args([
-                        "-L",
-                        &socket,
-                        "display-message",
-                        "-p",
-                        "-t",
-                        "send:0.0",
-                        "#{pane_id}",
-                    ])
+                    .arg("-S")
+                    .arg(&socket)
+                    .args(["display-message", "-p", "-t", "send:0.0", "#{pane_id}"])
                     .output()
                     .unwrap()
                     .stdout,
@@ -293,7 +325,9 @@ mod tests {
         assert!(String::from_utf8_lossy(&captured).contains(text));
         assert!(
             Command::new("tmux")
-                .args(["-L", &socket, "has-session", "-t", "send"])
+                .arg("-S")
+                .arg(&socket)
+                .args(["has-session", "-t", "send"])
                 .status()
                 .unwrap()
                 .success()
