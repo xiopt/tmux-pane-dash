@@ -2,6 +2,27 @@
 name = "pane-dash"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "control"
+path = "tests/control.rs"
+
+[[test]]
+name = "live_transport"
+path = "tests/live_transport.rs"
+
+[[test]]
+name = "preview"
+path = "tests/preview.rs"
+
+[[test]]
+name = "render"
+path = "tests/render.rs"
+
+[[test]]
+name = "creation_integration"
+path = "tests/creation_integration.rs"
 
 [dependencies]
 ansi-to-tui = "8.0.1"

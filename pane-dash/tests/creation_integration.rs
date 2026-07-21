@@ -1,0 +1,406 @@
+#![cfg(unix)]
+
+//! Real-tmux creation coverage.  This target is intentionally ignored: every
+//! test shares tmux's process-global environment and must run in one serial
+//! invocation (`cargo test --test creation_integration -- --ignored
+//! --test-threads=1`).
+
+use std::{
+    env, fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::{Command, Output},
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+use pane_dash::{
+    creation::{
+        CreateContext, CreateDraft, CreateStage, CreationId, CreationProgress, SplitDirection,
+        build_request, run_creation,
+    },
+    model::{PaneId, SessionId},
+    tmux_exec::TmuxExec,
+};
+use tempfile::TempDir;
+use tokio::sync::{mpsc, oneshot};
+
+static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
+
+struct Harness {
+    dir: TempDir,
+    socket: String,
+    tmux: PathBuf,
+    log: PathBuf,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let dir = TempDir::new().expect("temporary directory");
+        let socket = format!(
+            "pdcreate{}{}",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        );
+        let real_tmux = env::var_os("TMUX_BIN").unwrap_or_else(|| "tmux".into());
+        let log = dir.path().join("argv.log");
+        let tmux = dir.path().join("tmux");
+        fs::write(
+            &tmux,
+            format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\0' \"$@\" >> {log}\nprintf '\\n' >> {log}\ncase \"${{PD_CREATION_FAIL:-}}:$*\" in\n  tag:set-option*) echo 'tag stage rejected' >&2; exit 71 ;;\n  command:send-keys\\ -l*) echo 'command stage rejected' >&2; exit 72 ;;\nesac\nexec {real} -L {socket} \"$@\"\n",
+                log = shell_quote(&log),
+                real = shell_quote(Path::new(&real_tmux)),
+                socket = shell_quote(Path::new(&socket)),
+            ),
+        )
+        .expect("wrapper");
+        fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).expect("wrapper mode");
+
+        let harness = Self {
+            dir,
+            socket,
+            tmux,
+            log,
+        };
+        harness.run([
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-s",
+            "base",
+            "exec cat",
+        ]);
+        harness
+    }
+
+    fn run<const N: usize>(&self, args: [&str; N]) -> Output {
+        Command::new(self.real_tmux())
+            .args(["-L", &self.socket])
+            .args(args)
+            .output()
+            .expect("tmux command")
+    }
+
+    fn text<const N: usize>(&self, args: [&str; N]) -> String {
+        let output = self.run(args);
+        assert!(
+            output.status.success(),
+            "tmux: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("tmux utf8")
+    }
+
+    fn real_tmux(&self) -> PathBuf {
+        env::var_os("TMUX_BIN")
+            .unwrap_or_else(|| "tmux".into())
+            .into()
+    }
+
+    fn pane(&self, target: &str) -> PaneId {
+        PaneId::from(
+            self.text(["display-message", "-p", "-t", target, "#{pane_id}"])
+                .trim(),
+        )
+    }
+
+    fn session(&self, target: &str) -> SessionId {
+        SessionId::from(
+            self.text(["display-message", "-p", "-t", target, "#{session_id}"])
+                .trim(),
+        )
+    }
+
+    fn log_entries(&self) -> Vec<Vec<String>> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .split("\0\n")
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| entry.split('\0').map(str::to_owned).collect())
+            .collect()
+    }
+
+    async fn create(&self, context: CreateContext, draft: CreateDraft) -> Vec<CreationProgress> {
+        let request = build_request(context, &draft).expect("valid creation request");
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (cancel, cancellation) = oneshot::channel();
+        run_creation(
+            TmuxExec::new(&self.tmux),
+            CreationId(1),
+            request,
+            sender,
+            cancellation,
+        )
+        .await;
+        drop(cancel);
+        let mut progress = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            progress.push(event);
+        }
+        progress
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let _ = Command::new(self.real_tmux())
+            .args(["-L", &self.socket, "kill-server"])
+            .status();
+        let _ = &self.dir;
+    }
+}
+
+fn shell_quote(path: &Path) -> String {
+    format!(
+        "'{}'",
+        path.display().to_string().replace('\'', "'\\\"'\\\"'")
+    )
+}
+
+fn draft(name: &str, cwd: &Path, command: &str) -> CreateDraft {
+    CreateDraft {
+        name: name.into(),
+        cwd: cwd.display().to_string(),
+        command: command.into(),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires tmux >= 3.6; serial scratch server"]
+async fn creation_uses_exact_targets_directions_child_cwd_and_one_shot_stages() {
+    let harness = Harness::new();
+    let cwd = harness.dir.path().join("hostile cwd #[ \\ unicode-雪");
+    fs::create_dir(&cwd).expect("hostile cwd");
+    let pane = harness.pane("base:0.0");
+    let session = harness.session("base:0.0");
+
+    for (direction, flags) in [
+        (SplitDirection::Right, vec!["-h"]),
+        (SplitDirection::Left, vec!["-b", "-h"]),
+        (SplitDirection::Bottom, vec!["-v"]),
+        (SplitDirection::Top, vec!["-b", "-v"]),
+    ] {
+        let progress = harness
+            .create(
+                CreateContext::Split {
+                    target: pane.clone(),
+                    initiating_session: session.clone(),
+                    linked_session_count: 1,
+                    direction,
+                },
+                draft("", &cwd, ""),
+            )
+            .await;
+        assert!(matches!(
+            progress.last(),
+            Some(CreationProgress::Finished { .. })
+        ));
+        let create = harness
+            .log_entries()
+            .into_iter()
+            .rev()
+            .find(|argv| argv.first().is_some_and(|arg| arg == "split-window"))
+            .expect("split argv");
+        assert!(
+            flags
+                .iter()
+                .all(|flag| create.iter().any(|arg| arg == flag))
+        );
+        assert!(create.windows(2).any(|pair| pair == ["-t", &pane.0]));
+        assert!(!create.iter().any(|arg| arg == "-c"));
+    }
+
+    let hostile_name = "name space; #{literal} 'quote' 雪 -hash#;";
+    let progress = harness
+        .create(
+            CreateContext::NewWindow {
+                target: session.clone(),
+            },
+            draft(hostile_name, &cwd, ""),
+        )
+        .await;
+    assert!(matches!(
+        progress.last(),
+        Some(CreationProgress::Finished { .. })
+    ));
+    assert!(
+        harness
+            .text(["list-windows", "-t", &session.0, "-F", "#{window_name}"])
+            .contains(hostile_name)
+    );
+
+    let session_name = "session space; #{literal} 'quote' 雪 -leading#;";
+    let progress = harness
+        .create(CreateContext::NewSession, draft(session_name, &cwd, ""))
+        .await;
+    let created = progress
+        .iter()
+        .find_map(|event| match event {
+            CreationProgress::Created { pane_id, .. } => Some(pane_id),
+            _ => None,
+        })
+        .expect("created session pane");
+    assert!(matches!(
+        progress.last(),
+        Some(CreationProgress::Finished { .. })
+    ));
+    assert_eq!(
+        harness
+            .text(["display-message", "-p", "-t", &created.0, "#{session_name}"])
+            .trim(),
+        session_name
+    );
+
+    assert!(
+        harness
+            .log_entries()
+            .iter()
+            .all(|argv| !argv.iter().any(|arg| arg == "-C"))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires tmux >= 3.6; serial scratch server"]
+async fn creation_failure_boundaries_stop_later_stages_and_invalid_cwd_never_spawns() {
+    let harness = Harness::new();
+    let cwd = harness.dir.path();
+    let before = harness.log_entries().len();
+    let duplicate = draft("base", cwd, "echo ignored");
+    let request = build_request(CreateContext::NewSession, &duplicate).expect("request");
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let (_cancel, cancellation) = oneshot::channel();
+    run_creation(
+        TmuxExec::new(&harness.tmux),
+        CreationId(2),
+        request,
+        sender,
+        cancellation,
+    )
+    .await;
+    let events: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+    assert!(
+        matches!(events.last(), Some(CreationProgress::CreateFailed { error, .. }) if error.contains("duplicate session"))
+    );
+    assert_eq!(
+        harness.log_entries()[before..]
+            .iter()
+            .filter(|argv| argv.first().is_some_and(|arg| arg == "send-keys"))
+            .count(),
+        0
+    );
+
+    let invalid = CreateDraft {
+        name: String::new(),
+        cwd: "bad\u{1}cwd".into(),
+        command: String::new(),
+    };
+    assert!(build_request(CreateContext::NewSession, &invalid).is_err());
+    assert_eq!(harness.log_entries().len(), before + 1);
+
+    let old_fail = env::var_os("PD_CREATION_FAIL");
+    unsafe { env::set_var("PD_CREATION_FAIL", "tag") };
+    let tag = harness
+        .create(
+            CreateContext::NewSession,
+            draft("tag-failure", cwd, "echo no"),
+        )
+        .await;
+    unsafe { env::remove_var("PD_CREATION_FAIL") };
+    if let Some(value) = old_fail {
+        unsafe { env::set_var("PD_CREATION_FAIL", value) }
+    }
+    assert!(
+        matches!(tag.last(), Some(CreationProgress::Finished { resolution: pane_dash::creation::CreationResolution::TagFailed(error), .. }) if error.contains("tag stage rejected"))
+    );
+    assert!(!tag.iter().any(|event| matches!(
+        event,
+        CreationProgress::Stage {
+            stage: CreateStage::SendCommand | CreateStage::SendEnter,
+            ..
+        }
+    )));
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires tmux >= 3.6; serial scratch server"]
+async fn creation_commands_are_literal_and_never_replayed_on_failure_or_empty_input() {
+    let harness = Harness::new();
+    let cwd = harness.dir.path();
+    let before = harness.log_entries().len();
+    let empty = harness
+        .create(CreateContext::NewSession, draft("empty-command", cwd, ""))
+        .await;
+    assert!(matches!(
+        empty.last(),
+        Some(CreationProgress::Finished { .. })
+    ));
+    let empty_argv = harness.log_entries();
+    assert!(
+        !empty_argv[before..]
+            .iter()
+            .any(|argv| argv.first().is_some_and(|arg| arg == "send-keys"))
+    );
+
+    let hostile = "echo '#{not-a-format}; \"quoted\" 雪 -leading'; # trailing;";
+    let before = harness.log_entries().len();
+    let literal = harness
+        .create(
+            CreateContext::NewSession,
+            draft("literal-command", cwd, hostile),
+        )
+        .await;
+    assert!(matches!(
+        literal.last(),
+        Some(CreationProgress::Finished { .. })
+    ));
+    let commands = &harness.log_entries()[before..];
+    let sends: Vec<_> = commands
+        .iter()
+        .filter(|argv| argv.first().is_some_and(|arg| arg == "send-keys"))
+        .collect();
+    assert_eq!(
+        sends.len(),
+        2,
+        "one literal send and one Enter, with no replay"
+    );
+    assert_eq!(
+        sends[0].last().map(String::as_str),
+        Some("echo '#{not-a-format}; \"quoted\" 雪 -leading'; # trailing\\;")
+    );
+    assert_eq!(sends[1].last().map(String::as_str), Some("Enter"));
+    assert!(
+        harness.run(["has-session", "-t", "base"]).status.success(),
+        "hostile command affected sentinel session"
+    );
+
+    let old_fail = env::var_os("PD_CREATION_FAIL");
+    unsafe { env::set_var("PD_CREATION_FAIL", "command") };
+    let before = harness.log_entries().len();
+    let failed = harness
+        .create(
+            CreateContext::NewSession,
+            draft("command-failure", cwd, "echo blocked"),
+        )
+        .await;
+    unsafe { env::remove_var("PD_CREATION_FAIL") };
+    if let Some(value) = old_fail {
+        unsafe { env::set_var("PD_CREATION_FAIL", value) }
+    }
+    assert!(
+        matches!(failed.last(), Some(CreationProgress::Finished { resolution: pane_dash::creation::CreationResolution::CommandFailed { stage: CreateStage::SendCommand, error }, .. }) if error.contains("command stage rejected"))
+    );
+    let failed_argv = &harness.log_entries()[before..];
+    assert_eq!(
+        failed_argv
+            .iter()
+            .filter(|argv| argv.first().is_some_and(|arg| arg == "send-keys"))
+            .count(),
+        1
+    );
+    assert!(
+        !failed_argv
+            .iter()
+            .any(|argv| argv.last().is_some_and(|arg| arg == "Enter"))
+    );
+}
