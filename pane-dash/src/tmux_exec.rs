@@ -17,6 +17,10 @@ impl TmuxExec {
         Self { bin: bin.into() }
     }
 
+    pub(crate) fn bin(&self) -> &std::path::Path {
+        &self.bin
+    }
+
     pub async fn snapshot(&self) -> Result<Vec<u8>> {
         self.run(["list-panes", "-a", "-F", SNAPSHOT_FORMAT])
             .await
@@ -84,7 +88,7 @@ impl TmuxExec {
     /// Runs a TOCTOU-sensitive action command without surfacing expected tmux
     /// failures (for example, a pane disappearing between rendering and jump).
     pub async fn run_silent(&self, args: &[String]) -> bool {
-        Command::new(&self.bin)
+        Command::new(self.bin())
             .args(args)
             .output()
             .await
@@ -97,15 +101,15 @@ impl TmuxExec {
     }
 
     async fn run<const N: usize>(&self, args: [&str; N]) -> Result<Vec<u8>> {
-        let output = Command::new(&self.bin)
+        let output = Command::new(self.bin())
             .args(args)
             .output()
             .await
-            .with_context(|| format!("spawn {}", self.bin.display()))?;
+            .with_context(|| format!("spawn {}", self.bin().display()))?;
         if !output.status.success() {
             bail!(
                 "{} exited {}: {}",
-                self.bin.display(),
+                self.bin().display(),
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             );
@@ -114,15 +118,15 @@ impl TmuxExec {
     }
 
     async fn run_dynamic(&self, args: &[String]) -> Result<Vec<u8>> {
-        let output = Command::new(&self.bin)
+        let output = Command::new(self.bin())
             .args(args)
             .output()
             .await
-            .with_context(|| format!("spawn {}", self.bin.display()))?;
+            .with_context(|| format!("spawn {}", self.bin().display()))?;
         if !output.status.success() {
             bail!(
                 "{} exited {}: {}",
-                self.bin.display(),
+                self.bin().display(),
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             );
@@ -135,12 +139,20 @@ impl TmuxExec {
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use std::process::Command;
 
     use crate::model::{Model, ModelConfig};
     use crate::snapshot::parse;
 
     use super::TmuxExec;
+
+    #[test]
+    fn bin_returns_the_configured_executable_path() {
+        let exec = TmuxExec::new("/usr/local/bin/tmux-custom");
+
+        assert_eq!(exec.bin(), Path::new("/usr/local/bin/tmux-custom"));
+    }
 
     struct ScratchServer<'a> {
         socket: &'a str,

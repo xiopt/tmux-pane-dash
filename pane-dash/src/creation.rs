@@ -381,6 +381,17 @@ mod tests {
     }
 
     #[test]
+    fn non_nul_control_in_name_identifies_the_name_field() {
+        assert!(matches!(
+            build_request(CreateContext::NewSession, &draft("bad\x01name", "", "")),
+            Err(CreationError::Field {
+                field: CreationField::Name,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn cwd_is_verbatim_not_an_argv_element_and_never_uses_c_flag() {
         let cwd = " /tmp/#[ space\\;ü ";
         let request = build_request(CreateContext::NewSession, &draft("", cwd, "")).unwrap();
