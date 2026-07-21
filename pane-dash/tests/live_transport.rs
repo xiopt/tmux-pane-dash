@@ -251,6 +251,12 @@ async fn live_transport_freshness_harness() {
     let (terminating, mut termination_events) = connect_control(harness.wrapper(), &live_id)
         .await
         .expect("second control attach failed");
+    assert_eq!(
+        timeout(Duration::from_secs(2), termination_events.recv())
+            .await
+            .expect("initial session event timed out"),
+        Some(ControlEvent::SessionChanged(live_id.clone()))
+    );
     let control_pid = harness.logged_pid();
     harness.kill_pid(control_pid);
     let terminated = timeout(Duration::from_secs(2), termination_events.recv())
@@ -384,14 +390,16 @@ async fn wait_topology(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<ControlEvent>,
     label: &str,
 ) {
-    let event = timeout(Duration::from_millis(750), events.recv())
-        .await
-        .unwrap_or_else(|_| panic!("{label}: timed out waiting for topology notification"))
-        .unwrap_or_else(|| panic!("{label}: control event channel closed"));
-    match event {
-        ControlEvent::TopologyChanged => {}
-        ControlEvent::FocusChanged(_) => {}
-        ControlEvent::Terminated(reason) => panic!("{label}: control terminated: {reason}"),
+    loop {
+        let event = timeout(Duration::from_millis(750), events.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{label}: timed out waiting for topology notification"))
+            .unwrap_or_else(|| panic!("{label}: control event channel closed"));
+        match event {
+            ControlEvent::TopologyChanged | ControlEvent::FocusChanged(_) => return,
+            ControlEvent::SessionChanged(_) => {}
+            ControlEvent::Terminated(reason) => panic!("{label}: control terminated: {reason}"),
+        }
     }
 }
 
@@ -400,7 +408,9 @@ fn drain_events(events: &mut tokio::sync::mpsc::UnboundedReceiver<ControlEvent>)
         assert!(
             matches!(
                 event,
-                ControlEvent::TopologyChanged | ControlEvent::FocusChanged(_)
+                ControlEvent::TopologyChanged
+                    | ControlEvent::FocusChanged(_)
+                    | ControlEvent::SessionChanged(_)
             ),
             "control terminated while draining: {event:?}"
         );

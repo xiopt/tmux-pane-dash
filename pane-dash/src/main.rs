@@ -63,6 +63,7 @@ enum ConnectionMessageKind {
     Failed,
     TopologyChanged,
     FocusChanged,
+    SessionChanged,
     Terminated,
 }
 
@@ -73,6 +74,7 @@ enum ConnectionRoute {
     ConnectionFailed,
     TopologyChanged,
     FocusChanged,
+    SessionChanged,
     ChannelEnded,
 }
 
@@ -94,6 +96,9 @@ fn classify_connection_message(
         }
         ConnectionMessageKind::FocusChanged if active_generation == Some(generation) => {
             ConnectionRoute::FocusChanged
+        }
+        ConnectionMessageKind::SessionChanged if active_generation == Some(generation) => {
+            ConnectionRoute::SessionChanged
         }
         ConnectionMessageKind::Terminated if active_generation == Some(generation) => {
             ConnectionRoute::ChannelEnded
@@ -171,6 +176,21 @@ fn classify_snapshot_payload(
             }
         }
     }
+}
+
+fn snapshot_keeps_launch_session(
+    outcome: &pane_dash::snapshot::ParseOutcome,
+    launch_session_id: &str,
+) -> bool {
+    outcome.dropped > 0
+        || outcome
+            .records
+            .iter()
+            .any(|record| record.session_id == launch_session_id)
+}
+
+fn source_session_changed_requires_quit(launch_session_id: &str, changed_session_id: &str) -> bool {
+    changed_session_id != launch_session_id
 }
 
 #[derive(Default)]
@@ -351,6 +371,9 @@ async fn main() -> Result<()> {
                         ControlEvent::FocusChanged(_) => {
                             (ConnectionMessageKind::FocusChanged, *generation)
                         }
+                        ControlEvent::SessionChanged(_) => {
+                            (ConnectionMessageKind::SessionChanged, *generation)
+                        }
                         ControlEvent::Terminated(_) => (ConnectionMessageKind::Terminated, *generation),
                     },
                 };
@@ -376,6 +399,12 @@ async fn main() -> Result<()> {
                     }
                     (ConnectionRoute::FocusChanged, ConnectionMessage::Event { event: ControlEvent::FocusChanged(focused), .. }) => {
                         let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(focused), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?;
+                        Vec::new()
+                    }
+                    (ConnectionRoute::SessionChanged, ConnectionMessage::Event { event: ControlEvent::SessionChanged(changed_session_id), .. }) => {
+                        if source_session_changed_requires_quit(&session_id, &changed_session_id) {
+                            app.should_quit = true;
+                        }
                         Vec::new()
                     }
                     (ConnectionRoute::ChannelEnded, _) => {
@@ -438,10 +467,19 @@ async fn main() -> Result<()> {
                     &mut next_snapshot_seq, &snapshot_generation,
                     &mut in_flight_snapshot,
                 );
-                if snapshot_generation.accepts(response.seq, response.mutation_generation)
-                    && apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?.mutated
-                {
-                    snapshot_generation.record_successful_mutation();
+                if snapshot_generation.accepts(response.seq, response.mutation_generation) {
+                    let source_session_alive = match &event {
+                        Event::Snapshot { outcome, .. } => {
+                            control.is_some() || snapshot_keeps_launch_session(outcome, &session_id)
+                        }
+                        Event::SnapshotFailed(_) => true,
+                        _ => unreachable!("snapshot responses only produce snapshot events"),
+                    };
+                    if !source_session_alive {
+                        app.should_quit = true;
+                    } else if apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx).await?.mutated {
+                        snapshot_generation.record_successful_mutation();
+                    }
                 }
             },
             response = preview_responses.recv() => if let Some(response) = response {
@@ -802,8 +840,9 @@ mod tests {
         ActionEffects, ConnectionMessageKind, ConnectionRoute, SnapshotGeneration,
         SnapshotInFlight, SnapshotSource, bench_first_frame_message, classify_connection_message,
         classify_snapshot_payload, clear_terminated_connection_state, dispatch_directives,
-        preview_interval, process_action_effects, snapshot_interval, spawn_preview_capture,
-        start_preview_capture, sync_transport_degraded,
+        preview_interval, process_action_effects, snapshot_interval, snapshot_keeps_launch_session,
+        source_session_changed_requires_quit, spawn_preview_capture, start_preview_capture,
+        sync_transport_degraded,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pane_dash::app::{Action, AppState, Event, reduce};
@@ -1437,6 +1476,7 @@ mod tests {
             ConnectionMessageKind::Failed,
             ConnectionMessageKind::TopologyChanged,
             ConnectionMessageKind::FocusChanged,
+            ConnectionMessageKind::SessionChanged,
             ConnectionMessageKind::Terminated,
         ] {
             assert_eq!(
@@ -1461,9 +1501,35 @@ mod tests {
             ConnectionRoute::FocusChanged
         );
         assert_eq!(
+            classify_connection_message(ConnectionMessageKind::SessionChanged, 3, pending, active),
+            ConnectionRoute::SessionChanged
+        );
+        assert_eq!(
             classify_connection_message(ConnectionMessageKind::Terminated, 3, pending, active),
             ConnectionRoute::ChannelEnded
         );
+    }
+
+    #[test]
+    fn accepted_clean_snapshots_require_the_launch_session_but_tolerate_drops() {
+        let matching = parse(&valid_record());
+        assert!(snapshot_keeps_launch_session(&matching, "$1"));
+        assert!(!snapshot_keeps_launch_session(&matching, "$9"));
+
+        let mut renamed_bytes = valid_record();
+        renamed_bytes.splice(4..11, b"renamed".iter().copied());
+        let renamed = parse(&renamed_bytes);
+        assert!(snapshot_keeps_launch_session(&renamed, "$1"));
+
+        let dropped = parse(b"\x1ebad\n");
+        assert!(dropped.dropped > 0);
+        assert!(snapshot_keeps_launch_session(&dropped, "$9"));
+    }
+
+    #[test]
+    fn current_session_changed_only_quits_when_the_launch_id_changes() {
+        assert!(!source_session_changed_requires_quit("$7", "$7"));
+        assert!(source_session_changed_requires_quit("$7", "$8"));
     }
 
     #[test]

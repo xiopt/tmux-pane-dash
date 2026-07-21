@@ -220,6 +220,30 @@ mod actor_tests {
     }
 
     #[tokio::test]
+    async fn forwards_initial_and_live_session_changed_events_without_stopping_actor() {
+        let dir = TempDir::new().unwrap();
+        let fake = fake_tmux(
+            &dir,
+            "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1' '%session-changed $7 initial' '%session-changed $8 live'\nwhile IFS= read -r _; do printf '%s\\n' '%begin 2 2 1' '%end 2 2 1'; done",
+        );
+        let (handle, mut events) = connect_control(fake, "$7").await.unwrap();
+
+        assert_eq!(
+            timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(ControlEvent::SessionChanged("$7".into()))
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(ControlEvent::SessionChanged("$8".into()))
+        );
+        assert_eq!(handle.snapshot().await.unwrap(), b"");
+    }
+
+    #[tokio::test]
     async fn exit_emits_one_termination_and_fails_the_active_request() {
         let dir = TempDir::new().unwrap();
         let fake = fake_tmux(
@@ -724,6 +748,12 @@ mod actor_tests {
         .unwrap();
 
         let (handle, mut events) = connect_control(tmux_bin, &first_id).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(ControlEvent::SessionChanged(first_id.clone()))
+        );
         let snapshot = handle.snapshot().await.unwrap();
         assert!(snapshot.starts_with(b"\x1e"));
         assert!(!pane_dash::snapshot::parse(&snapshot).records.is_empty());
@@ -871,11 +901,46 @@ fn consumes_each_normative_topology_token_with_arguments() {
 }
 
 #[test]
+fn parses_only_valid_outside_session_changed_notifications() {
+    let mut parser = ProtocolParser::default();
+    assert_eq!(
+        parser.push_line(b"%session-changed $42 renamed session\n"),
+        vec![ProtocolEvent::SessionChanged("$42".into())]
+    );
+    for line in [
+        b"%session-changed 42 missing-dollar\n".as_slice(),
+        b"%session-changed $ malformed-id\n",
+        b"%session-changed $4x malformed-id\n",
+        b"%session-changed $42\n",
+    ] {
+        assert!(parser.push_line(line).is_empty());
+    }
+}
+
+#[test]
+fn preserves_session_changed_inside_response_data() {
+    let mut parser = ProtocolParser::default();
+    parser.push_line(b"%begin 5 6 1\n");
+    assert!(
+        parser
+            .push_line(b"%session-changed $42 response-data\n")
+            .is_empty()
+    );
+    assert_eq!(
+        parser.push_line(b"%end 5 6 1\n"),
+        vec![response(
+            guard(5, 6),
+            true,
+            b"%session-changed $42 response-data\n"
+        )]
+    );
+}
+
+#[test]
 fn ignores_unconsumed_unknown_and_stray_guard_lines() {
     let mut parser = ProtocolParser::default();
     for line in [
         b"%client-detached /dev/ttys001\n".as_slice(),
-        b"%session-changed $0 base\n",
         b"%pane-mode-changed %1\n",
         b"%unknown value\n",
         b"%end 1 2 3\n",

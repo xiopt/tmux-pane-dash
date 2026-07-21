@@ -6,6 +6,7 @@ pub const CONTROL_SNAPSHOT_COMMAND: &str = "list-panes -a -F \"\\036#{session_id
 pub enum ControlEvent {
     TopologyChanged,
     FocusChanged(bool),
+    SessionChanged(String),
     Terminated(String),
 }
 
@@ -85,15 +86,21 @@ pub async fn connect_control(
         .ok_or_else(|| anyhow!("tmux stdout was not piped"))?;
     let mut stdout = BufReader::new(stdout);
 
-    if let Err(error) = consume_attach_handshake(&mut stdout).await {
-        drop(stdin);
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-        return Err(error);
-    }
+    let initial_events = match consume_attach_handshake(&mut stdout).await {
+        Ok(events) => events,
+        Err(error) => {
+            drop(stdin);
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(error);
+        }
+    };
 
     let (requests, request_rx) = mpsc::channel(32);
     let (events, event_rx) = mpsc::unbounded_channel();
+    for event in initial_events {
+        let _ = events.send(event);
+    }
     tokio::spawn(control_actor(child, stdin, stdout, request_rx, events));
     Ok((ControlHandle { requests }, event_rx))
 }
@@ -161,9 +168,10 @@ impl Request {
 
 async fn consume_attach_handshake<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
-) -> Result<()> {
+) -> Result<Vec<ControlEvent>> {
     let mut parser = ProtocolParser::default();
     let mut line = Vec::new();
+    let mut events = Vec::new();
     loop {
         line.clear();
         if reader.read_until(b'\n', &mut line).await? == 0 {
@@ -174,11 +182,14 @@ async fn consume_attach_handshake<R: tokio::io::AsyncBufRead + Unpin>(
         }
         for event in parser.push_line(&line) {
             match event {
-                ProtocolEvent::Response { ok: true, .. } => return Ok(()),
+                ProtocolEvent::Response { ok: true, .. } => return Ok(events),
                 ProtocolEvent::Response { ok: false, .. } => bail!("tmux control attach failed"),
                 ProtocolEvent::MalformedResponse => bail!("malformed tmux control attach response"),
                 ProtocolEvent::Exit => bail!("tmux control exited during attach"),
                 ProtocolEvent::TopologyChanged | ProtocolEvent::FocusChanged(_) => {}
+                ProtocolEvent::SessionChanged(session_id) => {
+                    events.push(ControlEvent::SessionChanged(session_id));
+                }
             }
         }
     }
@@ -229,6 +240,7 @@ async fn control_actor(
                             }
                             ProtocolEvent::TopologyChanged => { let _ = events.send(ControlEvent::TopologyChanged); }
                             ProtocolEvent::FocusChanged(focused) => { let _ = events.send(ControlEvent::FocusChanged(focused)); }
+                            ProtocolEvent::SessionChanged(session_id) => { let _ = events.send(ControlEvent::SessionChanged(session_id)); }
                             ProtocolEvent::Exit => {
                                 terminated = Some("tmux control exited".into());
                                 break;
@@ -304,6 +316,7 @@ pub enum ProtocolEvent {
     },
     TopologyChanged,
     FocusChanged(bool),
+    SessionChanged(String),
     Exit,
     MalformedResponse,
 }
@@ -348,6 +361,9 @@ impl ProtocolParser {
             _ if topology_token(line) => vec![ProtocolEvent::TopologyChanged],
             _ if let Some(focused) = focus_subscription_changed(line) => {
                 vec![ProtocolEvent::FocusChanged(focused)]
+            }
+            _ if let Some(session_id) = session_changed(line) => {
+                vec![ProtocolEvent::SessionChanged(session_id)]
             }
             _ if first_token(line) == Some(b"%exit") => vec![ProtocolEvent::Exit],
             _ => Vec::new(),
@@ -444,6 +460,19 @@ fn focus_subscription_changed(line: &[u8]) -> Option<bool> {
         }
         _ => None,
     }
+}
+
+fn session_changed(line: &[u8]) -> Option<String> {
+    let mut fields = line_without_lf(line)
+        .split(|byte| byte.is_ascii_whitespace())
+        .filter(|field| !field.is_empty());
+    (fields.next()? == b"%session-changed").then_some(())?;
+    let session_id = fields.next()?;
+    fields.next()?;
+    (session_id.starts_with(b"$")
+        && session_id.len() > 1
+        && session_id[1..].iter().all(u8::is_ascii_digit))
+    .then(|| String::from_utf8_lossy(session_id).into_owned())
 }
 
 fn first_token(line: &[u8]) -> Option<&[u8]> {
