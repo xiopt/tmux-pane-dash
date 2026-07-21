@@ -10,9 +10,12 @@ use pane_dash::model::{Model, ModelConfig, PaneId};
 use pane_dash::options::DashConfig;
 use pane_dash::preview::PreviewFrame;
 use pane_dash::snapshot::RawRecord;
-use pane_dash::ui::{dashboard_areas, format_age, preview_inner_height, render, truncate_to_width};
+use pane_dash::ui::{
+    dashboard_areas, format_age, palette, preview_inner_height, render, truncate_to_width,
+};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -69,6 +72,13 @@ fn draw_at(app: &AppState, width: u16, height: u16, now: u64) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn draw_buffer(app: &AppState, width: u16, height: u16, now: u64) -> Buffer {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, app, now)).unwrap();
+    terminal.backend().buffer().clone()
 }
 
 #[test]
@@ -812,6 +822,98 @@ fn truncation_respects_display_width_for_wide_characters() {
 }
 
 #[test]
+fn truncation_preserves_complete_graphemes() {
+    assert_eq!(truncate_to_width("a👩🏽‍💻b", 3), "a👩🏽‍💻");
+    assert_eq!(truncate_to_width("e\u{301}x", 1), "e\u{301}");
+    assert_eq!(truncate_to_width("👨‍👩‍👧‍👦x", 2), "👨‍👩‍👧‍👦");
+}
+
+#[test]
+fn creation_viewports_and_styles_keep_interaction_visible() {
+    let choices = [
+        ("split right", CreateChoiceKind::Right),
+        ("split left", CreateChoiceKind::Left),
+        ("split bottom", CreateChoiceKind::Bottom),
+        ("split top", CreateChoiceKind::Top),
+        ("new window", CreateChoiceKind::NewWindow),
+        ("new session", CreateChoiceKind::NewSession),
+    ]
+    .into_iter()
+    .map(|(label, kind)| CreateChoice {
+        label,
+        kind,
+        context: CreateContext::NewSession,
+        cwd: String::new(),
+    })
+    .collect();
+    let mut choice = app(Vec::new());
+    choice.modal = Some(Modal::Create(CreateModal::Choice {
+        choices,
+        selected: 5,
+    }));
+    let choice_text = draw(&choice, 20, 6);
+    assert!(choice_text.contains("new session"));
+    let choice_buffer = draw_buffer(&choice, 20, 6, NOW);
+    let selected = choice_buffer
+        .content()
+        .iter()
+        .find(|cell| cell.symbol() == "n" && cell.style().fg == Some(palette::ACCENT))
+        .unwrap()
+        .style();
+    assert!(selected.add_modifier.contains(Modifier::REVERSED));
+
+    for field in [CreateField::Name, CreateField::Cwd, CreateField::Command] {
+        let mut form = app(Vec::new());
+        form.modal = Some(Modal::Create(CreateModal::Form(CreateForm {
+            kind: CreateContext::NewSession,
+            field,
+            draft: CreateDraft {
+                name: format!("name-{field:?}-edited-suffix"),
+                cwd: format!("cwd-{field:?}-edited-suffix"),
+                command: format!("command-{field:?}-\u{85}-edited-suffix"),
+            },
+            submitting: false,
+            error: None,
+            linked_session_count: 0,
+        })));
+        let rendered = draw(&form, 20, 4);
+        let label = match field {
+            CreateField::Name => "name:",
+            CreateField::Cwd => "cwd:",
+            CreateField::Command => "command:",
+        };
+        assert!(rendered.contains(label));
+        assert!(rendered.contains("suffix"));
+        assert!(!rendered.contains('\u{85}'));
+        let active = draw_buffer(&form, 20, 4, NOW)
+            .content()
+            .iter()
+            .find(|cell| cell.style().fg == Some(palette::ACCENT))
+            .unwrap()
+            .style();
+        assert!(active.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    let mut pending = app(Vec::new());
+    pending.pending_creation = Some(PendingCreation {
+        id: CreationId(1),
+        initiating_session: None,
+        state: PendingCreationState::Sending {
+            pane_id: "%1".into(),
+        },
+    });
+    assert_eq!(
+        draw_buffer(&pending, 40, 8, NOW).content()[0].style().fg,
+        Some(palette::WORKING)
+    );
+    pending.pending_creation.as_mut().unwrap().state = PendingCreationState::Error("bad".into());
+    assert_eq!(
+        draw_buffer(&pending, 40, 8, NOW).content()[0].style().fg,
+        Some(palette::ERROR)
+    );
+}
+
+#[test]
 fn creation_choice_form_and_pending_overlay_render_safely() {
     let mut state = app(vec![record("dash", "%1", "working", "Task")]);
     state.modal = Some(Modal::Create(CreateModal::Choice {
@@ -911,7 +1013,7 @@ fn creation_header_empty_and_flat_pending_contexts_render() {
     let mut empty = app(Vec::new());
     empty.modal = Some(Modal::Create(CreateModal::Form(CreateForm {
         kind: CreateContext::NewSession,
-        field: CreateField::Name,
+        field: CreateField::Command,
         draft: CreateDraft {
             name: "new-session".into(),
             cwd: String::new(),
@@ -940,7 +1042,7 @@ fn creation_form_overflow_scrolls_rows_vertically() {
     let mut state = app(Vec::new());
     state.modal = Some(Modal::Create(CreateModal::Form(CreateForm {
         kind: CreateContext::NewSession,
-        field: CreateField::Name,
+        field: CreateField::Command,
         draft: CreateDraft {
             name: "session".into(),
             cwd: "/tmp".into(),
@@ -1031,7 +1133,7 @@ fn creation_pending_stages_and_modal_sizes_are_deterministic() {
     })));
     insta::assert_snapshot!("creation_form_wide", draw(&state, 160, 50));
     let narrow = draw(&state, 20, 4);
-    assert!(narrow.contains("command:"));
+    assert!(narrow.contains("name:"));
     insta::assert_snapshot!("creation_form_narrow", narrow);
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { draw(&state, 0, 0) })).is_ok()

@@ -3,6 +3,6 @@ source: tests/render.rs
 expression: narrow
 ---
 ┌Create session────┐
-│command: echo 東 京 │
+│name: 東 京 é␛東 京 é␛│
 │Tab/↑↓ field | Ent│
 └──────────────────┘

@@ -3,6 +3,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
@@ -251,10 +252,19 @@ fn render_create_choice(
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    let choice_slots = if inner.height > 1 {
+        inner.height.saturating_sub(1) as usize
+    } else {
+        1
+    };
+    let start = selected
+        .saturating_sub(choice_slots.saturating_sub(1))
+        .min(choices.len().saturating_sub(choice_slots));
     let mut lines = choices
         .iter()
         .enumerate()
-        .take(inner.height.saturating_sub(1) as usize)
+        .skip(start)
+        .take(choice_slots)
         .map(|(index, choice)| {
             Line::from(Span::styled(
                 truncate_to_width(choice.label, usize::from(inner.width)),
@@ -300,13 +310,26 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
         (CreateField::Cwd, "cwd", &form.draft.cwd),
         (CreateField::Command, "command", &form.draft.command),
     ]);
-    let mut lines = fields
+    let active_index = fields
+        .iter()
+        .position(|(field, _, _)| *field == form.field)
+        .unwrap_or(0);
+    let field_lines = fields
         .into_iter()
         .map(|(field, label, value)| {
-            let text = truncate_to_width(
-                &format!("{label}: {}", literal_input(value)),
-                usize::from(inner.width),
-            );
+            let prefix = format!("{label}: ");
+            let value = literal_input(value);
+            let text = if field == form.field && !form.submitting {
+                format!(
+                    "{prefix}{}",
+                    truncate_tail_to_width(
+                        &value,
+                        usize::from(inner.width).saturating_sub(prefix.width()),
+                    )
+                )
+            } else {
+                truncate_to_width(&format!("{prefix}{value}"), usize::from(inner.width))
+            };
             let active = field == form.field && !form.submitting;
             Line::styled(
                 text,
@@ -324,6 +347,7 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
             )
         })
         .collect::<Vec<_>>();
+    let mut lines = field_lines.clone();
     if form.linked_session_count > 1 {
         lines.push(Line::styled(
             truncate_to_width(
@@ -345,7 +369,7 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
             Style::default().fg(palette::ERROR),
         ));
     }
-    lines.push(Line::styled(
+    let footer = Line::styled(
         truncate_to_width(
             if form.submitting {
                 "submitting... (locked)"
@@ -355,9 +379,21 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
             usize::from(inner.width),
         ),
         Style::default().fg(palette::DIM),
-    ));
-    let scroll = lines.len().saturating_sub(inner.height as usize) as u16;
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+    );
+    lines.push(footer.clone());
+    let visible = if lines.len() <= inner.height as usize {
+        lines
+    } else if form.submitting {
+        let start = lines.len().saturating_sub(inner.height as usize);
+        lines.into_iter().skip(start).collect()
+    } else {
+        let mut visible = vec![field_lines[active_index].clone()];
+        if inner.height > 1 {
+            visible.push(footer);
+        }
+        visible
+    };
+    frame.render_widget(Paragraph::new(visible), inner);
 }
 
 fn pending_line(pending: &crate::app::PendingCreation, now: u64, width: u16) -> Line<'static> {
@@ -400,14 +436,16 @@ fn pending_line(pending: &crate::app::PendingCreation, now: u64, width: u16) -> 
 fn literal_input(text: &str) -> String {
     const MAX_SCALARS: usize = 512;
 
-    text.chars()
-        .take(MAX_SCALARS)
-        .map(|character| match character {
-            '\0'..='\u{1f}' => char::from_u32(0x2400 + character as u32).unwrap(),
-            '\u{7f}' => '␡',
-            _ => character,
-        })
-        .collect()
+    let mut literal = String::new();
+    for character in text.chars().take(MAX_SCALARS) {
+        match character {
+            '\0'..='\u{1f}' => literal.push(char::from_u32(0x2400 + character as u32).unwrap()),
+            '\u{7f}' => literal.push('␡'),
+            '\u{80}'..='\u{9f}' => literal.push_str(&format!("\\u{{{:x}}}", character as u32)),
+            _ => literal.push(character),
+        }
+    }
+    literal
 }
 
 fn render_preview(frame: &mut Frame, app: &AppState, areas: DashboardAreas) {
@@ -802,15 +840,29 @@ fn status_color(status: Status) -> Color {
 pub fn truncate_to_width(value: &str, max_width: usize) -> String {
     let mut result = String::new();
     let mut width = 0;
-    for character in value.chars() {
-        let character_width = character.width().unwrap_or(0);
-        if width + character_width > max_width {
+    for grapheme in value.graphemes(true) {
+        let grapheme_width = grapheme.width();
+        if width + grapheme_width > max_width {
             break;
         }
-        result.push(character);
-        width += character_width;
+        result.push_str(grapheme);
+        width += grapheme_width;
     }
     result
+}
+
+fn truncate_tail_to_width(value: &str, max_width: usize) -> String {
+    let mut result = Vec::new();
+    let mut width = 0;
+    for grapheme in value.graphemes(true).rev() {
+        let grapheme_width = grapheme.width();
+        if width + grapheme_width > max_width {
+            break;
+        }
+        result.push(grapheme);
+        width += grapheme_width;
+    }
+    result.into_iter().rev().collect()
 }
 
 fn path_basename(path: &str) -> String {

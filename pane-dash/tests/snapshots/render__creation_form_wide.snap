@@ -23,7 +23,7 @@ expression: "draw(&state, 160, 50)"
                                                                         │
                                                                         │
                                              ┌Create session──────────────────────────────────────────────────────┐
-                                             │name: 東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 │
+                                             │name: é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛東 京 é␛│
                                              │cwd: /tmp                                                           │
                                              │command: echo 東 京                                                   │
                          no opencode panes fo│Tab/↑↓ field | Enter submit | Esc cancel                            │
