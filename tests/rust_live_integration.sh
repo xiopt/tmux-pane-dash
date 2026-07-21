@@ -61,7 +61,9 @@ open_popup() { send_bytes "$1" '\002'; send_bytes "$1" D; wait_for "popup $1 con
 replacement() { [[ "$(first_control)" != "$1" && $(control_count) -eq 1 ]]; }
 only_control() { [[ "$(first_control)" == "$1" && $(control_count) -eq 1 ]]; }
 target_gone() { ! admin list-panes -a -F '#{pane_id}' | grep -Fxq "$1"; }
+target_present() { admin list-panes -a -F '#{pane_id}' | grep -Fxq "$1"; }
 runtime_count() { local start="$1" end="$2"; local total=0 command; for command in capture-pane list-panes show-options -C; do total=$((total + $(record_count "$start" "$end" "$command"))); done; printf '%s\n' "$total"; }
+pane_contains() { admin capture-pane -p -t "$1" | grep -aFq "$2"; }
 
 main() {
   [[ -x "$BIN" ]] || die "missing $BIN; run make build"
@@ -72,7 +74,7 @@ main() {
   admin new-session -d -s other -x 120 -y 40 'exec cat'
   local pane target startup first second t before after
   pane="$(admin display-message -p -t live:0.0 '#{pane_id}')"; target="$(admin split-window -d -P -F '#{pane_id}' -t live:0 'exec cat')"
-  admin set-option -g @pane-dash-engine rust; admin set-option -g @pane-dash-width 100%; admin set-option -g @pane-dash-height 100%; admin set-option -g focus-events on; admin set-option -p -t "$pane" @pane_dash_tag live-test
+  admin set-option -g @pane-dash-engine rust; admin set-option -g @pane-dash-width 100%; admin set-option -g @pane-dash-height 100%; admin set-option -g focus-events on; admin set-option -as terminal-features ',xterm*:focus'; admin set-option -p -t "$pane" @pane_dash_tag live-test; admin set-option -p -t "$target" @pane_dash_tag live-spare
   admin set-environment -g PATH "$WRAP:$PATH"; admin set-environment -g PD_REAL_TMUX "$REAL_TMUX"; admin set-environment -g PD_SOCKET "$SOCKET"; admin set-environment -g PD_LOG "$LOG"; admin set-environment -g PD_REJECT "$REJECT"
   # Install pane_dash.tmux through the wrapper; do not directly run pane-dash.
   PATH="$WRAP:$PATH" PD_REAL_TMUX="$REAL_TMUX" PD_SOCKET="$SOCKET" PD_LOG="$LOG" PD_REJECT="$REJECT" TMUX='' "$ROOT/pane_dash.tmux"
@@ -102,10 +104,25 @@ main() {
   admin run-shell "kill -TERM $first"; wait_for 'single replacement control' 3 replacement "$first"; second="$(first_control)"; t="$(now)"; : > "$REJECT"; admin run-shell "kill -TERM $second"
   wait_for 'degraded banner' 3 ansi_has 'live updates lost — polling'; wait_for 'degraded list-panes' 2 has_list_since "$t"; wait_for 'no persistent control after rejected reconnect' 2 control_is_zero
   budget 'degraded follow' 10 5; send_bytes 0 '\025'; budget 'degraded inspect' 0 5
-  t="$(now)"; admin set-option -p -t "$pane" @pane_dash_status idle; wait_for 'pane status <=1.1s' 1.1 ansi_has idle; (( $(record_count "$t" "$(now)" show-options)==0 )) || die 'status write consumed notification'
-  # Popup action cases: kill confirmation and hostile literal send use actual key input.
-  send_bytes 0 x; send_bytes 0 y; wait_for 'confirmed kill' 2 target_gone "$target"
-  local sentinel="$TMP/sentinel" hostile="; touch $TMP/sentinel #"; send_bytes 0 '\023'; send_bytes 0 "$hostile"; send_bytes 0 '\r'; [[ ! -e "$sentinel" ]] || die 'hostile send sentinel'
+  # Status publishers write a coherent triple. A bare status is deliberately
+  # stale, so it must not be used as evidence for degraded polling.
+  local epoch status_offset
+  epoch="$(date +%s)"; t="$(now)"; status_offset="$(ansi_size)"
+  admin set-option -p -t "$pane" @pane_dash_status idle
+  admin set-option -p -t "$pane" @pane_dash_status_since "$epoch"
+  admin set-option -p -t "$pane" @pane_dash_heartbeat "$epoch"
+  sleep .1
+  (( $(record_count "$t" "$(now)" list-panes)==0 )) || die 'status write unexpectedly consumed a notification'
+  wait_for 'status fallback list-panes <=1.1s' 1.1 has_list_since "$t"
+  ansi_tail_has "$((status_offset+1))" idle || die 'new status snapshot did not render idle'
+  (( $(record_count "$t" "$(now)" show-options)==0 )) || die 'status polling used show-options'
+  # The selected visible cat pane receives literal hostile text before it is
+  # killed. $target remains alive to keep the attached session/popup valid.
+  local sentinel="$TMP/sentinel" hostile="; touch $TMP/sentinel #"
+  send_bytes 0 '\023'; send_bytes 0 "$hostile"; send_bytes 0 '\r'
+  wait_for 'literal hostile send reaches selected cat pane' 2 pane_contains "$pane" "$hostile"
+  [[ ! -e "$sentinel" ]] || die 'hostile send sentinel'
+  send_bytes 0 x; send_bytes 0 y; wait_for 'confirmed selected-pane kill' 2 target_gone "$pane"; target_present "$target" || die 'spare pane did not survive selected kill'
   # Dedicated attached-session destruction cases remain bounded for both options.
   for mode in off on; do admin new-session -d -s "destroy-$mode" 'exec cat'; admin set-option -t "destroy-$mode" detach-on-destroy "$mode"; admin kill-session -t "destroy-$mode"; wait_for "destroy $mode" 2 session_gone "destroy-$mode"; done
   t="$(now)"; send_bytes 0 q; sleep .2; (( $(runtime_count "$t" "$(now)")==0 )) || die 'closed popup runtime work'
