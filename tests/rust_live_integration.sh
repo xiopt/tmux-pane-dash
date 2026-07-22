@@ -8,7 +8,7 @@ source "$ROOT/spike/lib.sh"
 REAL_TMUX="$(command -v "$TMUX_BIN")"
 BIN="$ROOT/bin/pane-dash"
 TMP='' SOCKET='' WRAP='' LOG='' OWNER_LOG='' REJECT='' TASK9_MARKER='' TASK9_DEGRADED_INDEX='' TASK9_HOOK_INDEX=''
-PHASE6_XDG_WAS_SET=0 PHASE6_XDG_VALUE=''
+PHASE6_XDG_WAS_SET=0 PHASE6_XDG_VALUE='' PHASE6_RGB_SET=0 PHASE6_TERMINAL_FEATURES_BEFORE=''
 CREATION_GATE='' CREATION_TOKEN='' CREATION_FAIL_STAGE='' CREATION_GONE='' CREATION_NEW_COMMAND='' CREATION_POPUP_WORK_OFFSET=0 FAILED=0
 declare -a CLIENT_PIDS=() CLIENT_TTYS=() PRODUCER_PIDS=() WRITER_FDS=()
 declare -a TRANSCRIPTS=() SESSIONS=() LABELS=() POPUP_CONTROLS=() POPUP_PIDS=()
@@ -25,6 +25,7 @@ cleanup() {
   local fd pid token wrapper gate records_valid
   task9_clear_causal_evidence
   phase6_restore_xdg || true
+  phase6_restore_rgb || true
   if [[ -n "$TASK9_MARKER" ]]; then rm -f "$TASK9_MARKER"; TASK9_MARKER=''; fi
   if [[ -n "$REJECT" ]]; then rm -f "$REJECT"; REJECT=''; fi
   for gate in "${CREATION_GATES[@]:-}"; do
@@ -335,6 +336,25 @@ phase6_restore_xdg() {
   PHASE6_XDG_WAS_SET=0
   PHASE6_XDG_VALUE=''
 }
+phase6_enable_rgb() {
+  PHASE6_TERMINAL_FEATURES_BEFORE="$(admin show-options -sv terminal-features)"
+  if [[ -n "$(admin show-options -sqv 'terminal-features[31338]')" ]]; then
+    die 'phase6 RGB isolation index terminal-features[31338] was already set'
+  fi
+  admin set-option -s 'terminal-features[31338]' '*:RGB'
+  PHASE6_RGB_SET=1
+  [[ "$(admin show-options -sqv 'terminal-features[31338]')" == '*:RGB' ]] || die 'phase6 RGB isolation index was not set'
+}
+phase6_restore_rgb() {
+  [[ -n "$SOCKET" && "$PHASE6_RGB_SET" != 0 ]] || return 0
+  admin set-option -su 'terminal-features[31338]'
+  if [[ -n "$(admin show-options -sqv 'terminal-features[31338]')" ]]; then
+    die 'phase6 RGB isolation index survived cleanup'
+  fi
+  [[ "$(admin show-options -sv terminal-features)" == "$PHASE6_TERMINAL_FEATURES_BEFORE" ]] || die 'phase6 RGB cleanup did not restore terminal-features'
+  PHASE6_RGB_SET=0
+  PHASE6_TERMINAL_FEATURES_BEFORE=''
+}
 phase6_theme_help_isolation() {
   local home_a="$TMP/phase6-xdg-a" home_b="$TMP/phase6-xdg-b" prior_xdg a_offset b_offset help_offset action_start b_start close_help_offset a_popup b_popup closed b_source reopened_offset quiescence_start quiescence_end owner_start a_control b_control
   mkdir -p "$home_a/tmux-pane-dash" "$home_b/tmux-pane-dash"
@@ -350,7 +370,7 @@ phase6_theme_help_isolation() {
   # RGB capability is relevant only to the semantic RGB scenario below. Keeping
   # it out of the prior harness phases prevents its terminal-diff timing from
   # perturbing their independent assertions.
-  admin set-option -sa terminal-features '*:RGB'
+  phase6_enable_rgb
   admin set-environment -g XDG_CONFIG_HOME "$home_a"
   owner_start="$(now)"
   a_offset="$(ansi_size 0)"
@@ -427,6 +447,7 @@ phase6_theme_help_isolation() {
   assert_phase6_owner_stopped 'phase6 popup B' "$b_popup" "$b_control" "$owner_start" "$closed"
   (( $(control_count) == 0 )) || die 'phase6 popup close left a control client'
   phase6_restore_xdg
+  phase6_restore_rgb
   printf 'phase6 themes A=%s B=%s controls=2->0 help=local read-only-classes=attributed post-close-runtime=0\n' "$a_popup" "$b_popup"
 }
 target_gone() { ! admin list-panes -a -F '#{pane_id}' | grep -Fxq "$1"; }
@@ -1087,15 +1108,18 @@ main() {
   wait_for 'literal hostile send reaches selected cat pane' 2 pane_contains "$pane" "$hostile"
   [[ ! -e "$sentinel" ]] || die 'hostile send sentinel'
   send_bytes 0 x; send_bytes 0 y; wait_for 'confirmed selected-pane kill' 2 target_gone "$pane"; target_present "$target" || die 'spare pane did not survive selected kill'
-   send_bytes 0 q; wait_for 'healthy popup pane-dash exit' 2 popup_closed 0; t="$(now)"; ! control_present "${POPUP_CONTROLS[0]}" || die 'healthy popup control survived pane-dash exit'; sleep .2; (( $(runtime_count "$t" "$(now)")==0 )) || die 'closed popup runtime work'
-   rm -f "$REJECT"
-   unrelated_session_changes_keep_popup_open
-   destroy_popup_detach_off
-    destroy_popup_detach_on
-    destroy_popup_while_degraded
-    task9_scenarios
-     phase6_theme_help_isolation
-     creation_scenarios
+  send_bytes 0 q; wait_for 'healthy popup pane-dash exit' 2 popup_closed 0; t="$(now)"; ! control_present "${POPUP_CONTROLS[0]}" || die 'healthy popup control survived pane-dash exit'; sleep .2; (( $(runtime_count "$t" "$(now)")==0 )) || die 'closed popup runtime work'
+  rm -f "$REJECT"
+  unrelated_session_changes_keep_popup_open
+  destroy_popup_detach_off
+  destroy_popup_detach_on
+  destroy_popup_while_degraded
+  task9_scenarios
+  phase6_theme_help_isolation
+  terminal_features="$(admin show-options -sv terminal-features)"
+  ! grep -Fxq '*:RGB' <<< "$terminal_features" || die 'phase6 RGB capability leaked after scenario cleanup'
+  grep -Fxq '*:focus' <<< "$terminal_features" || die 'phase6 RGB cleanup did not preserve terminal-features entries'
+  creation_scenarios
    printf 'ok: controls startup=2 replacement=1 rejected=1; process budgets passed\n'
 }
 session_gone() { ! admin has-session -t "$1" 2>/dev/null; }
