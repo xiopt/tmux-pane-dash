@@ -179,6 +179,20 @@ mod tests {
     }
 
     #[test]
+    fn new_command_defaults_only_when_absent_and_preserves_hostile_unicode() {
+        assert_eq!(DashConfig::default().new_command, "opencode");
+        assert_eq!(
+            parse_show_options(b"@pane-dash-new-command ''\n").new_command,
+            ""
+        );
+        assert_eq!(
+            parse_show_options("@pane-dash-new-command 'λ;$(echo literal)'\n".as_bytes())
+                .new_command,
+            "λ;$(echo literal)"
+        );
+    }
+
+    #[test]
     fn decodes_args_escape_sequences_in_bare_values() {
         let config = parse_show_options(b"@pane-dash-new-command line\\n\\036\\037\\\\\\\"\\$\n");
 

@@ -721,11 +721,14 @@ mod tests {
 
     #[test]
     fn command_is_plain_encoded_or_omitted() {
-        let request =
-            build_request(CreateContext::NewSession, &draft("", "", "echo #hash;")).unwrap();
+        let command = "λ;$(echo literal)#hash";
+        let request = build_request(CreateContext::NewSession, &draft("", "", command)).unwrap();
         let empty = build_request(CreateContext::NewSession, &draft("", "", "")).unwrap();
 
-        assert_eq!(request.command.as_deref(), Some("echo #hash\\;"));
+        assert_eq!(
+            request.command,
+            Some(crate::tmux_arg::encode(command, crate::tmux_arg::Field::Plain).unwrap())
+        );
         assert_eq!(empty.command, None);
     }
 

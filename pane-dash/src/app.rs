@@ -941,7 +941,11 @@ fn open_create_modal(state: &mut AppState) -> ReduceResult {
         return ReduceResult::default();
     }
     let modal = if state.model.panes().is_empty() {
-        CreateModal::Form(create_form(CreateContext::NewSession, String::new()))
+        CreateModal::Form(create_form(
+            CreateContext::NewSession,
+            String::new(),
+            state.cfg.new_command.clone(),
+        ))
     } else {
         let choices = match &state.focus {
             Some(Focus::Pane((session_id, _, pane_id))) => {
@@ -1049,7 +1053,7 @@ fn session_default_cwd(state: &AppState, session_id: &SessionId) -> String {
         .unwrap_or_default()
 }
 
-fn create_form(kind: CreateContext, cwd: String) -> CreateForm {
+fn create_form(kind: CreateContext, cwd: String, command: String) -> CreateForm {
     let linked_session_count = match &kind {
         CreateContext::Split {
             linked_session_count,
@@ -1068,7 +1072,7 @@ fn create_form(kind: CreateContext, cwd: String) -> CreateForm {
         draft: CreateDraft {
             name: String::new(),
             cwd,
-            command: String::new(),
+            command,
         },
         submitting: false,
         error: None,
@@ -1187,7 +1191,11 @@ fn reduce_create_modal_key(
                 };
                 let context = choice.context.clone();
                 let cwd = choice.cwd.clone();
-                state.modal = Some(Modal::Create(CreateModal::Form(create_form(context, cwd))));
+                state.modal = Some(Modal::Create(CreateModal::Form(create_form(
+                    context,
+                    cwd,
+                    state.cfg.new_command.clone(),
+                ))));
                 ReduceResult {
                     actions: Vec::new(),
                     changed: true,
@@ -1941,6 +1949,14 @@ mod tests {
         )
     }
 
+    fn state_with_new_command(records: Vec<RawRecord>, new_command: &str) -> AppState {
+        let config = crate::options::DashConfig {
+            new_command: new_command.into(),
+            ..crate::options::DashConfig::default()
+        };
+        AppState::new(Model::build(&records, &ModelConfig::default(), 10), config)
+    }
+
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
@@ -2024,6 +2040,78 @@ mod tests {
             retained.modal,
             Some(Modal::Create(CreateModal::Choice { ref choices, selected: 0 }))
                 if choices.len() == 1 && choices[0].kind == CreateChoiceKind::NewSession && choices[0].cwd.is_empty()
+        ));
+    }
+
+    #[test]
+    fn fresh_creation_forms_use_the_configured_command_in_every_context() {
+        let command = "λ;$(echo literal)";
+
+        let mut empty = state_with_new_command(Vec::new(), command);
+        reduce(&mut empty, key(KeyCode::Char('n')));
+        assert!(matches!(
+            empty.modal,
+            Some(Modal::Create(CreateModal::Form(ref form))) if form.draft.command == command
+        ));
+
+        let record = record("$1", "@1", "%1", 0);
+        let mut pane = state_with_new_command(vec![record.clone()], command);
+        pane.focus = Some(Focus::Pane(("$1".into(), "@1".into(), "%1".into())));
+        pane.sync_selection();
+        reduce(&mut pane, key(KeyCode::Char('n')));
+        reduce(&mut pane, key(KeyCode::Enter));
+        assert!(matches!(
+            pane.modal,
+            Some(Modal::Create(CreateModal::Form(ref form))) if form.draft.command == command
+        ));
+
+        let mut header = state_with_new_command(vec![record.clone()], command);
+        header.focus = Some(Focus::Header("$1".into()));
+        reduce(&mut header, key(KeyCode::Char('n')));
+        reduce(&mut header, key(KeyCode::Enter));
+        assert!(matches!(
+            header.modal,
+            Some(Modal::Create(CreateModal::Form(ref form))) if form.draft.command == command
+        ));
+
+        let mut no_focus = state_with_new_command(vec![record], command);
+        enter_query(&mut no_focus, "does-not-match");
+        reduce(&mut no_focus, key(KeyCode::Esc));
+        reduce(&mut no_focus, key(KeyCode::Char('n')));
+        reduce(&mut no_focus, key(KeyCode::Enter));
+        assert!(matches!(
+            no_focus.modal,
+            Some(Modal::Create(CreateModal::Form(ref form))) if form.draft.command == command
+        ));
+    }
+
+    #[test]
+    fn creation_command_edits_survive_stage_one_failure_but_cancel_reopens_the_default() {
+        let command = "λ;$(echo literal)";
+        let mut app = state_with_new_command(Vec::new(), command);
+        reduce(&mut app, key(KeyCode::Char('n')));
+        reduce(&mut app, key(KeyCode::Tab));
+        reduce(&mut app, key(KeyCode::Tab));
+        reduce(&mut app, key(KeyCode::Char('!')));
+        reduce(&mut app, key(KeyCode::Enter));
+        reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::CreateFailed {
+                id: CreationId(1),
+                error: "failed".into(),
+            }),
+        );
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Create(CreateModal::Form(ref form)))
+                if !form.submitting && form.draft.command == "λ;$(echo literal)!"
+        ));
+
+        reduce(&mut app, key(KeyCode::Esc));
+        reduce(&mut app, key(KeyCode::Char('n')));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Create(CreateModal::Form(ref form))) if form.draft.command == command
         ));
     }
 

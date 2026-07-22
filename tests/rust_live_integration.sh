@@ -8,7 +8,7 @@ source "$ROOT/spike/lib.sh"
 REAL_TMUX="$(command -v "$TMUX_BIN")"
 BIN="$ROOT/bin/pane-dash"
 TMP='' SOCKET='' WRAP='' LOG='' REJECT='' TASK9_MARKER='' TASK9_DEGRADED_INDEX='' TASK9_HOOK_INDEX=''
-CREATION_GATE='' CREATION_TOKEN='' CREATION_FAIL_STAGE='' CREATION_GONE='' CREATION_POPUP_WORK_OFFSET=0 FAILED=0
+CREATION_GATE='' CREATION_TOKEN='' CREATION_FAIL_STAGE='' CREATION_GONE='' CREATION_NEW_COMMAND='' CREATION_POPUP_WORK_OFFSET=0 FAILED=0
 declare -a CLIENT_PIDS=() CLIENT_TTYS=() PRODUCER_PIDS=() WRITER_FDS=()
 declare -a TRANSCRIPTS=() SESSIONS=() LABELS=() POPUP_CONTROLS=() POPUP_PIDS=()
 declare -a TASK9_SOURCE_SESSIONS=() TASK9_TARGET_SESSIONS=() TASK9_SOURCE_PANES=() CREATION_GATES=()
@@ -610,6 +610,10 @@ creation_tag_count_since() {
   perl -e 'use strict;my($d,$after)=@ARGV;my$n=0;for my$f(glob "$d/*"){open my$h,"<",$f or die$!;binmode$h;local$/;my@v=split/\0/,<$h>,-1;my$t=shift@v;next if$t<$after;my$i=0;while($i<@v&&($v[$i]eq q(-S)||$v[$i]eq q(-f))){$i+=2}next unless($v[$i]//q())eq q(set-option);$n++ if ((grep {$_ eq q(@pane_dash_tag)} @v) && (grep {$_ eq q(dash-created)} @v))}print"$n\n"' "$LOG" "$1"
 }
 creation_no_control_argv_since() { (( $(creation_control_argv_count_since "$1")==0 )); }
+creation_send_command_is_exact_since() { # timestamp pane encoded-command
+  perl -e 'use strict;my($d,$after,$target,$command)=@ARGV;for my$f(glob "$d/*"){open my$h,"<",$f or die$!;binmode$h;local$/;my@v=split/\0/,<$h>,-1;my$t=shift@v;next if$t<$after;my$i=0;while($i<@v&&($v[$i]eq q(-S)||$v[$i]eq q(-f))){$i+=2}next unless($v[$i]//q())eq q(send-keys);next unless join("\0",@v[$i..$#v]) eq join("\0",q(send-keys),q(-l),q(-t),$target,q(--),$command,q());exit 0}exit 1' "$LOG" "$1" "$2" "$3"
+}
+creation_form_or_choice_visible() { ansi_has "$1" 'Create session' || ansi_has "$1" 'New session'; }
 creation_suite_begin() {
   local pane
   REJECT="$TMP/reject"
@@ -646,7 +650,7 @@ creation_setup() { # label [deterministically ordered source session] [required 
   [[ -n "$source" ]] || source="creation-${label}-${RANDOM}${RANDOM}"
   admin new-session -d -s "$source" -x 120 -y 40 'exec cat'
   pane="$(admin display-message -p -t "$source:0.0" '#{pane_id}')"
-  admin set-option -g @pane-dash-new-command ''
+  admin set-option -g @pane-dash-new-command "$CREATION_NEW_COMMAND"
   nonce="$(od -An -N6 -tx1 /dev/urandom | tr -d '[:space:]')"
   source_tag="creation-${label}-${nonce}"
   admin set-option -p -t "$pane" @pane_dash_tag "$source_tag"
@@ -753,6 +757,25 @@ creation_stage1_retry() {
   creation_cleanup "$index" "$(admin display-message -p -t "$target" '#{session_name}')"
   printf 'creation stage1 duplicate stayed-modal retry=monotonic two-create-one-tag target=%s\n' "$target"
 }
+creation_configured_command() {
+  local index started target command='printf pane-dash' modal_before
+  CREATION_GATE=''; CREATION_FAIL_STAGE=''; CREATION_NEW_COMMAND="$command"
+  creation_setup configured-command '' '' 1
+  start_client "$CREATION_SOURCE" 'creation-configured-command'; CREATION_INDEX=$((${#CLIENT_PIDS[@]} - 1)); index="$CREATION_INDEX"
+  CREATION_SOURCE_TAGS[CREATION_INDEX]="$CREATION_DEFERRED_TAG"; CREATION_SOURCE_SESSIONS[CREATION_INDEX]="$CREATION_SOURCE"
+  open_popup "$index"; wait_for 'creation configured command popup open' 3 popup_open "$index"
+  wait_for 'creation configured command navigation frame' 3 ansi_has "$index" 'NAV'
+  send_bytes "$index" n; wait_for 'creation configured command form or choice' 3 creation_form_or_choice_visible "$index"
+  if ! ansi_has "$index" 'Create session'; then modal_before="$(ansi_size "$index")"; write_bytes "$index" '\r'; wait_for 'creation configured command form' 3 ansi_grew_from "$index" "$modal_before"; fi
+  started="$(now)"; send_bytes "$index" '\r'
+  wait_for 'creation configured command target' 3 creation_target_since "$started"; target="$(creation_target_since "$started")"
+  wait_for 'creation configured command exact argv' 3 creation_send_command_is_exact_since "$started" "$target" "$command"
+  (( $(record_count "$started" "$(now)" send-keys)==2 )) || die 'configured command did not run send command and enter exactly once'
+  creation_no_control_argv_since "$started" || die 'configured command used persistent control stdin'
+  CREATION_NEW_COMMAND=''; admin set-option -g @pane-dash-new-command ''
+  creation_cleanup "$index"
+  printf 'creation configured-command exact-send-argv target=%s command=%s stages3-4=once\n' "$target" "$command"
+}
 creation_tag_failure_and_gone() {
   local index started target offset
   CREATION_GATE=''; CREATION_FAIL_STAGE=tag; creation_setup tag-failure; index="$CREATION_INDEX"; creation_open_choice_modal "$index" 1; write_bytes "$index" '\r'
@@ -840,6 +863,7 @@ creation_scenarios() {
   creation_created_then_gone
   creation_concurrent_isolation
   creation_quit_reaps_blocked_stage
+  creation_configured_command
 }
 
 main() {
