@@ -1,16 +1,18 @@
 #![cfg(unix)]
 
-//! Real-tmux creation coverage.  This target is intentionally ignored: every
-//! test shares tmux's process-global environment and must run in one serial
-//! invocation (`cargo test --test creation_integration -- --ignored
-//! --test-threads=1`).
+//! Real-tmux creation coverage. This target serializes itself because tmux and
+//! process environment state are global. The documented command retains
+//! `--test-threads=1` as an additional, process-level guard.
 
 use std::{
     env, fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -26,10 +28,45 @@ use tempfile::TempDir;
 use tokio::sync::{mpsc, oneshot};
 
 static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
+static SERIAL_TESTS: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+async fn serial_test() -> tokio::sync::MutexGuard<'static, ()> {
+    SERIAL_TESTS
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
+struct EnvRestore {
+    name: &'static str,
+    old: Option<std::ffi::OsString>,
+}
+
+impl EnvRestore {
+    fn set(name: &'static str, value: &str) -> Self {
+        let old = env::var_os(name);
+        // SAFETY: creation integration tests serialize all environment access.
+        unsafe { env::set_var(name, value) };
+        Self { name, old }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        // SAFETY: creation integration tests serialize all environment access.
+        unsafe {
+            if let Some(value) = self.old.take() {
+                env::set_var(self.name, value);
+            } else {
+                env::remove_var(self.name);
+            }
+        }
+    }
+}
 
 struct Harness {
     dir: TempDir,
-    socket: String,
+    socket: PathBuf,
     tmux: PathBuf,
     log: PathBuf,
     hang_pid: PathBuf,
@@ -38,11 +75,11 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         let dir = TempDir::new().expect("temporary directory");
-        let socket = format!(
-            "pdcreate{}{}",
+        let socket = dir.path().join(format!(
+            "tmux-{}-{}.sock",
             std::process::id(),
             NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
-        );
+        ));
         let real_tmux = env::var_os("TMUX_BIN").unwrap_or_else(|| "tmux".into());
         let log = dir.path().join("argv.log");
         let hang_pid = dir.path().join("hung-wrapper.pid");
@@ -50,11 +87,11 @@ impl Harness {
         fs::write(
             &tmux,
             format!(
-                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\0' \"$@\" >> {log}\nprintf '\\n' >> {log}\ncase \"${{PD_CREATION_FAIL:-}}:$*\" in\n  tag:set-option*) echo 'tag stage rejected' >&2; exit 71 ;;\n  command:send-keys\\ -l*) echo 'command stage rejected' >&2; exit 72 ;;\nesac\nif [[ \"${{PD_CREATION_HANG:-}}\" == 1 && \"${{1:-}}\" == split-window ]]; then\n  printf '%s\\n' \"$$\" > {hang_pid}\n  trap 'exit 143' HUP INT TERM\n  while :; do sleep 0.1; done\nfi\nexec {real} -L {socket} \"$@\"\n",
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\0' \"$@\" >> {log}\nprintf '\\n' >> {log}\ncase \"${{PD_CREATION_FAIL:-}}:$*\" in\n  tag:set-option*) echo 'tag stage rejected' >&2; exit 71 ;;\n  command:send-keys\\ -l*) echo 'command stage rejected' >&2; exit 72 ;;\nesac\nif [[ \"${{PD_CREATION_HANG:-}}\" == 1 && \"${{1:-}}\" == split-window ]]; then\n  printf '%s\\n' \"$$\" > {hang_pid}\n  trap 'exit 143' HUP INT TERM\n  while :; do sleep 0.1; done\nfi\nexec {real} -S {socket} \"$@\"\n",
                 log = shell_quote(&log),
                 hang_pid = shell_quote(&hang_pid),
                 real = shell_quote(Path::new(&real_tmux)),
-                socket = shell_quote(Path::new(&socket)),
+                socket = shell_quote(&socket),
             ),
         )
         .expect("wrapper");
@@ -67,7 +104,7 @@ impl Harness {
             log,
             hang_pid,
         };
-        harness.run([
+        let initial = harness.run([
             "-f",
             "/dev/null",
             "new-session",
@@ -76,12 +113,18 @@ impl Harness {
             "base",
             "exec cat",
         ]);
+        assert!(
+            initial.status.success(),
+            "scratch tmux new-session failed: {}",
+            String::from_utf8_lossy(&initial.stderr)
+        );
         harness
     }
 
     fn run<const N: usize>(&self, args: [&str; N]) -> Output {
         Command::new(self.real_tmux())
-            .args(["-L", &self.socket])
+            .arg("-S")
+            .arg(&self.socket)
             .args(args)
             .output()
             .expect("tmux command")
@@ -150,8 +193,32 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         let _ = Command::new(self.real_tmux())
-            .args(["-L", &self.socket, "kill-server"])
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("kill-server")
             .status();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut server_gone = false;
+        while Instant::now() < deadline {
+            server_gone = !Command::new(self.real_tmux())
+                .arg("-S")
+                .arg(&self.socket)
+                .args(["has-session", "-t", "base"])
+                .status()
+                .is_ok_and(|status| status.success());
+            if server_gone {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !std::thread::panicking() {
+            assert!(
+                server_gone,
+                "scratch tmux server survived kill-server at socket: {}",
+                self.socket.display()
+            );
+        }
+        let _ = fs::remove_file(&self.socket);
         let _ = &self.dir;
     }
 }
@@ -199,6 +266,7 @@ fn wait_for_pid_exit(pid: &str) {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires tmux >= 3.6; serial scratch server"]
 async fn creation_uses_exact_targets_directions_child_cwd_and_one_shot_stages() {
+    let _serial = serial_test().await;
     let harness = Harness::new();
     let cwd = harness.dir.path().join("hostile cwd #[ \\ unicode-雪");
     fs::create_dir(&cwd).expect("hostile cwd");
@@ -390,6 +458,7 @@ async fn creation_uses_exact_targets_directions_child_cwd_and_one_shot_stages() 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires tmux >= 3.6; serial scratch server"]
 async fn creation_failure_boundaries_stop_later_stages_and_invalid_cwd_never_spawns() {
+    let _serial = serial_test().await;
     let harness = Harness::new();
     let cwd = harness.dir.path();
     let before = harness.log_entries().len();
@@ -425,18 +494,13 @@ async fn creation_failure_boundaries_stop_later_stages_and_invalid_cwd_never_spa
     assert!(build_request(CreateContext::NewSession, &invalid).is_err());
     assert_eq!(harness.log_entries().len(), before + 1);
 
-    let old_fail = env::var_os("PD_CREATION_FAIL");
-    unsafe { env::set_var("PD_CREATION_FAIL", "tag") };
+    let _restore = EnvRestore::set("PD_CREATION_FAIL", "tag");
     let tag = harness
         .create(
             CreateContext::NewSession,
             draft("tag-failure", cwd, "echo no"),
         )
         .await;
-    unsafe { env::remove_var("PD_CREATION_FAIL") };
-    if let Some(value) = old_fail {
-        unsafe { env::set_var("PD_CREATION_FAIL", value) }
-    }
     assert!(
         matches!(tag.last(), Some(CreationProgress::Finished { resolution: pane_dash::creation::CreationResolution::TagFailed(error), .. }) if error.contains("tag stage rejected"))
     );
@@ -452,6 +516,7 @@ async fn creation_failure_boundaries_stop_later_stages_and_invalid_cwd_never_spa
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires tmux >= 3.6; serial scratch server"]
 async fn creation_commands_are_literal_and_never_replayed_on_failure_or_empty_input() {
+    let _serial = serial_test().await;
     let harness = Harness::new();
     let cwd = harness.dir.path();
     let before = harness.log_entries().len();
@@ -510,7 +575,8 @@ async fn creation_commands_are_literal_and_never_replayed_on_failure_or_empty_in
         .expect("new-window argv");
     assert!(!create.iter().any(|arg| arg == "-n" || arg == "-s"));
 
-    let hostile = "echo '#{not-a-format}; \"quoted\" 雪 -leading'; # trailing;";
+    let sentinel = harness.dir.path().join("hostile-command-side-effect");
+    let hostile = "printf '%b' '-leading #{not-a-format}; \"quoted\" 雪\\nsecond; line\\n'";
     let before = harness.log_entries().len();
     let literal = harness
         .create(
@@ -534,16 +600,46 @@ async fn creation_commands_are_literal_and_never_replayed_on_failure_or_empty_in
     );
     assert_eq!(
         sends[0].last().map(String::as_str),
-        Some("echo '#{not-a-format}; \"quoted\" 雪 -leading'; # trailing\\;")
+        Some("printf '%b' '-leading #{not-a-format}; \"quoted\" 雪\\nsecond; line\\n'")
     );
     assert_eq!(sends[1].last().map(String::as_str), Some("Enter"));
+    let literal_pane = created_pane(&literal);
+    let started = Instant::now();
+    let captured = loop {
+        let capture = harness.text(["capture-pane", "-p", "-t", &literal_pane.0]);
+        if capture
+            .lines()
+            .any(|line| line.trim_end() == "-leading #{not-a-format}; \"quoted\" 雪")
+            && capture
+                .lines()
+                .any(|line| line.trim_end() == "second; line")
+        {
+            break capture;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "literal command was not visible: {capture}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
     assert!(
-        harness.run(["has-session", "-t", "base"]).status.success(),
-        "hostile command affected sentinel session"
+        captured
+            .lines()
+            .any(|line| line.trim_end() == "-leading #{not-a-format}; \"quoted\" 雪"),
+        "first literal line was not exact: {captured:?}"
+    );
+    assert!(
+        captured
+            .lines()
+            .any(|line| line.trim_end() == "second; line"),
+        "second literal line was not exact: {captured:?}"
+    );
+    assert!(
+        !sentinel.exists(),
+        "hostile literal command created a sentinel"
     );
 
-    let old_fail = env::var_os("PD_CREATION_FAIL");
-    unsafe { env::set_var("PD_CREATION_FAIL", "command") };
+    let _restore = EnvRestore::set("PD_CREATION_FAIL", "command");
     let before = harness.log_entries().len();
     let failed = harness
         .create(
@@ -551,10 +647,6 @@ async fn creation_commands_are_literal_and_never_replayed_on_failure_or_empty_in
             draft("command-failure", cwd, "echo blocked"),
         )
         .await;
-    unsafe { env::remove_var("PD_CREATION_FAIL") };
-    if let Some(value) = old_fail {
-        unsafe { env::set_var("PD_CREATION_FAIL", value) }
-    }
     assert!(
         matches!(failed.last(), Some(CreationProgress::Finished { resolution: pane_dash::creation::CreationResolution::CommandFailed { stage: CreateStage::SendCommand, error }, .. }) if error.contains("command stage rejected"))
     );
@@ -576,9 +668,9 @@ async fn creation_commands_are_literal_and_never_replayed_on_failure_or_empty_in
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires tmux >= 3.6; serial scratch server"]
 async fn creation_timeout_kills_and_reaps_a_hung_stage_without_later_stages() {
+    let _serial = serial_test().await;
     let harness = Harness::new();
-    let old_hang = env::var_os("PD_CREATION_HANG");
-    unsafe { env::set_var("PD_CREATION_HANG", "1") };
+    let _restore = EnvRestore::set("PD_CREATION_HANG", "1");
     let started = Instant::now();
     let events = harness
         .create(
@@ -591,10 +683,6 @@ async fn creation_timeout_kills_and_reaps_a_hung_stage_without_later_stages() {
             draft("", harness.dir.path(), "echo must-not-run"),
         )
         .await;
-    unsafe { env::remove_var("PD_CREATION_HANG") };
-    if let Some(value) = old_hang {
-        unsafe { env::set_var("PD_CREATION_HANG", value) }
-    }
 
     assert!(started.elapsed() >= Duration::from_secs(10));
     assert!(matches!(
