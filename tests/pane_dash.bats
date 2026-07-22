@@ -92,8 +92,9 @@ shell_quote() {
   run env PATH="$BATS_TEST_DIRNAME/stubs:$path_root:$PATH" "$copy_root/pane_dash.tmux"
 
   [ "$status" -eq 0 ]
+  physical_path="$(cd "$path_root" && pwd -P)"
   assert_call 5 bind-key D run-shell \
-    "'$copy_root/scripts/open.sh' '$path_root/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'"
+    "'$copy_root/scripts/open.sh' '$physical_path/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'"
   [ ! -s "$TMUX_STUB_DIR/notifications.log" ]
   assert_engine_query_count 1
 }
@@ -134,6 +135,49 @@ EOF
   assert_notification 1 display-message \
     "pane-dash: Rust binary not found; using legacy fzf (run 'make build' in the plugin directory or 'make install')"
   assert_call 5 bind-key D run-shell "'$copy_root/scripts/dash.sh' '#{client_tty}' '#{pane_id}'"
+}
+
+@test "type-P ignores an exported pane-dash function and a cwd decoy" {
+  printf 'rust' > "$TMUX_STUB_DIR/global/@pane-dash-engine"
+  copy_root="$BATS_TEST_TMPDIR/plugin"
+  path_root="$BATS_TEST_TMPDIR/path"
+  cwd="$BATS_TEST_TMPDIR/cwd"
+  mkdir -p "$copy_root" "$path_root" "$cwd"
+  cp "$SCRIPT" "$copy_root/pane_dash.tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$path_root/pane-dash"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$cwd/pane-dash"
+  chmod +x "$path_root/pane-dash" "$cwd/pane-dash"
+  env_file="$BATS_TEST_TMPDIR/bash-env"
+  cat > "$env_file" <<'EOF'
+pane-dash() { exit 99; }
+export -f pane-dash
+EOF
+
+  run bash -c "cd '$cwd' && env BASH_ENV='$env_file' PATH='$BATS_TEST_DIRNAME/stubs:$path_root':\"\$PATH\" '$copy_root/pane_dash.tmux'"
+
+  [ "$status" -eq 0 ]
+  physical_path="$(cd "$path_root" && pwd -P)"
+  assert_call 5 bind-key D run-shell \
+    "'$copy_root/scripts/open.sh' '$physical_path/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'"
+}
+
+@test "hostile serialized engine bytes are invalid without being echoed" {
+  copy_root="$BATS_TEST_TMPDIR/plugin"
+  mkdir -p "$copy_root/bin"
+  cp "$SCRIPT" "$copy_root/pane_dash.tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$copy_root/bin/pane-dash"
+  chmod +x "$copy_root/bin/pane-dash"
+  hostile=$'bad\n\033[31m;$(touch sentinel);`touch sentinel`\047'
+  printf '%s' "$hostile" > "$TMUX_STUB_DIR/global/@pane-dash-engine"
+
+  run "$copy_root/pane_dash.tmux"
+
+  [ "$status" -eq 0 ]
+  assert_notification 1 display-message 'pane-dash: invalid @pane-dash-engine value; using Rust-first resolution'
+  [ "$(wc -l < "$TMUX_STUB_DIR/notifications.log" | tr -d ' ')" -eq 1 ]
+  ! grep -F 'sentinel' "$TMUX_STUB_DIR/notifications.log"
+  assert_call 5 bind-key D run-shell \
+    "'$copy_root/scripts/open.sh' '$copy_root/bin/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'"
 }
 
 @test "load does not invoke build install or network commands and Rust bindings have no runtime lookup" {

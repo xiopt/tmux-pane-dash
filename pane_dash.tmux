@@ -69,10 +69,7 @@ if [ "$engine_line" != '@pane-dash-engine fzf' ]; then
     binary=""
     candidate="$(type -P pane-dash || true)"
     if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -x "$candidate" ]; then
-      case "$candidate" in
-        /*) binary="$candidate" ;;
-        *) binary="$(cd "$(dirname "$candidate")" && pwd -P)/$(basename "$candidate")" ;;
-      esac
+      binary="$(cd "$(dirname "$candidate")" && pwd -P)/$(basename "$candidate")"
     fi
   fi
 
