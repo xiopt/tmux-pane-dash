@@ -1,21 +1,39 @@
 #!/usr/bin/env bash
-# Verify that the filesystem source package builds and installs without Git or network access.
+# Verify the explicit filesystem source package builds without Git or network access.
 set -euo pipefail
+set -m
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+MANIFEST=(.gitignore Makefile README.md pane_dash.tmux scripts opencode-plugin pane-dash tests)
 scratch_root="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/pane-dash-source-package.XXXXXX")" && pwd -P)"
 archive="$scratch_root/pane-dash-source.tar"
-scratch="$scratch_root/extracted source '\$dollar;semi#hash\`tick\`"
-sentinel_bin="$scratch_root/git sentinel"
-
-cleanup() {
-  rm -rf "$scratch_root"
-}
-trap cleanup EXIT
+scratch="$scratch_root/extracted source [*] (meta)"
+sentinel_bin="$scratch_root/sentinels"
+tmux_bin="$(command -v "${TMUX_BIN:-tmux}")"
+socket="pd-source-package-$$"
+declare -a active_pids=()
+declare -a active_process_groups=()
+wrapped_binary_backup=""
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   exit 1
+}
+
+sha256_stream() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
+  fi
+}
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
 }
 
 mode_of() {
@@ -28,45 +46,147 @@ shell_quote() {
   printf "'"
 }
 
-checkout_fingerprint() {
-  tar -C "$ROOT" \
-    --exclude='./.git' --exclude='./.cortexkit' \
-    --exclude='./pane-dash/target' --exclude='./bin/pane-dash' \
-    --exclude='./bin/.pane-dash.tmp.*' \
-    -cf - . | shasum -a 256 | awk '{print $1}'
+source_tar() {
+  COPYFILE_DISABLE=1 tar -C "$ROOT" \
+    --exclude='.git' --exclude='.git/*' --exclude='*/.git' --exclude='*/.git/*' \
+    --exclude='.cortexkit' --exclude='.cortexkit/*' --exclude='*/.cortexkit' --exclude='*/.cortexkit/*' \
+    --exclude='pane-dash/target' --exclude='pane-dash/target/*' --exclude='*/target' --exclude='*/target/*' \
+    --exclude='bin/pane-dash' --exclude='*/bin/pane-dash' --exclude='.pane-dash.tmp.*' --exclude='*/.pane-dash.tmp.*' \
+    --exclude='.DS_Store' --exclude='*/.DS_Store' --exclude='._*' --exclude='*/._*' \
+    "$@" "${MANIFEST[@]}"
 }
 
-before="$(checkout_fingerprint)"
+source_fingerprint() {
+  source_tar -cf - | sha256_stream
+}
 
-tar -C "$ROOT" \
-  --exclude='./.git' --exclude='./.cortexkit' \
-  --exclude='./pane-dash/target' --exclude='./bin/pane-dash' \
-  --exclude='./bin/.pane-dash.tmp.*' \
-  -cf "$archive" .
+generated_output_metadata() {
+  python3 - "$ROOT" <<'PY' | sha256_stream
+import os
+import sys
+
+root = sys.argv[1]
+for relative_root in ("bin", "pane-dash/target"):
+    absolute_root = os.path.join(root, relative_root)
+    if not os.path.lexists(absolute_root):
+        continue
+    paths = [absolute_root]
+    for directory, directories, files in os.walk(absolute_root, followlinks=False):
+        directories.sort()
+        files.sort()
+        paths.extend(os.path.join(directory, name) for name in directories + files)
+    for path in sorted(paths):
+        stat = os.lstat(path)
+        print(f"{os.path.relpath(path, root)}\t{stat.st_size}\t{stat.st_mtime_ns}")
+PY
+}
+
+assert_no_forbidden_paths() {
+  local forbidden
+  forbidden="$(find "$extracted" \( \
+    -name .git -o -name .cortexkit -o -name target -o -name pane-dash -path '*/bin/pane-dash' -o \
+    -name '.pane-dash.tmp.*' -o -name .DS_Store -o -name '._*' \
+  \) -print -quit)"
+  [ -z "$forbidden" ] || fail "source archive contains forbidden path $forbidden"
+}
+
+terminate_and_reap() {
+  local pid=$1 remaining=40 state
+  local -a pids=("$pid")
+  [ -n "$pid" ] || return 0
+  descendant_pids=()
+  collect_descendants "$pid"
+  pids+=("${descendant_pids[@]}")
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+  while ((remaining--)); do
+    state="$(ps -p "$pid" -o stat= 2>/dev/null || :)"
+    [ -z "$state" ] || [[ "$state" == Z* ]] && break
+    sleep 0.05
+  done
+  state="$(ps -p "$pid" -o stat= 2>/dev/null || :)"
+  if [ -n "$state" ] && [[ "$state" != Z* ]]; then
+    kill -KILL "${pids[@]}" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+collect_descendants() {
+  local parent=$1 child
+  while IFS= read -r child; do
+    descendant_pids+=("$child")
+    collect_descendants "$child"
+  done < <(pgrep -P "$parent" 2>/dev/null || true)
+}
+
+terminate_process_group() {
+  local pgid=$1 remaining=40
+  python3 - "$pgid" TERM <<'PY' 2>/dev/null || true
+import os, signal, sys
+os.killpg(int(sys.argv[1]), getattr(signal, f"SIG{sys.argv[2]}"))
+PY
+  while ((remaining--)); do
+    pgrep -g "$pgid" >/dev/null 2>&1 || return 0
+    sleep 0.05
+  done
+  python3 - "$pgid" KILL <<'PY' 2>/dev/null || true
+import os, signal, sys
+os.killpg(int(sys.argv[1]), getattr(signal, f"SIG{sys.argv[2]}"))
+PY
+}
+
+cleanup() {
+  local pid pgid
+  for pgid in "${active_process_groups[@]:-}"; do terminate_process_group "$pgid"; done
+  for pid in "${active_pids[@]:-}"; do terminate_and_reap "$pid"; done
+  TMUX='' "$tmux_bin" -L "$socket" kill-server 2>/dev/null || true
+  if [ -n "$wrapped_binary_backup" ] && [ -e "$wrapped_binary_backup" ]; then
+    mv -f "$wrapped_binary_backup" "${wrapped_binary_backup%.actual}"
+  fi
+  rm -f "$scratch/pane-dash/target" 2>/dev/null || true
+  rm -rf "$scratch_root"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+before="$(source_fingerprint)"
+generated_before="$(generated_output_metadata)"
+source_tar -cf "$archive"
 
 mkdir -p "$scratch"
-tar -C "$scratch" -xf "$archive"
-
+COPYFILE_DISABLE=1 tar -C "$scratch" -xf "$archive"
 extracted="$scratch"
-[ ! -e "$extracted/.git" ] || fail 'source archive contains .git'
-[ ! -e "$extracted/bin/pane-dash" ] || fail 'source archive contains prebuilt pane-dash'
+
+for expected in "${MANIFEST[@]}"; do
+  [ -e "$extracted/$expected" ] || fail "source archive is missing $expected"
+done
 [ -f "$extracted/pane-dash/Cargo.lock" ] || fail 'source archive is missing Cargo.lock'
 [ -d "$extracted/pane-dash/src" ] || fail 'source archive is missing Rust source'
-[ -d "$extracted/scripts" ] || fail 'source archive is missing scripts'
-[ -d "$extracted/tests" ] || fail 'source archive is missing tests'
+assert_no_forbidden_paths
 
 mkdir -p "$sentinel_bin"
-git_sentinel_log="$scratch_root/git-invocations.log"
-export GIT_SENTINEL_LOG="$git_sentinel_log"
-cat > "$sentinel_bin/git" <<'EOF'
+for command in git curl wget nc; do
+  cat > "$sentinel_bin/$command" <<EOF
 #!/bin/sh
-printf 'git invoked\n' >> "$GIT_SENTINEL_LOG"
-printf 'git invoked\n' >&2
+printf '%s %s\\n' '$command' "\$*" >> "\$SENTINEL_LOG/$command"
 exit 97
 EOF
-chmod 755 "$sentinel_bin/git"
-
+  chmod 755 "$sentinel_bin/$command"
+done
+cat > "$sentinel_bin/tmux" <<EOF
+#!/bin/sh
+printf 'tmux %s\\n' "\$*" >> "\$SENTINEL_LOG/tmux"
+exec "$tmux_bin" -L "$socket" "\$@"
+EOF
+chmod 755 "$sentinel_bin/tmux"
+sentinel_log="$scratch_root/sentinel-log"
+mkdir -p "$sentinel_log"
+export SENTINEL_LOG="$sentinel_log"
 export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="${TMPDIR:-/tmp}/pane-dash-source-package-cargo-target"
+mkdir -p "$CARGO_TARGET_DIR"
+ln -s "$CARGO_TARGET_DIR" "$extracted/pane-dash/target"
 install_root="$scratch_root/install destination"
 [ ! -e "$install_root" ] || fail 'install destination exists before build'
 
@@ -82,36 +202,101 @@ binary="$extracted/bin/pane-dash"
 
 stderr="$scratch_root/no-argv.stderr"
 "$binary" >"$scratch_root/no-argv.stdout" 2>"$stderr" &
-binary_pid=$!
+no_argv_pid=$!
+active_pids+=("$no_argv_pid")
 deadline=$((SECONDS + 2))
-while kill -0 "$binary_pid" 2>/dev/null; do
+while kill -0 "$no_argv_pid" 2>/dev/null; do
   [ "$SECONDS" -lt "$deadline" ] || {
-    kill "$binary_pid" 2>/dev/null || :
-    wait "$binary_pid" 2>/dev/null || :
+    terminate_and_reap "$no_argv_pid"
     fail 'pane-dash did not exit within two seconds without arguments'
   }
   sleep 0.05
 done
-if wait "$binary_pid"; then
-  binary_status=0
-else
-  binary_status=$?
-fi
-[ "$binary_status" -eq 1 ] || fail "pane-dash without arguments exited $binary_status, expected 1"
+if wait "$no_argv_pid"; then no_argv_status=0; else no_argv_status=$?; fi
+active_pids=()
+[ "$no_argv_status" -eq 1 ] || fail "pane-dash without arguments exited $no_argv_status, expected 1"
 grep -Fx 'Error: expected client_tty session_id pane_id' "$stderr" >/dev/null ||
   fail 'pane-dash stderr did not contain the exact expected argument identities'
 
 tmux_stub_dir="$scratch_root/tmux stub"
 mkdir -p "$tmux_stub_dir/global"
 : > "$tmux_stub_dir/calls.log"
-PATH="$extracted/tests/stubs:$sentinel_bin:$PATH" \
-  TMUX_STUB_DIR="$tmux_stub_dir" \
-  "$extracted/pane_dash.tmux"
-
+PATH="$extracted/tests/stubs:$sentinel_bin:$PATH" TMUX_STUB_DIR="$tmux_stub_dir" "$extracted/pane_dash.tmux"
 expected_binding="bind-key$(printf '\037')D$(printf '\037')run-shell$(printf '\037')$(shell_quote "$extracted/scripts/open.sh") $(shell_quote "$binary") '#{client_tty}' '#{session_id}' '#{pane_id}'$(printf '\037')"
 actual_binding="$(sed -n '5p' "$tmux_stub_dir/calls.log")"
 [ "$actual_binding" = "$expected_binding" ] || fail 'absent engine did not bind the exact extracted local binary'
-[ ! -e "$git_sentinel_log" ] || fail 'Git sentinel was invoked while loading plugin'
+
+wrapped_binary_backup="$binary.actual"
+mv "$binary" "$wrapped_binary_backup"
+route_log="$scratch_root/route.argv"
+route_pid="$scratch_root/route.pid"
+cat > "$binary" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$\$" > "$route_pid"
+printf '%s\n' "\$@" > "$route_log"
+exec "$wrapped_binary_backup" "\$@"
+EOF
+chmod 755 "$binary"
+
+TMUX='' PATH="$sentinel_bin:$PATH" "$tmux_bin" -L "$socket" -f /dev/null new-session -d -s one 'sleep 120'
+TMUX='' "$tmux_bin" -L "$socket" new-session -d -s two 'sleep 120'
+server_path="$(TMUX='' "$tmux_bin" -L "$socket" show-environment -g PATH)"
+[[ "$server_path" == *"$sentinel_bin"* ]] || fail 'isolated tmux server did not retain sentinel PATH'
+{ sleep 2; printf '\002'; sleep 600; } | TMUX='' script -q /dev/null "$tmux_bin" -L "$socket" attach-session -t one >/dev/null 2>&1 &
+client_one_pid=$!
+active_pids+=("$client_one_pid")
+active_process_groups+=("$(ps -o pgid= -p "$client_one_pid" | tr -d ' ')")
+{ sleep 600; } | TMUX='' script -q /dev/null "$tmux_bin" -L "$socket" attach-session -t two >/dev/null 2>&1 &
+client_two_pid=$!
+active_pids+=("$client_two_pid")
+active_process_groups+=("$(ps -o pgid= -p "$client_two_pid" | tr -d ' ')")
+for _ in $(seq 1 30); do
+  client_count="$(TMUX='' "$tmux_bin" -L "$socket" list-clients 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$client_count" = 2 ] && break
+  sleep 0.1
+done
+[ "${client_count:-0}" = 2 ] || fail 'two PTY clients did not attach'
+PATH="$sentinel_bin:$PATH" "$extracted/pane_dash.tmux"
+real_binding="$(TMUX='' "$tmux_bin" -L "$socket" list-keys -T prefix | awk '$4 == "D" { print; exit }')"
+[[ "$real_binding" == *'/bin/pane-dash'* ]] || fail "extracted shim did not bind a local binary [$real_binding]"
+expected_tty="$(TMUX='' "$tmux_bin" -L "$socket" list-clients -t two -F '#{client_tty}')"
+client_one_tty="$(TMUX='' "$tmux_bin" -L "$socket" list-clients -t one -F '#{client_tty}')"
+expected_session="$(TMUX='' "$tmux_bin" -L "$socket" list-clients -t two -F '#{session_id}')"
+expected_pane="$(TMUX='' "$tmux_bin" -L "$socket" list-clients -t two -F '#{pane_id}')"
+for _ in $(seq 1 30); do
+  best_tty="$(TMUX='' "$tmux_bin" -L "$socket" display-message -p '#{client_tty}')"
+  [ "$best_tty" = "$client_one_tty" ] && break
+  sleep 0.1
+done
+[ "${best_tty:-}" = "$client_one_tty" ] || fail 'noninvoking client did not become tmux best client'
+TMUX='' "$tmux_bin" -L "$socket" send-keys -K -c "$expected_tty" C-b D
+for _ in $(seq 1 50); do
+  [ -s "$route_log" ] && [ -s "$route_pid" ] && break
+  sleep 0.1
+done
+if [ ! -s "$route_log" ]; then
+  TMUX='' "$tmux_bin" -L "$socket" show-messages >&2 || true
+  cat "$sentinel_log/tmux" >&2 2>/dev/null || true
+  fail 'extracted Rust route did not invoke recorder'
+fi
+route_actual="$(paste -sd $'\t' "$route_log")"
+route_expected="$(printf '%s\t%s\t%s' "$expected_tty" "$expected_session" "$expected_pane")"
+[ "$route_actual" = "$route_expected" ] || fail "extracted Rust route argv [$route_actual]"
+popup_pid="$(<"$route_pid")"
+for _ in $(seq 1 50); do
+  control_command="$(pgrep -P "$popup_pid" 2>/dev/null | xargs -n1 ps -o command= -p 2>/dev/null | grep -- '-C attach-session' || :)"
+  [ -n "$control_command" ] && break
+  sleep 0.1
+done
+[ -n "${control_command:-}" ] || fail 'extracted popup did not start its control client'
+TMUX='' "$tmux_bin" -L "$socket" send-keys -K -c "$expected_tty" q
+for _ in $(seq 1 40); do
+  ps -p "$popup_pid" >/dev/null 2>&1 || break
+  sleep 0.05
+done
+TMUX='' "$tmux_bin" -L "$socket" kill-server 2>/dev/null || true
+mv -f "$wrapped_binary_backup" "$binary"
+wrapped_binary_backup=""
 
 sibling="$install_root/usr/local/bin/keep"
 mkdir -p "${sibling%/*}"
@@ -130,14 +315,15 @@ installed="$install_root/usr/local/bin/pane-dash"
 [ ! -e "$installed" ] || fail 'uninstall did not remove staged pane-dash'
 [ -f "$sibling" ] || fail 'uninstall removed sibling file'
 [ -d "${sibling%/*}" ] || fail 'uninstall removed destination directory'
+for command in git curl wget nc; do
+  [ ! -e "$sentinel_log/$command" ] || fail "$command sentinel was invoked"
+done
 
-after="$(checkout_fingerprint)"
-[ "$before" = "$after" ] || fail 'source packaging changed the original checkout'
+after="$(source_fingerprint)"
+generated_after="$(generated_output_metadata)"
+[ "$before" = "$after" ] || fail 'source packaging changed the explicit source manifest'
+[ "$generated_before" = "$generated_after" ] || fail 'source packaging changed original generated output metadata'
 
 archive_bytes="$(wc -c < "$archive" | tr -d ' ')"
-if command -v shasum >/dev/null 2>&1; then
-  archive_sha256="$(shasum -a 256 "$archive" | cut -d ' ' -f 1)"
-else
-  archive_sha256="$(sha256sum "$archive" | cut -d ' ' -f 1)"
-fi
+archive_sha256="$(sha256_file "$archive")"
 printf 'source-package archive_bytes=%s sha256=%s mode=0755 offline=pass\n' "$archive_bytes" "$archive_sha256"
