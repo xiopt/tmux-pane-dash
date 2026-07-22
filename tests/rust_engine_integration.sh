@@ -25,7 +25,7 @@ WRAPPER="$TMP/wrapper"
 LOG="$TMP/argv.log"
 mkdir -p "$PLUGIN/bin" "$PLUGIN/scripts" "$WRAPPER"
 cp "$ROOT/pane_dash.tmux" "$PLUGIN/"
-cp "$ROOT/scripts/open_v2.sh" "$PLUGIN/scripts/"
+cp "$ROOT/scripts/open.sh" "$PLUGIN/scripts/"
 cat > "$PLUGIN/bin/pane-dash" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$@" > "$LOG"
@@ -39,7 +39,12 @@ chmod +x "$WRAPPER/tmux"
 
 TMUX='' PATH="$WRAPPER:$PATH" "$TMUX_BIN" -L "$SOCK" -f /dev/null new-session -d -s one 'sleep 120'
 TMUX='' PATH="$WRAPPER:$PATH" "$TMUX_BIN" -L "$SOCK" new-session -d -s two 'sleep 120'
-TMUX='' PATH="$WRAPPER:$PATH" "$TMUX_BIN" -L "$SOCK" set-option -g @pane-dash-engine rust
+absent_engine="$(TMUX='' "$TMUX_BIN" -L "$SOCK" show-option -gq @pane-dash-engine)"
+[[ -z "$absent_engine" ]] || fail "absent engine serialized as [$absent_engine]"
+TMUX='' "$TMUX_BIN" -L "$SOCK" set-option -g @pane-dash-engine ''
+empty_engine="$(TMUX='' "$TMUX_BIN" -L "$SOCK" show-option -gq @pane-dash-engine)"
+[[ "$empty_engine" = "@pane-dash-engine ''" ]] || fail "explicit empty serialized as [$empty_engine]"
+TMUX='' "$TMUX_BIN" -L "$SOCK" set-option -gu @pane-dash-engine
 TMUX='' PATH="$WRAPPER:$PATH" bash "$PLUGIN/pane_dash.tmux"
 
 { sleep 2; printf '\002'; sleep 118; } | TMUX='' script -q /dev/null "$TMUX_BIN" -L "$SOCK" attach-session -t one >/dev/null 2>&1 &

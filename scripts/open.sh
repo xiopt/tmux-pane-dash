@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/open_v2.sh <resolved-binary> <client-tty> <session-id> <pane-id>
+# scripts/open.sh <resolved-binary> <client-tty> <session-id> <pane-id>
 set -euo pipefail
 
 binary="${1:?resolved binary required}"

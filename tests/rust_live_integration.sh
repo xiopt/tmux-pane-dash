@@ -1053,7 +1053,7 @@ main() {
   admin new-session -d -s other -x 120 -y 40 'exec cat'
   local pane target startup old_control t before after captures status_commit
   pane="$(admin display-message -p -t live:0.0 '#{pane_id}')"; target="$(admin split-window -d -P -F '#{pane_id}' -t live:0 'exec cat')"
-  admin set-option -g @pane-dash-engine rust; admin set-option -g @pane-dash-width 100%; admin set-option -g @pane-dash-height 100%; admin set-option -p -t "$pane" @pane_dash_tag live-test; admin set-option -p -t "$target" @pane_dash_tag live-spare
+  admin set-option -g @pane-dash-width 100%; admin set-option -g @pane-dash-height 100%; admin set-option -p -t "$pane" @pane_dash_tag live-test; admin set-option -p -t "$target" @pane_dash_tag live-spare
   TASK9_MARKER="$TMP/task9-marker"
   admin set-environment -g PATH "$WRAP:$PATH"; admin set-environment -g PD_REAL_TMUX "$REAL_TMUX"; admin set-environment -g PD_SOCKET "$SOCKET"; admin set-environment -g PD_LOG "$LOG"; admin set-environment -g PD_OWNER_LOG "$OWNER_LOG"; admin set-environment -g PD_REJECT "$REJECT"; admin set-environment -g PD_TASK9_MARKER "$TASK9_MARKER"
   # Install pane_dash.tmux through the wrapper; do not directly run pane-dash.
@@ -1067,7 +1067,7 @@ main() {
   open_popup 1; [[ -n "${POPUP_CONTROLS[1]:-}" && "${POPUP_CONTROLS[0]}" != "${POPUP_CONTROLS[1]}" && -n "${POPUP_PIDS[1]:-}" && "${POPUP_PIDS[0]}" != "${POPUP_PIDS[1]}" ]] || die 'independent popup control/pid mapping'; wait_for 'independent popup controls' 3 has_two_controls
   before="$(ansi_size 0)"; admin resize-window -t live:0 -x 99 -y 32; send_bytes 0 '\014'; wait_for '99-column layout transcript' 2 ansi_grew_from 0 "$before"; ansi_tail_has 0 "$((before+1))" '─' || die '99-column transcript lacks vertical preview border'
   before="$(ansi_size 0)"; admin resize-window -t live:0 -x 100 -y 32; send_bytes 0 '\014'; wait_for '100-column layout transcript' 2 ansi_grew_from 0 "$before"; ansi_tail_has 0 "$((before+1))" '│' || die '100-column transcript lacks horizontal preview border'; has_two_controls || die 'resize panicked popup'
-  # All open_v2/binary option reads must settle before the runtime assertion.
+  # All open/binary option reads must settle before the runtime assertion.
   startup="$(now)"
   send_bytes 0 j # None -> session header; the second j selects its first pane.
   t="$(now)"; send_bytes 0 j; wait_for 'selected-pane preview <=500ms' .5 has_capture_since "$t"

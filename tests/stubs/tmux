@@ -45,9 +45,18 @@ case "$cmd" in
       done
       printf '%s%s\n' "$rendered" "$rest"
     done < "$TMUX_STUB_DIR/panes" ;;
-  show-option | show-options) # show-option -gqv <name> | show-options -s[v] <name> | show-option -pqv -t <pane> <name>
+  show-option | show-options) # show-option -gq <name> | show-option -gqv <name> | show-options -s[v] <name> | show-option -pqv -t <pane> <name>
     log_args invocations.log "$@"
-    if [ "$2" = "-gqv" ]; then
+    if [ "$2" = "-gq" ]; then
+      if [ -e "$TMUX_STUB_DIR/global/$3" ]; then
+        value="$(<"$TMUX_STUB_DIR/global/$3")"
+        if [ -n "$value" ]; then
+          printf '%s %s\n' "$3" "$value"
+        else
+          printf "%s ''\n" "$3"
+        fi
+      fi
+    elif [ "$2" = "-gqv" ]; then
       cat "$TMUX_STUB_DIR/global/$3" 2>/dev/null || true
     elif [ "$2" = "-sv" ]; then
       option_dir="$TMUX_STUB_DIR/server-options/$3"

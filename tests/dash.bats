@@ -14,7 +14,7 @@
     "$BATS_TEST_DIRNAME/../scripts/dash.sh" /dev/ttys042 %42
 
   [ "$status" -eq 0 ]
-  grep -F 'display-popup -c /dev/ttys042 -t %42 -E -w 80% -h 70%' "$FAKE_TMUX_LOG"
+  grep -F 'display-popup -c /dev/ttys042 -t %42 -E -w 90% -h 85%' "$FAKE_TMUX_LOG"
   grep -F -- '--inner /dev/ttys042' "$FAKE_TMUX_LOG"
 }
 

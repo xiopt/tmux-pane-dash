@@ -43,8 +43,8 @@ if [ "${1:-}" != "--inner" ]; then
 
   if [ -z "$(tmux show-option -gqv @pane_dash_version_ok || true)" ]; then
     tmux_ver="$(tmux -V | sed 's/[^0-9.]*//g' | cut -d. -f1,2)"
-    if ! version_ge "$tmux_ver" "3.2"; then
-      tmux display-message "pane-dash: tmux >= 3.2 required (found $tmux_ver)"
+    if ! version_ge "$tmux_ver" "3.6"; then
+      tmux display-message "pane-dash: tmux >= 3.6 required (found $tmux_ver)"
       exit 1
     fi
     if ! command -v fzf >/dev/null 2>&1; then
@@ -63,8 +63,8 @@ if [ "${1:-}" != "--inner" ]; then
   source_pane="${2:-}"
   [ -n "$client_tty" ] || client_tty="$(tmux display-message -p '#{client_tty}')"
   [ -n "$source_pane" ] || source_pane="$(tmux display-message -p '#{pane_id}')"
-  width="$(get_opt @pane-dash-width 80%)"
-  height="$(get_opt @pane-dash-height 70%)"
+  width="$(get_opt @pane-dash-width 90%)"
+  height="$(get_opt @pane-dash-height 85%)"
   popup_args=()
   [ -n "$client_tty" ] && popup_args+=(-c "$client_tty")
   [ -n "$source_pane" ] && popup_args+=(-t "$source_pane")
