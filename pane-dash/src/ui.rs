@@ -188,12 +188,12 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
                 return;
             }
             let input = truncate_to_width(&literal_input(text), usize::from(inner.width));
-            let mut lines = vec![Line::raw(input)];
+            let mut lines = vec![Line::styled(input, Style::default().fg(app.palette().text))];
             if inner.height > 1 {
-                lines.push(Line::raw(truncate_to_width(
-                    "Enter send | Esc cancel",
-                    usize::from(inner.width),
-                )));
+                lines.push(Line::styled(
+                    truncate_to_width("Enter send | Esc cancel", usize::from(inner.width)),
+                    Style::default().fg(app.palette().dim),
+                ));
             }
             frame.render_widget(Paragraph::new(lines), inner);
         }
@@ -553,7 +553,7 @@ fn alert_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
             width,
         );
     }
-    for warning in app.config_warnings().iter().take(4) {
+    for warning in app.config_warnings() {
         push_alert(
             &mut alerts,
             warning.text(),
@@ -915,4 +915,98 @@ fn path_basename(path: &str) -> String {
 
 fn pad_to_width(value: &str, width: usize) -> String {
     format!("{value}{}", " ".repeat(width.saturating_sub(value.width())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{alert_lines, full_layout, render};
+    use crate::app::AppState;
+    use crate::config::LoadedUiConfig;
+    use crate::model::{Model, ModelConfig};
+    use crate::options::DashConfig;
+    use crate::palette::Palette;
+    use crate::snapshot::RawRecord;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+
+    fn state(warnings: &[&str]) -> AppState {
+        let record = RawRecord {
+            session_id: "$dash".into(),
+            session_name: "dash".into(),
+            window_id: "@1".into(),
+            window_index: 1,
+            window_name: "project".into(),
+            pane_id: "%1".into(),
+            pane_index: 1,
+            pane_active: true,
+            pane_current_command: "opencode".into(),
+            pane_current_path: "/tmp".into(),
+            pane_dead: false,
+            status: "idle".into(),
+            status_since: Some(0),
+            heartbeat: Some(1_000),
+            title: "task".into(),
+            model: "model".into(),
+            tag: String::new(),
+            group: "1".into(),
+        };
+        AppState::new(
+            Model::build(&[record], &ModelConfig::default(), 1_000),
+            DashConfig::default(),
+            LoadedUiConfig::with_test_warnings(Palette::dark(), warnings),
+        )
+    }
+
+    #[test]
+    fn config_alerts_are_ordered_styled_truncated_and_height_clipped() {
+        let warnings = [
+            "config: invalid color for text; ignored",
+            "config: invalid color for dim; ignored",
+            "config: invalid color for accent; ignored",
+            "config: ignored 2 additional warnings",
+        ];
+        let mut app = state(&warnings);
+        app.transport_degraded = true;
+        app.banner = Some("runtime banner".into());
+        app.consecutive_failures = 2;
+        app.dropped_records = 3;
+
+        let alerts = alert_lines(&app, 160);
+        assert_eq!(alerts.len(), 8);
+        let text = alerts
+            .iter()
+            .map(|line| line.spans[0].content.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(text[0], "live updates lost — polling");
+        assert_eq!(text[1], "runtime banner");
+        assert_eq!(text[2], "⚠ polling failures: 2");
+        assert_eq!(&text[3..7], warnings);
+        assert_eq!(text[7], "dropped: 3");
+        for line in &alerts[..3] {
+            assert_eq!(line.style.fg, Some(Color::Red));
+        }
+        for line in &alerts[3..7] {
+            assert_eq!(line.style.fg, Some(Color::Yellow));
+        }
+        assert_eq!(alerts[7].style.fg, Some(Color::DarkGray));
+        assert_eq!(
+            alert_lines(&app, 18)[3].spans[0].content,
+            "config: invalid c…"
+        );
+        assert_eq!(alert_lines(&app, 0).len(), 8);
+
+        let layout = full_layout(&app, Rect::new(0, 0, 18, 6));
+        assert_eq!(layout.alerts_area.height, 5);
+        let backend = TestBackend::new(18, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app, 1_000)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(buffer[(0, 0)].symbol().starts_with("l"));
+        assert!(buffer[(0, 4)].symbol().starts_with("c"));
+        assert_eq!(buffer[(0, 5)].fg, Color::DarkGray);
+        assert_eq!(buffer[(0, 0)].fg, Color::Red);
+        assert_eq!(buffer[(0, 3)].fg, Color::Yellow);
+    }
 }

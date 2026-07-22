@@ -2000,6 +2000,44 @@ mod tests {
     }
 
     #[test]
+    fn config_warnings_are_immutable_across_runtime_events() {
+        let warnings = [
+            "config: invalid color for text; ignored",
+            "config: ignored 2 additional warnings",
+        ];
+        let mut app = AppState::new(
+            Model::build(&[record("$1", "@1", "%1", 0)], &ModelConfig::default(), 10),
+            crate::options::DashConfig::default(),
+            LoadedUiConfig::with_test_warnings(crate::palette::Palette::dark(), &warnings),
+        );
+        let expected = app
+            .config_warnings()
+            .iter()
+            .map(|warning| warning.text().to_owned())
+            .collect::<Vec<_>>();
+
+        reduce(&mut app, snapshot(vec![record("$1", "@1", "%1", 0)], 20));
+        reduce(&mut app, Event::SnapshotFailed("temporary failure".into()));
+        app.transport_degraded = true;
+        app.transport_degraded = false;
+        app.banner = Some("action failed".into());
+        enter_query(&mut app, "opencode");
+        reduce(&mut app, key(KeyCode::Esc));
+        reduce(&mut app, key(KeyCode::Char('m')));
+        reduce(&mut app, key(KeyCode::Char('n')));
+        reduce(&mut app, key(KeyCode::Esc));
+        reduce(&mut app, Event::Tick { now: 21 });
+
+        assert_eq!(
+            app.config_warnings()
+                .iter()
+                .map(|warning| warning.text())
+                .collect::<Vec<_>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn n_opens_contextual_creation_choices_and_uses_pane_cwd() {
         let mut app = state(vec![record("$1", "@1", "%1", 0)]);
         app.focus = Some(Focus::Pane(("$1".into(), "@1".into(), "%1".into())));

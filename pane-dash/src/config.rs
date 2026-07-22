@@ -27,6 +27,11 @@ impl ConfigWarning {
     pub fn text(&self) -> &str {
         &self.text
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(text: &str) -> Self {
+        Self::new(text.to_owned())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +54,17 @@ impl LoadedUiConfig {
 
     pub fn warning_texts(&self) -> Vec<&str> {
         self.warnings.iter().map(ConfigWarning::text).collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_warnings(palette: Palette, warnings: &[&str]) -> Self {
+        Self {
+            palette,
+            warnings: warnings
+                .iter()
+                .map(|warning| ConfigWarning::for_test(warning))
+                .collect(),
+        }
     }
 }
 

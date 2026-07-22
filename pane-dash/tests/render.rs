@@ -130,6 +130,23 @@ fn send_modal_is_centered_and_renders_literal_ansi_looking_text_at_small_sizes()
 }
 
 #[test]
+fn send_modal_input_and_footer_use_the_palette_text_and_dim_slots() {
+    let mut state = app_with_palette(
+        vec![record("dash", "%1", "working", "Task")],
+        semantic_palette(),
+    );
+    state.modal = Some(Modal::Send {
+        pane_id: "%1".into(),
+        command: "cat".into(),
+        text: "payload".into(),
+    });
+
+    let buffer = draw_buffer(&state, 80, 24, NOW);
+    assert_eq!(buffer[(6, 10)].fg, Color::Indexed(1));
+    assert_eq!(buffer[(6, 11)].fg, Color::Indexed(2));
+}
+
+#[test]
 fn kill_modal_is_centered_and_safe_at_narrow_and_tiny_sizes() {
     let mut state = app(vec![record("dash", "%42", "working", "Task")]);
     state.modal = Some(Modal::Kill {
@@ -1451,6 +1468,67 @@ fn builtin_themes_render_at_all_required_sizes() {
         }
     }
     insta::assert_snapshot!("semantic_builtin_frames", snapshots.join("\n---\n"));
+}
+
+#[test]
+fn builtin_palettes_apply_representative_styles_to_buffer_cells() {
+    for (name, palette) in [
+        ("dark", Palette::dark()),
+        ("light", Palette::light()),
+        ("terminal-native", Palette::terminal_native()),
+    ] {
+        let mut stale = record("dash", "%6", "working", "Stale");
+        stale.heartbeat = Some(0);
+        let records = vec![
+            record("dash", "%1", "needs_input", "Input"),
+            record("dash", "%2", "working", "Work"),
+            record("dash", "%3", "idle", "Idle"),
+            record("dash", "%4", "error", "Error"),
+            record("dash", "%5", "unknown", "Unknown"),
+            stale,
+        ];
+        let mut state = app_with_palette(records, palette);
+        let buffer = draw_buffer(&state, 160, 50, NOW);
+        assert_eq!(buffer[(0, 0)].fg, palette.accent, "{name} accent");
+        for (row, expected) in [
+            (1, palette.needs_input),
+            (2, palette.working),
+            (3, palette.idle),
+            (4, palette.error),
+            (5, palette.unknown),
+            (6, palette.stale),
+        ] {
+            assert_eq!(buffer[(2, row)].fg, expected, "{name} status row {row}");
+        }
+        assert_eq!(buffer[(72, 0)].fg, palette.border, "{name} border");
+        assert_eq!(buffer[(0, 49)].fg, palette.status_bar, "{name} status bar");
+        assert_eq!(buffer[(28, 1)].fg, palette.dim, "{name} dim");
+        assert_eq!(buffer[(49, 1)].fg, palette.text, "{name} text");
+
+        reduce(
+            &mut state,
+            Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+        );
+        reduce(
+            &mut state,
+            Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+        );
+        let selected = draw_buffer(&state, 160, 50, NOW);
+        if palette.selection_fg == Color::Reset && palette.selection_bg == Color::Reset {
+            assert!(
+                selected[(2, 1)]
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::REVERSED)
+            );
+            assert_eq!(selected[(2, 1)].fg, palette.needs_input);
+        } else {
+            for x in [2, 49, 71] {
+                assert_eq!(selected[(x, 1)].fg, palette.selection_fg, "{name} x={x}");
+                assert_eq!(selected[(x, 1)].bg, palette.selection_bg, "{name} x={x}");
+            }
+        }
+    }
 }
 
 #[test]
