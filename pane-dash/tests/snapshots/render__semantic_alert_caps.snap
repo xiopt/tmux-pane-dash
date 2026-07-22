@@ -1,0 +1,92 @@
+---
+source: tests/render.rs
+expression: frames
+---
+160x50
+▾ dash (1)                                                              │select a pane to preview
+  ○ idle         2m    1.2  tmp          sonnet  Task                   │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+live updates lost — polling
+snapshot failed (2): tmux unavailable
+⚠ polling failures: 2
+dropped: 3
+idle 1  1 panes  grouped | NAV
+---
+80x24
+▾ dash (1)
+  ○ idle         2m    1.2  tmp          sonnet  Task
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+select a pane to preview
+
+
+
+
+
+
+
+
+live updates lost — polling
+snapshot failed (2): tmux unavailable
+⚠ polling failures: 2
+dropped: 3
+idle 1  1 panes  grouped | NAV
+---
+18x6
+──────────────────
+live updates lost…
+snapshot failed (…
+⚠ polling failure…
+dropped: 3
+I1P1 grouped NAV
+---
+1x1
+I

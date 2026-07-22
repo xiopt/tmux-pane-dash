@@ -12,9 +12,7 @@ use pane_dash::options::DashConfig;
 use pane_dash::palette::Palette;
 use pane_dash::preview::PreviewFrame;
 use pane_dash::snapshot::RawRecord;
-use pane_dash::ui::{
-    dashboard_areas, format_age, palette, preview_inner_height, render, truncate_to_width,
-};
+use pane_dash::ui::{dashboard_areas, format_age, preview_inner_height, render, truncate_to_width};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -54,6 +52,34 @@ fn app(records: Vec<RawRecord>) -> AppState {
         DashConfig::default(),
         LoadedUiConfig::default(),
     )
+}
+
+fn app_with_palette(records: Vec<RawRecord>, palette: Palette) -> AppState {
+    AppState::new(
+        Model::build(&records, &ModelConfig::default(), NOW),
+        DashConfig::default(),
+        LoadedUiConfig::with_palette(palette),
+    )
+}
+
+fn semantic_palette() -> Palette {
+    Palette {
+        text: Color::Indexed(1),
+        dim: Color::Indexed(2),
+        accent: Color::Indexed(3),
+        needs_input: Color::Indexed(4),
+        working: Color::Indexed(5),
+        idle: Color::Indexed(6),
+        error: Color::Indexed(7),
+        unknown: Color::Indexed(8),
+        stale: Color::Indexed(9),
+        warning: Color::Indexed(10),
+        degrade: Color::Indexed(11),
+        border: Color::Indexed(12),
+        status_bar: Color::Indexed(13),
+        selection_fg: Color::Indexed(14),
+        selection_bg: Color::Indexed(15),
+    }
 }
 
 fn draw(app: &AppState, width: u16, height: u16) -> String {
@@ -572,7 +598,10 @@ fn status_counts_deduplicate_linked_panes() {
 
 #[test]
 fn selected_row_is_reversed() {
-    let mut state = app(vec![record("dash", "%1", "working", "Add retry logic")]);
+    let mut state = app_with_palette(
+        vec![record("dash", "%1", "working", "Add retry logic")],
+        Palette::terminal_native(),
+    );
     reduce(
         &mut state,
         Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
@@ -596,7 +625,10 @@ fn selected_row_is_reversed() {
 
 #[test]
 fn focused_header_is_reversed() {
-    let mut state = app(vec![record("dash", "%1", "working", "Add retry logic")]);
+    let mut state = app_with_palette(
+        vec![record("dash", "%1", "working", "Add retry logic")],
+        Palette::terminal_native(),
+    );
     reduce(
         &mut state,
         Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
@@ -615,16 +647,19 @@ fn focused_header_is_reversed() {
 
 #[test]
 fn focused_header_scrolls_into_view() {
-    let mut state = app((0..12)
-        .map(|index| {
-            record(
-                &format!("session-{index:02}"),
-                &format!("%{index}"),
-                "idle",
-                "Work",
-            )
-        })
-        .collect());
+    let mut state = app_with_palette(
+        (0..12)
+            .map(|index| {
+                record(
+                    &format!("session-{index:02}"),
+                    &format!("%{index}"),
+                    "idle",
+                    "Work",
+                )
+            })
+            .collect(),
+        Palette::terminal_native(),
+    );
     reduce(
         &mut state,
         Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)),
@@ -679,21 +714,24 @@ fn alerts_remain_visible_with_all_statuses_at_80_columns() {
 }
 
 #[test]
-fn long_banner_wraps_instead_of_clipping() {
+fn long_banner_truncates_to_one_alert_row() {
     let mut state = app(vec![record("dash", "%1", "idle", "Idle")]);
     let banner = "x".repeat(120);
     state.banner = Some(banner.clone());
 
-    assert!(draw(&state, 80, 24).replace('\n', "").contains(&banner));
+    let rendered = draw(&state, 80, 24);
+    let alert = rendered.lines().find(|line| line.starts_with('x')).unwrap();
+    assert!(alert.ends_with('…'));
+    assert_eq!(rendered.matches('x').count(), 79);
 }
 
 #[test]
-fn narrow_multiword_banner_wraps_without_losing_words() {
+fn narrow_multiword_banner_truncates_without_wrapping() {
     let mut state = app(vec![record("dash", "%1", "idle", "Idle")]);
     state.banner = Some("123456 123456 123456".into());
 
     let rendered = draw(&state, 10, 8);
-    assert_eq!(rendered.matches("123456").count(), 3);
+    assert!(rendered.lines().any(|line| line == "123456 12…"));
 }
 
 #[test]
@@ -884,10 +922,10 @@ fn creation_viewports_and_styles_keep_interaction_visible() {
     let selected = choice_buffer
         .content()
         .iter()
-        .find(|cell| cell.symbol() == "n" && cell.style().fg == Some(palette::ACCENT))
+        .find(|cell| cell.symbol() == "n" && cell.style().bg == Some(Color::Cyan))
         .unwrap()
         .style();
-    assert!(selected.add_modifier.contains(Modifier::REVERSED));
+    assert_eq!(selected.fg, Some(Color::Black));
 
     for field in [CreateField::Name, CreateField::Cwd, CreateField::Command] {
         let mut form = app(Vec::new());
@@ -915,10 +953,10 @@ fn creation_viewports_and_styles_keep_interaction_visible() {
         let active = draw_buffer(&form, 20, 4, NOW)
             .content()
             .iter()
-            .find(|cell| cell.style().fg == Some(palette::ACCENT))
+            .find(|cell| cell.style().bg == Some(Color::Cyan))
             .unwrap()
             .style();
-        assert!(active.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(active.fg, Some(Color::Black));
     }
 
     let mut pending = app(Vec::new());
@@ -931,12 +969,12 @@ fn creation_viewports_and_styles_keep_interaction_visible() {
     });
     assert_eq!(
         draw_buffer(&pending, 40, 8, NOW).content()[0].style().fg,
-        Some(palette::WORKING)
+        Some(Color::Yellow)
     );
     pending.pending_creation.as_mut().unwrap().state = PendingCreationState::Error("bad".into());
     assert_eq!(
         draw_buffer(&pending, 40, 8, NOW).content()[0].style().fg,
-        Some(palette::ERROR)
+        Some(Color::Red)
     );
 }
 
@@ -1200,4 +1238,236 @@ fn creation_pending_stages_and_modal_sizes_are_deterministic() {
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { draw(&state, 0, 0) })).is_ok()
     );
+}
+
+#[test]
+fn every_status_slot_styles_its_glyph_and_text_independently() {
+    let statuses = [
+        ("needs_input", Color::Indexed(4)),
+        ("working", Color::Indexed(5)),
+        ("idle", Color::Indexed(6)),
+        ("error", Color::Indexed(7)),
+        ("unknown", Color::Indexed(8)),
+        ("stale", Color::Indexed(9)),
+    ];
+
+    for (status, expected) in statuses {
+        let mut record = record(
+            "dash",
+            "%1",
+            if status == "stale" { "working" } else { status },
+            "Task",
+        );
+        if status == "stale" {
+            record.heartbeat = Some(0);
+        }
+        let buffer = draw_buffer(
+            &app_with_palette(vec![record], semantic_palette()),
+            80,
+            24,
+            NOW,
+        );
+        assert_eq!(buffer[(2, 1)].fg, expected, "{status} glyph");
+        assert_eq!(buffer[(4, 1)].fg, expected, "{status} text");
+    }
+}
+
+#[test]
+fn explicit_selection_overrides_status_label_and_padding_cells() {
+    let mut state = app_with_palette(
+        vec![record("dash", "%1", "working", "Task")],
+        semantic_palette(),
+    );
+    reduce(
+        &mut state,
+        Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    );
+    reduce(
+        &mut state,
+        Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    );
+
+    let buffer = draw_buffer(&state, 80, 24, NOW);
+    for x in [2, 4, 40, 79] {
+        assert_eq!(buffer[(x, 1)].fg, Color::Indexed(14), "x={x}");
+        assert_eq!(buffer[(x, 1)].bg, Color::Indexed(15), "x={x}");
+    }
+}
+
+#[test]
+fn active_create_choice_and_form_apply_explicit_selection_to_padding() {
+    let mut choice = app_with_palette(Vec::new(), semantic_palette());
+    choice.modal = Some(Modal::Create(CreateModal::Choice {
+        choices: vec![CreateChoice {
+            label: "split right",
+            kind: CreateChoiceKind::Right,
+            context: CreateContext::NewSession,
+            cwd: String::new(),
+        }],
+        selected: 0,
+    }));
+    let choice_buffer = draw_buffer(&choice, 80, 24, NOW);
+    for x in [6, 20, 73] {
+        assert_eq!(
+            choice_buffer[(x, 10)].fg,
+            Color::Indexed(14),
+            "choice x={x}"
+        );
+        assert_eq!(
+            choice_buffer[(x, 10)].bg,
+            Color::Indexed(15),
+            "choice x={x}"
+        );
+    }
+
+    let mut form = app_with_palette(Vec::new(), semantic_palette());
+    form.modal = Some(Modal::Create(CreateModal::Form(CreateForm {
+        kind: CreateContext::NewSession,
+        field: CreateField::Name,
+        draft: CreateDraft {
+            name: "dash".into(),
+            cwd: "/tmp".into(),
+            command: "opencode".into(),
+        },
+        submitting: false,
+        error: None,
+        linked_session_count: 0,
+    })));
+    let form_buffer = draw_buffer(&form, 80, 24, NOW);
+    for x in [6, 20, 73] {
+        assert_eq!(form_buffer[(x, 8)].fg, Color::Indexed(14), "form x={x}");
+        assert_eq!(form_buffer[(x, 8)].bg, Color::Indexed(15), "form x={x}");
+    }
+}
+
+#[test]
+fn palette_colors_every_border_and_only_the_status_bar_foreground() {
+    let palette = semantic_palette();
+    let state = app_with_palette(vec![record("dash", "%1", "working", "Task")], palette);
+    let preview = draw_buffer(&state, 160, 50, NOW);
+    assert_eq!(preview[(72, 0)].fg, Color::Indexed(12));
+    assert_eq!(preview[(0, 49)].fg, Color::Indexed(13));
+    assert_eq!(preview[(0, 49)].bg, Color::Reset);
+
+    for modal in [
+        Modal::Send {
+            pane_id: "%1".into(),
+            command: "echo".into(),
+            text: String::new(),
+        },
+        Modal::Kill {
+            pane_id: PaneId::from("%1"),
+        },
+    ] {
+        let mut modal_state = app_with_palette(
+            vec![record("dash", "%1", "working", "Task")],
+            semantic_palette(),
+        );
+        modal_state.modal = Some(modal);
+        let buffer = draw_buffer(&modal_state, 80, 24, NOW);
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "┌" && cell.fg == Color::Indexed(12))
+        );
+    }
+
+    for modal in [
+        Modal::Create(CreateModal::Choice {
+            choices: vec![CreateChoice {
+                label: "split right",
+                kind: CreateChoiceKind::Right,
+                context: CreateContext::NewSession,
+                cwd: String::new(),
+            }],
+            selected: 0,
+        }),
+        Modal::Create(CreateModal::Form(CreateForm {
+            kind: CreateContext::NewSession,
+            field: CreateField::Name,
+            draft: CreateDraft {
+                name: "dash".into(),
+                cwd: "/tmp".into(),
+                command: "opencode".into(),
+            },
+            submitting: false,
+            error: None,
+            linked_session_count: 0,
+        })),
+    ] {
+        let mut modal_state = app_with_palette(
+            vec![record("dash", "%1", "working", "Task")],
+            semantic_palette(),
+        );
+        modal_state.modal = Some(modal);
+        assert!(
+            draw_buffer(&modal_state, 80, 24, NOW)
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "┌" && cell.fg == Color::Indexed(12))
+        );
+    }
+}
+
+#[test]
+fn alert_rows_are_priority_ordered_truncated_and_height_capped() {
+    let mut state = app_with_palette(
+        vec![record("dash", "%1", "idle", "Task")],
+        semantic_palette(),
+    );
+    state.transport_degraded = true;
+    state.banner = Some("banner with enough content to truncate".into());
+    state.consecutive_failures = 2;
+    state.dropped_records = 3;
+
+    let rendered = draw(&state, 18, 6);
+    let lines = rendered.lines().collect::<Vec<_>>();
+    assert_eq!(lines[1], "live updates lost…");
+    assert_eq!(lines[2], "banner with enoug…");
+    assert_eq!(lines[3], "⚠ polling failure…");
+    assert_eq!(lines[5], "I1P1 grouped NAV");
+    assert_eq!(lines[4], "dropped: 3");
+    assert_eq!(draw(&state, 0, 1), "");
+}
+
+#[test]
+fn builtin_themes_render_at_all_required_sizes() {
+    let mut snapshots = Vec::new();
+    for (name, palette) in [
+        ("dark", Palette::dark()),
+        ("light", Palette::light()),
+        ("terminal_native", Palette::terminal_native()),
+    ] {
+        let state = app_with_palette(vec![record("dash", "%1", "working", "Task")], palette);
+        for (width, height) in [(160, 50), (80, 24), (18, 6), (1, 1)] {
+            let rendered = draw(&state, width, height);
+            assert_eq!(
+                rendered.lines().count(),
+                usize::from(height),
+                "{name} {width}x{height}"
+            );
+            snapshots.push(format!("{name} {width}x{height}\n{rendered}"));
+        }
+    }
+    insta::assert_snapshot!("semantic_builtin_frames", snapshots.join("\n---\n"));
+}
+
+#[test]
+fn alert_combinations_snapshot_at_required_sizes() {
+    let mut state = app_with_palette(
+        vec![record("dash", "%1", "idle", "Task")],
+        semantic_palette(),
+    );
+    state.transport_degraded = true;
+    state.banner = Some("snapshot failed (2): tmux unavailable".into());
+    state.consecutive_failures = 2;
+    state.dropped_records = 3;
+
+    let frames = [(160, 50), (80, 24), (18, 6), (1, 1)]
+        .into_iter()
+        .map(|(width, height)| format!("{width}x{height}\n{}", draw(&state, width, height)))
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    insta::assert_snapshot!("semantic_alert_caps", frames);
 }

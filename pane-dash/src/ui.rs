@@ -1,16 +1,17 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     AppState, CreateField, CreateModal, Modal, Mode, PendingCreationState, status_index,
 };
 use crate::creation::{CreateContext, display_error};
 use crate::model::{Row, Status};
+use crate::palette::{Palette, selection_style};
 
 pub use crate::app::format_age;
 
@@ -26,20 +27,6 @@ struct FullLayout {
     alerts_area: Rect,
     status_area: Rect,
     dashboard: DashboardAreas,
-}
-
-pub mod palette {
-    use ratatui::style::Color;
-
-    pub const TEXT: Color = Color::Gray;
-    pub const DIM: Color = Color::DarkGray;
-    pub const ACCENT: Color = Color::Cyan;
-    pub const NEEDS_INPUT: Color = Color::Red;
-    pub const WORKING: Color = Color::Yellow;
-    pub const IDLE: Color = Color::Gray;
-    pub const ERROR: Color = Color::Red;
-    pub const STATUS_BAR: Color = Color::DarkGray;
-    pub const DEGRADE: Color = Color::Red;
 }
 
 pub fn dashboard_areas(content: Rect) -> DashboardAreas {
@@ -58,7 +45,7 @@ pub fn dashboard_areas(content: Rect) -> DashboardAreas {
 
 pub fn preview_inner_height(app: &AppState, full_area: Rect) -> u16 {
     let layout = full_layout(app, full_area);
-    preview_block(layout.dashboard.horizontal)
+    preview_block(app.palette(), layout.dashboard.horizontal)
         .inner(layout.dashboard.preview)
         .height
 }
@@ -82,12 +69,14 @@ fn full_layout(app: &AppState, full_area: Rect) -> FullLayout {
     }
 }
 
-fn preview_block(horizontal: bool) -> Block<'static> {
-    Block::default().borders(if horizontal {
-        Borders::LEFT
-    } else {
-        Borders::TOP
-    })
+fn preview_block(palette: &Palette, horizontal: bool) -> Block<'static> {
+    Block::default()
+        .borders(if horizontal {
+            Borders::LEFT
+        } else {
+            Borders::TOP
+        })
+        .border_style(Style::default().fg(palette.border))
 }
 
 pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
@@ -97,7 +86,7 @@ pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
     if let Some(pending) = &app.pending_creation {
         let pending_area = Rect::new(list_area.x, list_area.y, list_area.width, pending_height);
         frame.render_widget(
-            Paragraph::new(pending_line(pending, now, list_area.width)),
+            Paragraph::new(pending_line(pending, now, list_area.width, app.palette())),
             pending_area,
         );
     }
@@ -124,7 +113,7 @@ pub fn render(frame: &mut Frame, app: &AppState, now: u64) {
                 "no panes match filter"
             })
             .alignment(Alignment::Center)
-            .style(Style::default().fg(palette::DIM)),
+            .style(Style::default().fg(app.palette().dim)),
             hint_area,
         );
     } else {
@@ -186,7 +175,13 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
                 &format!("Send to {} (running: {})", pane_id.0, command),
                 usize::from(width.saturating_sub(4)),
             );
-            let block = Block::default().borders(Borders::ALL).title(title);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(app.palette().border))
+                .title(Span::styled(
+                    title,
+                    Style::default().fg(app.palette().accent),
+                ));
             let inner = block.inner(modal_area);
             frame.render_widget(block, modal_area);
             if inner.width == 0 || inner.height == 0 {
@@ -211,19 +206,25 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
                 usize::from(width.saturating_sub(4)),
             );
             frame.render_widget(
-                Block::default().borders(Borders::ALL).title(title),
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(app.palette().border))
+                    .title(Span::styled(
+                        title,
+                        Style::default().fg(app.palette().accent),
+                    )),
                 modal_area,
             );
         }
         Modal::Create(CreateModal::Choice { choices, selected }) => {
             let modal_area = centered_modal_rect(area, 70, choices.len().saturating_add(4) as u16);
             frame.render_widget(Clear, modal_area);
-            render_create_choice(frame, modal_area, choices, *selected);
+            render_create_choice(frame, modal_area, choices, *selected, app.palette());
         }
         Modal::Create(CreateModal::Form(form)) => {
             let modal_area = centered_modal_rect(area, 70, 10);
             frame.render_widget(Clear, modal_area);
-            render_create_form(frame, modal_area, form);
+            render_create_form(frame, modal_area, form, app.palette());
         }
     }
 }
@@ -245,8 +246,12 @@ fn render_create_choice(
     area: Rect,
     choices: &[crate::app::CreateChoice],
     selected: usize,
+    palette: &Palette,
 ) {
-    let block = Block::default().borders(Borders::ALL).title("Create");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.border))
+        .title(Span::styled("Create", Style::default().fg(palette.accent)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -266,15 +271,18 @@ fn render_create_choice(
         .skip(start)
         .take(choice_slots)
         .map(|(index, choice)| {
+            let active = index == selected;
+            let text = pad_to_width(
+                &truncate_to_width(choice.label, usize::from(inner.width)),
+                usize::from(inner.width),
+            );
             Line::from(Span::styled(
-                truncate_to_width(choice.label, usize::from(inner.width)),
-                if index == selected {
-                    Style::default()
-                        .fg(palette::ACCENT)
-                        .add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default().fg(palette::TEXT)
-                },
+                text,
+                selected_style(
+                    Style::default().fg(if active { palette.accent } else { palette.text }),
+                    active,
+                    palette,
+                ),
             ))
         })
         .collect::<Vec<_>>();
@@ -284,19 +292,27 @@ fn render_create_choice(
                 "↑↓ select | Enter choose | Esc cancel",
                 usize::from(inner.width),
             ),
-            Style::default().fg(palette::DIM),
+            Style::default().fg(palette.dim),
         ));
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateForm) {
+fn render_create_form(
+    frame: &mut Frame,
+    area: Rect,
+    form: &crate::app::CreateForm,
+    palette: &Palette,
+) {
     let title = match form.kind {
         CreateContext::Split { .. } => "Create split",
         CreateContext::NewWindow { .. } => "Create window",
         CreateContext::NewSession => "Create session",
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.border))
+        .title(Span::styled(title, Style::default().fg(palette.accent)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -332,18 +348,18 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
             };
             let active = field == form.field && !form.submitting;
             Line::styled(
-                text,
-                if active {
-                    Style::default()
-                        .fg(palette::ACCENT)
-                        .add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default().fg(if form.submitting {
-                        palette::DIM
+                pad_to_width(&text, usize::from(inner.width)),
+                selected_style(
+                    Style::default().fg(if active {
+                        palette.accent
+                    } else if form.submitting {
+                        palette.dim
                     } else {
-                        palette::TEXT
-                    })
-                },
+                        palette.text
+                    }),
+                    active,
+                    palette,
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -356,7 +372,7 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
                 ),
                 usize::from(inner.width),
             ),
-            Style::default().fg(palette::DIM),
+            Style::default().fg(palette.dim),
         )
     });
     let validation_error = form.error.as_ref().map(|error| {
@@ -365,7 +381,7 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
                 &format!("ERROR: {}", literal_input(&display_error(error))),
                 usize::from(inner.width),
             ),
-            Style::default().fg(palette::ERROR),
+            Style::default().fg(palette.error),
         )
     });
     let footer = Line::styled(
@@ -377,7 +393,7 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
             },
             usize::from(inner.width),
         ),
-        Style::default().fg(palette::DIM),
+        Style::default().fg(palette.dim),
     );
     let mut lines = field_lines.clone();
     if let Some(linked_notice) = &linked_notice {
@@ -419,38 +435,43 @@ fn render_create_form(frame: &mut Frame, area: Rect, form: &crate::app::CreateFo
     frame.render_widget(Paragraph::new(visible), inner);
 }
 
-fn pending_line(pending: &crate::app::PendingCreation, now: u64, width: u16) -> Line<'static> {
+fn pending_line(
+    pending: &crate::app::PendingCreation,
+    now: u64,
+    width: u16,
+    palette: &Palette,
+) -> Line<'static> {
     let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let (text, style) = match &pending.state {
         PendingCreationState::Creating => (
             format!("{} creating...", spinner[now as usize % spinner.len()]),
-            Style::default().fg(palette::WORKING),
+            Style::default().fg(palette.working),
         ),
         PendingCreationState::Created { .. } | PendingCreationState::Tagging { .. } => (
             format!("{} tagging...", spinner[now as usize % spinner.len()]),
-            Style::default().fg(palette::WORKING),
+            Style::default().fg(palette.working),
         ),
         PendingCreationState::Sending { .. } => (
             format!(
                 "{} sending command...",
                 spinner[now as usize % spinner.len()]
             ),
-            Style::default().fg(palette::WORKING),
+            Style::default().fg(palette.working),
         ),
         PendingCreationState::Entering { .. } => (
             format!("{} sending Enter...", spinner[now as usize % spinner.len()]),
-            Style::default().fg(palette::WORKING),
+            Style::default().fg(palette.working),
         ),
         PendingCreationState::AwaitingSnapshot { .. } => (
             format!(
                 "{} waiting for snapshot...",
                 spinner[now as usize % spinner.len()]
             ),
-            Style::default().fg(palette::WORKING),
+            Style::default().fg(palette.working),
         ),
         PendingCreationState::Error(error) => (
             format!("ERROR: {}", literal_input(&display_error(error))),
-            Style::default().fg(palette::ERROR),
+            Style::default().fg(palette.error),
         ),
     };
     Line::styled(truncate_to_width(&text, usize::from(width)), style)
@@ -472,7 +493,7 @@ fn literal_input(text: &str) -> String {
 }
 
 fn render_preview(frame: &mut Frame, app: &AppState, areas: DashboardAreas) {
-    let block = preview_block(areas.horizontal);
+    let block = preview_block(app.palette(), areas.horizontal);
     let inner = block.inner(areas.preview);
     frame.render_widget(block, areas.preview);
     if inner.width == 0 || inner.height == 0 {
@@ -481,16 +502,16 @@ fn render_preview(frame: &mut Frame, app: &AppState, areas: DashboardAreas) {
 
     let paragraph = match (&app.preview.target, &app.preview.frame, &app.preview.error) {
         (None, _, _) => {
-            Paragraph::new("select a pane to preview").style(Style::default().fg(palette::DIM))
+            Paragraph::new("select a pane to preview").style(Style::default().fg(app.palette().dim))
         }
         (Some(_), _, Some(error)) => Paragraph::new(format!("preview unavailable: {error}"))
-            .style(Style::default().fg(palette::DIM)),
+            .style(Style::default().fg(app.palette().dim)),
         (Some(_), Some(preview), None) => {
             let start = preview_scroll(app, preview.lines.len(), inner.height);
             Paragraph::new(preview.lines.clone()).scroll((start, 0))
         }
         (Some(_), None, None) => {
-            Paragraph::new("capturing pane…").style(Style::default().fg(palette::DIM))
+            Paragraph::new("capturing pane…").style(Style::default().fg(app.palette().dim))
         }
     };
     frame.render_widget(paragraph, inner);
@@ -512,7 +533,7 @@ fn alert_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
         push_alert(
             &mut alerts,
             "live updates lost — polling",
-            Style::default().fg(palette::DEGRADE),
+            Style::default().fg(app.palette().degrade),
             width,
         );
     }
@@ -520,7 +541,7 @@ fn alert_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
         push_alert(
             &mut alerts,
             banner,
-            Style::default().fg(palette::DEGRADE),
+            Style::default().fg(app.palette().degrade),
             width,
         );
     }
@@ -528,7 +549,15 @@ fn alert_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
         push_alert(
             &mut alerts,
             &format!("⚠ polling failures: {}", app.consecutive_failures),
-            Style::default().fg(palette::DEGRADE),
+            Style::default().fg(app.palette().degrade),
+            width,
+        );
+    }
+    for warning in app.config_warnings().iter().take(4) {
+        push_alert(
+            &mut alerts,
+            warning.text(),
+            Style::default().fg(app.palette().warning),
             width,
         );
     }
@@ -536,62 +565,32 @@ fn alert_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
         push_alert(
             &mut alerts,
             &format!("dropped: {}", app.dropped_records),
-            Style::default().fg(palette::DIM),
+            Style::default().fg(app.palette().dim),
             width,
         );
     }
+    alerts.truncate(8);
     alerts
 }
 
 fn push_alert(alerts: &mut Vec<Line<'static>>, message: &str, style: Style, width: u16) {
-    alerts.extend(
-        wrap_alert(message, usize::from(width))
-            .into_iter()
-            .map(|line| Line::styled(line, style)),
-    );
+    alerts.push(Line::styled(
+        truncate_alert(message, usize::from(width)),
+        style,
+    ));
 }
 
-fn wrap_alert(message: &str, width: usize) -> Vec<String> {
+fn truncate_alert(message: &str, width: usize) -> String {
     if width == 0 {
-        return Vec::new();
+        return String::new();
     }
-
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in message.split_whitespace() {
-        if word.width() > width {
-            if !line.is_empty() {
-                lines.push(std::mem::take(&mut line));
-            }
-            wrap_long_word(word, width, &mut lines);
-        } else if line.is_empty() {
-            line.push_str(word);
-        } else if line.width() + 1 + word.width() <= width {
-            line.push(' ');
-            line.push_str(word);
-        } else {
-            lines.push(std::mem::take(&mut line));
-            line.push_str(word);
-        }
+    if message.width() <= width {
+        return message.to_owned();
     }
-    if !line.is_empty() || lines.is_empty() {
-        lines.push(line);
+    if width == 1 {
+        return "…".into();
     }
-    lines
-}
-
-fn wrap_long_word(word: &str, width: usize, lines: &mut Vec<String>) {
-    let mut line = String::new();
-    for character in word.chars() {
-        let character_width = character.width().unwrap_or(0);
-        if !line.is_empty() && line.width() + character_width > width {
-            lines.push(std::mem::take(&mut line));
-        }
-        line.push(character);
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
+    format!("{}…", truncate_to_width(message, width - 1))
 }
 
 fn scroll_offset(selected: Option<usize>, row_count: usize, height: usize) -> usize {
@@ -632,7 +631,10 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
                             .max(1),
                     ),
                 ));
-                spans.push(Span::styled(suffix, Style::default().fg(palette::WORKING)));
+                spans.push(Span::styled(
+                    suffix,
+                    Style::default().fg(app.palette().working),
+                ));
             }
             spans
         }
@@ -680,14 +682,17 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
                 Span::raw(indent),
                 Span::styled(
                     status_glyph(*status),
-                    Style::default().fg(status_color(*status)),
+                    Style::default().fg(status_color(*status, app.palette())),
                 ),
                 Span::raw(" "),
-                Span::styled(status_field, Style::default().fg(status_color(*status))),
+                Span::styled(
+                    status_field,
+                    Style::default().fg(status_color(*status, app.palette())),
+                ),
                 Span::raw(suffix),
-                Span::styled(context, Style::default().fg(palette::DIM)),
+                Span::styled(context, Style::default().fg(app.palette().dim)),
                 Span::raw(" "),
-                Span::styled(model.clone(), Style::default().fg(palette::DIM)),
+                Span::styled(model.clone(), Style::default().fg(app.palette().dim)),
                 Span::raw("  "),
             ];
             let label = truncate_to_width(
@@ -695,7 +700,7 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
                 usize::from(width)
                     .saturating_sub(spans.iter().map(|span| span.content.width()).sum::<usize>()),
             );
-            spans.push(Span::styled(label, Style::default().fg(palette::TEXT)));
+            spans.push(Span::styled(label, Style::default().fg(app.palette().text)));
             spans
         }
     };
@@ -703,11 +708,13 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
     spans.push(Span::raw(
         " ".repeat(usize::from(width).saturating_sub(used)),
     ));
-    Line::from(spans).style(if selected {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    })
+    if selected {
+        let selection = selection_style(*app.palette());
+        for span in &mut spans {
+            span.style = span.style.patch(selection);
+        }
+    }
+    Line::from(spans)
 }
 
 fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'static> {
@@ -781,7 +788,7 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
     };
     let spans = vec![Span::styled(
         format!("{counts}{separator}{suffix}{query}"),
-        Style::default().fg(palette::STATUS_BAR),
+        Style::default().fg(app.palette().status_bar),
     )];
     Paragraph::new(Line::from(spans))
 }
@@ -850,13 +857,22 @@ fn status_text(status: Status) -> &'static str {
     }
 }
 
-fn status_color(status: Status) -> Color {
+fn status_color(status: Status, palette: &Palette) -> Color {
     match status {
-        Status::NeedsInput => palette::NEEDS_INPUT,
-        Status::Working => palette::WORKING,
-        Status::Idle => palette::IDLE,
-        Status::Error => palette::ERROR,
-        Status::Unknown | Status::Stale => palette::DIM,
+        Status::NeedsInput => palette.needs_input,
+        Status::Working => palette.working,
+        Status::Idle => palette.idle,
+        Status::Error => palette.error,
+        Status::Unknown => palette.unknown,
+        Status::Stale => palette.stale,
+    }
+}
+
+fn selected_style(style: Style, selected: bool, palette: &Palette) -> Style {
+    if selected {
+        style.patch(selection_style(*palette))
+    } else {
+        style
     }
 }
 
