@@ -54,7 +54,7 @@ assert_mode_755() {
 
   [ "$status" -eq 0 ]
   grep -Fx $'cargo\037build --locked --release --manifest-path pane-dash/Cargo.toml' "$FAKE_LOG"
-  grep -E '^install.*\.pane-dash\.[0-9]+$' "$FAKE_LOG"
+  grep -E '^install.*\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG"
   [ -x "$SCRATCH/bin/pane-dash" ]
   assert_mode_755 "$SCRATCH/bin/pane-dash"
   ! compgen -G "$SCRATCH/bin/.pane-dash.*" >/dev/null
@@ -86,7 +86,7 @@ assert_mode_755() {
   [ "$status" -eq 0 ]
   [ -x "$SCRATCH/bin/pane-dash" ]
   [ -x "$stage$bindir/pane-dash" ]
-  [ "$(grep -Ec '^install.*\.pane-dash\.[0-9]+$' "$FAKE_LOG")" -eq 2 ]
+  [ "$(grep -Ec '^install.*\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG")" -eq 2 ]
   assert_mode_755 "$stage$bindir/pane-dash"
   ! compgen -G "$stage$bindir/.pane-dash.*" >/dev/null
 }
@@ -197,11 +197,38 @@ assert_mode_755() {
     [[ "$output" != *curl* ]]
     [[ "$output" != *wget* ]]
     [[ "$output" != *'rm -rf'* ]]
+    if [ "$target" = build ] || [ "$target" = install ] || [ "$target" = clean ]; then
+      [[ "$output" == *cargo* ]]
+    fi
+    if [ "$target" = build ] || [ "$target" = install ]; then
+      [[ "$output" == *install* ]]
+      [[ "$output" == *mv* ]]
+    fi
     [ "$outside_before" = "$(fingerprint "$outside")" ]
   done
 
   run make -C "$SCRATCH" help
   [ "$status" -eq 0 ]
   [ "$before" = "$(fingerprint "$SCRATCH")" ]
-  [ "$output" = $'Targets:\n  build      Build pane-dash locally.\n  install    Build and install pane-dash.\n  uninstall  Remove the installed pane-dash binary.\n  clean      Remove local build outputs.\n\nVariables:\n  CARGO      Cargo command (default: cargo).\n  INSTALL    Install command (default: install).\n  PREFIX     Installation prefix (default: $(HOME)/.local).\n  BINDIR     Binary directory (default: $(PREFIX)/bin).\n  DESTDIR    Staging prefix (default: empty).\n\nInstall destination: $(DESTDIR)$(BINDIR)/pane-dash\nExamples:\n  make install\n  make install PREFIX=/usr/local\n  make install DESTDIR=/tmp/package PREFIX=/usr/local' ]
+  [[ "$output" == *'Install executable (default: install; no embedded arguments).'* ]]
+}
+
+@test "Makefile uses POSIX shell defaults instead of GNU export and default HOME destination" {
+  run grep -E '^export |\$\(shell|\.ONESHELL' "$SCRATCH/Makefile"
+  [ "$status" -eq 1 ]
+
+  home="$BATS_TEST_TMPDIR/home"
+  run env HOME="$home" CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install" make -C "$SCRATCH" install
+  [ "$status" -eq 0 ]
+  [ -x "$home/.local/bin/pane-dash" ]
+}
+
+@test "INSTALL executable path with spaces is treated as data" {
+  spaced="$BATS_TEST_TMPDIR/install tool"
+  cp "$FAKE_BIN/install" "$spaced"
+  chmod +x "$spaced"
+
+  run env CARGO="$FAKE_BIN/cargo" INSTALL="$spaced" make -C "$SCRATCH" build
+  [ "$status" -eq 0 ]
+  [ -x "$SCRATCH/bin/pane-dash" ]
 }

@@ -4,35 +4,38 @@ PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 DESTDIR ?=
 
-export CARGO INSTALL PREFIX BINDIR DESTDIR
-
 .PHONY: build install uninstall clean help
 
 build:
 	@set -eu; \
-	"$$CARGO" build --locked --release --manifest-path pane-dash/Cargo.toml; \
+	cargo=$${CARGO:-cargo}; install=$${INSTALL:-install}; \
+	"$$cargo" build --locked --release --manifest-path pane-dash/Cargo.toml; \
 	mkdir -p "bin"; \
-	temporary="bin/.pane-dash.$$$$"; \
-	trap 'rm -f "$$temporary"' 0 HUP INT TERM; \
-	"$$INSTALL" -m 0755 "pane-dash/target/release/pane-dash" "$$temporary"; \
+	temporary="bin/.pane-dash.tmp.$$$$"; \
+	cleanup() { rm -f "$$temporary"; }; \
+	trap cleanup 0; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; \
+	"$$install" -m 0755 "pane-dash/target/release/pane-dash" "$$temporary"; \
 	mv -f "$$temporary" "bin/pane-dash"; \
 	trap - 0 HUP INT TERM
 
 install: build
 	@set -eu; \
-	directory="$$DESTDIR$$BINDIR"; \
+	install=$${INSTALL:-install}; prefix=$${PREFIX:-$$HOME/.local}; bindir=$${BINDIR:-$$prefix/bin}; destdir=$${DESTDIR:-}; \
+	directory="$$destdir$$bindir"; \
 	mkdir -p "$$directory"; \
-	temporary="$$directory/.pane-dash.$$$$"; \
-	trap 'rm -f "$$temporary"' 0 HUP INT TERM; \
-	"$$INSTALL" -m 0755 "bin/pane-dash" "$$temporary"; \
+	temporary="$$directory/.pane-dash.tmp.$$$$"; \
+	cleanup() { rm -f "$$temporary"; }; \
+	trap cleanup 0; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; \
+	"$$install" -m 0755 "bin/pane-dash" "$$temporary"; \
 	mv -f "$$temporary" "$$directory/pane-dash"; \
 	trap - 0 HUP INT TERM
 
 uninstall:
-	rm -f "$$DESTDIR$$BINDIR/pane-dash"
+	@prefix=$${PREFIX:-$$HOME/.local}; bindir=$${BINDIR:-$$prefix/bin}; destdir=$${DESTDIR:-}; \
+	rm -f "$$destdir$$bindir/pane-dash"
 
 clean:
-	"$$CARGO" clean --manifest-path pane-dash/Cargo.toml
+	@cargo=$${CARGO:-cargo}; "$$cargo" clean --manifest-path pane-dash/Cargo.toml
 	rm -f "bin/pane-dash"
 	rmdir "bin" 2>/dev/null || :
 
@@ -46,7 +49,7 @@ help:
 		'' \
 		'Variables:' \
 		'  CARGO      Cargo command (default: cargo).' \
-		'  INSTALL    Install command (default: install).' \
+		'  INSTALL    Install executable (default: install; no embedded arguments).' \
 		'  PREFIX     Installation prefix (default: $$(HOME)/.local).' \
 		'  BINDIR     Binary directory (default: $$(PREFIX)/bin).' \
 		'  DESTDIR    Staging prefix (default: empty).' \
