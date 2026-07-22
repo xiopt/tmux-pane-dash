@@ -8,6 +8,7 @@ MANIFEST=(.gitignore Makefile README.md pane_dash.tmux scripts opencode-plugin p
 scratch_root="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/pane-dash-source-package.XXXXXX")" && pwd -P)"
 archive="$scratch_root/pane-dash-source.tar"
 scratch="$scratch_root/extracted source [*] (meta)"
+cargo_target_dir="$scratch_root/cargo-target"
 sentinel_bin="$scratch_root/sentinels"
 tmux_bin="$(command -v "${TMUX_BIN:-tmux}")"
 socket="pd-source-package-$$"
@@ -56,8 +57,68 @@ source_tar() {
     "$@" "${MANIFEST[@]}"
 }
 
+content_manifest_sha256() {
+  python3 - "$ROOT" "${MANIFEST[@]}" <<'PY' | sha256_stream
+import fnmatch
+import os
+import stat
+import sys
+
+root, *manifest = sys.argv[1:]
+
+def forbidden(relative):
+    parts = relative.split(os.sep)
+    name = parts[-1]
+    return (
+        any(part in {".git", ".cortexkit", "target"} for part in parts)
+        or name == ".DS_Store"
+        or fnmatch.fnmatch(name, ".pane-dash.tmp.*")
+        or fnmatch.fnmatch(name, "._*")
+        or (len(parts) >= 2 and parts[-2:] == ["bin", "pane-dash"])
+    )
+
+paths = []
+for entry in manifest:
+    absolute = os.path.join(root, entry)
+    if os.path.islink(absolute) or os.path.isfile(absolute):
+        paths.append(absolute)
+        continue
+    for directory, directories, files in os.walk(absolute, followlinks=False):
+        directories.sort()
+        files.sort()
+        for name in directories + files:
+            path = os.path.join(directory, name)
+            if os.path.islink(path) or os.path.isfile(path):
+                paths.append(path)
+
+output = sys.stdout.buffer
+for path in sorted(paths, key=lambda candidate: os.path.relpath(candidate, root).encode()):
+    relative = os.path.relpath(path, root)
+    if forbidden(relative):
+        continue
+    if "\n" in relative:
+        raise SystemExit(f"unsupported newline in source-manifest path: {relative!r}")
+    metadata = os.lstat(path)
+    mode = stat.S_IMODE(metadata.st_mode)
+    output.write(relative.encode() + b"\0" + f"{mode:04o}".encode() + b"\0")
+    if stat.S_ISLNK(metadata.st_mode):
+        target = os.readlink(path)
+        if "\n" in target:
+            raise SystemExit(f"unsupported newline in source-manifest symlink target: {relative!r}")
+        output.write(b"L\0" + target.encode() + b"\0")
+    elif stat.S_ISREG(metadata.st_mode):
+        output.write(b"F\0")
+        with open(path, "rb") as source:
+            while chunk := source.read(1024 * 1024):
+                output.write(chunk)
+        output.write(b"\0")
+    else:
+        raise SystemExit(f"unsupported source-manifest entry: {relative!r}")
+PY
+}
+
 source_fingerprint() {
-  source_tar -cf - | sha256_stream
+  content_manifest_sha256
 }
 
 generated_output_metadata() {
@@ -143,6 +204,11 @@ cleanup() {
     mv -f "$wrapped_binary_backup" "${wrapped_binary_backup%.actual}"
   fi
   rm -f "$scratch/pane-dash/target" 2>/dev/null || true
+  rm -rf "$cargo_target_dir"
+  [ ! -e "$cargo_target_dir" ] || {
+    printf 'FAIL: scratch Cargo target remains after cleanup\n' >&2
+    return 1
+  }
   rm -rf "$scratch_root"
 }
 trap cleanup EXIT
@@ -184,7 +250,7 @@ sentinel_log="$scratch_root/sentinel-log"
 mkdir -p "$sentinel_log"
 export SENTINEL_LOG="$sentinel_log"
 export CARGO_NET_OFFLINE=true
-export CARGO_TARGET_DIR="${TMPDIR:-/tmp}/pane-dash-source-package-cargo-target"
+export CARGO_TARGET_DIR="$cargo_target_dir"
 mkdir -p "$CARGO_TARGET_DIR"
 ln -s "$CARGO_TARGET_DIR" "$extracted/pane-dash/target"
 install_root="$scratch_root/install destination"
@@ -325,5 +391,8 @@ generated_after="$(generated_output_metadata)"
 [ "$generated_before" = "$generated_after" ] || fail 'source packaging changed original generated output metadata'
 
 archive_bytes="$(wc -c < "$archive" | tr -d ' ')"
-archive_sha256="$(sha256_file "$archive")"
-printf 'source-package archive_bytes=%s sha256=%s mode=0755 offline=pass\n' "$archive_bytes" "$archive_sha256"
+archive_run_sha256="$(sha256_file "$archive")"
+content_manifest_sha256="$(content_manifest_sha256)"
+[ "$before" = "$content_manifest_sha256" ] || fail 'source packaging changed the explicit source content manifest'
+printf 'source-package archive_bytes=%s archive_run_sha256=%s content_manifest_sha256=%s mode=0755 offline=warm-cache-pass\n' \
+  "$archive_bytes" "$archive_run_sha256" "$content_manifest_sha256"
