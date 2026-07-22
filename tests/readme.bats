@@ -35,6 +35,31 @@ check_requirements() {
   printf '%s\n' "$rows" | grep -Fxq '| OpenCode | optional | Companion status producer only |'
 }
 
+check_legacy_drift() {
+  local file=$1 requirements options status fzf_row obsolete
+  fzf_row='| fzf | >=0.73.0 | Explicit legacy engine or missing-binary fallback only |'
+  requirements="$(section "$file" Requirements)"
+  options="$(section "$file" 'tmux options')"
+  status="$(section "$file" 'Status legend')"
+
+  [ "$(printf '%s\n' "$requirements" | grep -Fxc -- "$fzf_row")" -eq 1 ] || return
+  [ "$(printf '%s\n' "$requirements" | grep -Ec '^\| fzf \|')" -eq 1 ] || return
+  ! grep -Eiq '^\| tmux \| .*3\.2' <<<"$requirements" || return
+  ! grep -Eq '^\| `⊘ stale` \|.*~' <<<"$status" || return
+  ! grep -Fq '✖' "$file" || return
+  ! grep -Eq '^\| `@pane-dash-(width|height)` \| `(80%|70%)`' <<<"$options" || return
+
+  for obsolete in \
+    '@pane-dash-preview-layout' \
+    '@pane-dash-preview-threshold' \
+    '@pane-dash-preview-alt-layout' \
+    '--recheck' \
+    'open_v2.sh'; do
+    ! grep -Fq -- "$obsolete" "$file" || return
+  done
+  ! grep -Fiq 'v1.1 roadmap' "$file"
+}
+
 check_options() {
   local file=$1
   for row in \
@@ -207,11 +232,35 @@ PY
   status="$(section "$README" 'Status legend')"
 
   ! grep -Eiq '^\| tmux \| .*3\.2' <<<"$requirements"
-  ! grep -Eiq '^\| fzf \| .*always|required|universal' <<<"$requirements"
   ! grep -Eq '^\| `⊘ stale` \|.*~' <<<"$status"
   ! grep -Fq '✖' "$README"
   ! grep -Eq '^\| `@pane-dash-(width|height)` \| `(80%|70%)`' <<<"$options"
   ! grep -Fq 'youruser' "$README"
+}
+
+@test "legacy fixed-string drift guard rejects obsolete documentation and permits unrelated requirement prose" {
+  check_legacy_drift "$README"
+
+  local fixture="$BATS_TEST_TMPDIR/README.md"
+  cp "$README" "$fixture"
+  printf '\nOpenCode is not required.\n' >> "$fixture"
+  check_legacy_drift "$fixture"
+}
+
+@test "legacy drift guard rejects every injected obsolete string" {
+  local fixture="$BATS_TEST_TMPDIR/README.md" label obsolete
+  while IFS='|' read -r label obsolete; do
+    cp "$README" "$fixture"
+    printf '\n%s\n' "$obsolete" >> "$fixture"
+    ! check_legacy_drift "$fixture"
+  done <<'CASES'
+preview layout|@pane-dash-preview-layout
+preview threshold|@pane-dash-preview-threshold
+alternate preview layout|@pane-dash-preview-alt-layout
+legacy recheck flag|--recheck
+old launcher|open_v2.sh
+old roadmap|V1.1 ROADMAP
+CASES
 }
 
 @test "contract checkers fail after a default action status or timeline mutation" {
