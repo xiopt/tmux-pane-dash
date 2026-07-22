@@ -66,6 +66,7 @@ pub enum JumpTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
+    Help,
     Send {
         pane_id: PaneId,
         command: String,
@@ -823,6 +824,15 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
         }
         return result;
     }
+    if key.code == KeyCode::Char('?')
+        && (key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT)
+    {
+        state.modal = Some(Modal::Help);
+        return ReduceResult {
+            actions: Vec::new(),
+            changed: true,
+        };
+    }
     if state.pending_key.take().is_some() {
         if key.code == KeyCode::Char('a') && key.modifiers == KeyModifiers::NONE {
             toggle_collapsed(state, &mut result);
@@ -1097,7 +1107,36 @@ fn reduce_modal_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
     let Some(modal) = state.modal.take() else {
         return ReduceResult::default();
     };
+    if matches!(modal, Modal::Help) {
+        return match key.code {
+            KeyCode::Char('?')
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                ReduceResult {
+                    actions: Vec::new(),
+                    changed: true,
+                }
+            }
+            KeyCode::Esc => ReduceResult {
+                actions: Vec::new(),
+                changed: true,
+            },
+            KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => ReduceResult {
+                actions: Vec::new(),
+                changed: true,
+            },
+            _ => {
+                state.modal = Some(Modal::Help);
+                ReduceResult::default()
+            }
+        };
+    }
+    if key.code == KeyCode::Char('?') {
+        state.modal = Some(modal);
+        return ReduceResult::default();
+    }
     match modal {
+        Modal::Help => unreachable!("help was handled before modal dispatch"),
         Modal::Send {
             pane_id,
             command,
@@ -1924,11 +1963,13 @@ mod tests {
     };
 
     use crate::app::{
-        Action, ActionOutcome, AppState, CompletedAction, CreateChoiceKind, CreateForm,
-        CreateModal, CreationId, Event, Focus, InputMode, JumpTarget, Modal, Mode, PendingCreation,
-        PendingCreationState, reduce,
+        Action, ActionOutcome, AppState, CompletedAction, CreateChoice, CreateChoiceKind,
+        CreateField, CreateForm, CreateModal, CreationId, Event, Focus, InputMode, JumpTarget,
+        Modal, Mode, PendingCreation, PendingCreationState, reduce,
     };
-    use crate::creation::{CreateContext, CreateStage, CreationProgress, CreationResolution};
+    use crate::creation::{
+        CreateContext, CreateDraft, CreateStage, CreationProgress, CreationResolution,
+    };
     use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, Status, WindowId};
     use crate::preview::{PreviewFrame, parse_preview};
     use crate::snapshot::{ParseOutcome, RawRecord};
@@ -4388,5 +4429,167 @@ mod tests {
             },
         );
         assert_eq!(app.banner.as_deref(), Some("kill failed"));
+    }
+
+    #[test]
+    fn help_is_navigation_only_and_filter_keeps_question_marks_as_query_text() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            let result = reduce(&mut app, key_with_modifiers(KeyCode::Char('?'), modifiers));
+            assert!(result.changed);
+            assert!(result.actions.is_empty());
+            assert_eq!(app.modal, Some(Modal::Help));
+            let closed = reduce(&mut app, key_with_modifiers(KeyCode::Char('?'), modifiers));
+            assert!(closed.changed);
+            assert!(closed.actions.is_empty());
+            assert_eq!(app.modal, None);
+        }
+
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ] {
+            let result = reduce(&mut app, key_with_modifiers(KeyCode::Char('?'), modifiers));
+            assert!(!result.changed);
+            assert!(result.actions.is_empty());
+            assert_eq!(app.modal, None);
+        }
+
+        reduce(&mut app, key(KeyCode::Char('/')));
+        let result = reduce(&mut app, key(KeyCode::Char('?')));
+        assert!(result.changed);
+        assert_eq!(app.filter_query, "?");
+        assert_eq!(app.modal, None);
+    }
+
+    #[test]
+    fn question_mark_is_inert_in_existing_modals() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        let form = CreateForm {
+            kind: CreateContext::NewSession,
+            field: CreateField::Name,
+            draft: CreateDraft {
+                name: "new".into(),
+                cwd: "/tmp".into(),
+                command: "opencode".into(),
+            },
+            submitting: false,
+            error: None,
+            linked_session_count: 0,
+        };
+        let submitting = CreateForm {
+            submitting: true,
+            ..form.clone()
+        };
+        let modals = [
+            Modal::Send {
+                pane_id: PaneId::from("%a"),
+                command: "opencode".into(),
+                text: "existing".into(),
+            },
+            Modal::Kill {
+                pane_id: PaneId::from("%a"),
+            },
+            Modal::Create(CreateModal::Choice {
+                choices: vec![CreateChoice::new(
+                    CreateChoiceKind::NewSession,
+                    CreateContext::NewSession,
+                    String::new(),
+                )],
+                selected: 0,
+            }),
+            Modal::Create(CreateModal::Form(form)),
+            Modal::Create(CreateModal::Form(submitting)),
+        ];
+
+        for modal in modals {
+            for modifiers in [
+                KeyModifiers::NONE,
+                KeyModifiers::SHIFT,
+                KeyModifiers::CONTROL,
+                KeyModifiers::ALT,
+            ] {
+                app.modal = Some(modal.clone());
+                let result = reduce(&mut app, key_with_modifiers(KeyCode::Char('?'), modifiers));
+                assert!(!result.changed, "{modal:?} with {modifiers:?}");
+                assert!(result.actions.is_empty());
+                assert_eq!(app.modal, Some(modal.clone()));
+                assert!(!app.should_quit);
+            }
+        }
+    }
+
+    #[test]
+    fn help_closes_only_with_documented_unmodified_keys() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+
+        for key_event in [
+            key(KeyCode::Char('?')),
+            shift_key(KeyCode::Char('?')),
+            key(KeyCode::Esc),
+            control_key(KeyCode::Esc),
+            key(KeyCode::Char('q')),
+        ] {
+            app.modal = Some(Modal::Help);
+            let result = reduce(&mut app, key_event);
+            assert!(result.changed);
+            assert!(result.actions.is_empty());
+            assert_eq!(app.modal, None);
+            assert!(!app.should_quit);
+        }
+
+        let action_keys = [
+            key(KeyCode::Enter),
+            key(KeyCode::Char('/')),
+            key(KeyCode::Char('j')),
+            key(KeyCode::Char('k')),
+            key(KeyCode::Char('g')),
+            key(KeyCode::Char('G')),
+            key(KeyCode::Char('h')),
+            key(KeyCode::Char('l')),
+            key(KeyCode::Char('z')),
+            key(KeyCode::Char('a')),
+            key(KeyCode::Char('s')),
+            key(KeyCode::Char('x')),
+            key(KeyCode::Char('n')),
+            key(KeyCode::Backspace),
+            key(KeyCode::Tab),
+            control_key(KeyCode::Char('s')),
+            control_key(KeyCode::Char('u')),
+            control_key(KeyCode::Char('d')),
+            control_key(KeyCode::Char('r')),
+            control_key(KeyCode::Char('z')),
+            control_key(KeyCode::Char('q')),
+            key_with_modifiers(KeyCode::Char('?'), KeyModifiers::CONTROL),
+            key_with_modifiers(KeyCode::Char('q'), KeyModifiers::SHIFT),
+            shift_key(KeyCode::Char('y')),
+        ];
+        for key_event in action_keys {
+            app.modal = Some(Modal::Help);
+            let description = format!("{key_event:?}");
+            let result = reduce(&mut app, key_event);
+            assert!(!result.changed, "{description}");
+            assert!(result.actions.is_empty());
+            assert_eq!(app.modal, Some(Modal::Help));
+            assert!(!app.should_quit);
+        }
+    }
+
+    #[test]
+    fn help_is_local_to_its_own_app_state_and_never_emits_actions() {
+        let mut left = state(vec![record("$a", "@a", "%a", 0)]);
+        let mut right = state(vec![record("$b", "@b", "%b", 0)]);
+
+        let opened = reduce(&mut left, key(KeyCode::Char('?')));
+        let moved = reduce(&mut right, key(KeyCode::Char('j')));
+        let closed = reduce(&mut left, key(KeyCode::Esc));
+
+        assert!(opened.actions.is_empty());
+        assert!(closed.actions.is_empty());
+        assert_eq!(left.modal, None);
+        assert_eq!(right.modal, None);
+        assert!(moved.actions.is_empty());
     }
 }

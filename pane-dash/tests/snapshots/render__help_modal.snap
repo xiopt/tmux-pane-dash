@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: "draw(&state, 80, 24)"
+---
+┌Help──────────────────────────────────────────────────────────────────────────┐
+│Keys — navigation and modes            Six statuses and glyphs                │
+│j/k or ↑/↓: move; g/G: first/last.     ● needs_input: waiting for a permission│
+│h/l or za: collapse/expand session in  or question response.                  │
+│grouped mode.                          ◐ working: busy or retrying.           │
+│/: filter; text edits query; Backspace ○ idle: known idle.                    │
+│deletes; Esc returns to navigation and ✗ error: agent error latched until     │
+│retains query.                         work/user activity clears it.          │
+│Enter: jump; Ctrl-z: zoom then jump.   ? unknown: no companion-plugin status  │
+│Ctrl-s: send line; x: kill; n: create. is available.                          │
+│Ctrl-u/Ctrl-d: inspect preview         ⊘ stale: plugin heartbeat exceeded the │
+│half-page up/down; Ctrl-r: follow      configured stale threshold.            │
+│bottom.                                Concepts and alerts                    │
+│s: grouped/flat; ?: help; navigation   Grouped mode shows session headers and │
+│q/Esc: close popup.                    supports local collapse; flat mode     │
+│Send: text/Backspace, Enter send, Esc  status-sorts pane rows.                │
+│cancel.                                Filter is live and retained; matching  │
+│Kill: y/Y confirm; any other key       grouped results temporarily expose     │
+│cancels, except inert ?.               collapsed sessions.                    │
+│Create choice: j/k or ↑/↓, Enter, Esc. Inspect pauses only selected-pane      │
+│Create form: text/Backspace, Tab/↓ and preview capture; topology/status       │
+│Shift-Tab/↑, Enter, Esc.               snapshots continue.                    │
+│?, Esc, q close help                                                          │
+└──────────────────────────────────────────────────────────────────────────────┘

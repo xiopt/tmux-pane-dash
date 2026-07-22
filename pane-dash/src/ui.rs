@@ -29,6 +29,14 @@ struct FullLayout {
     dashboard: DashboardAreas,
 }
 
+#[derive(Clone, Copy)]
+enum HelpEntry {
+    Heading(&'static str),
+    Key(&'static str),
+    Text(&'static str),
+    Status(Status, &'static str),
+}
+
 pub fn dashboard_areas(content: Rect) -> DashboardAreas {
     let horizontal = content.width >= 100;
     let [list, preview] = if horizontal {
@@ -163,6 +171,7 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
         return;
     }
     match modal {
+        Modal::Help => render_help(frame, centered_modal_rect(area, 96, 30), app.palette()),
         Modal::Send {
             pane_id,
             command,
@@ -227,6 +236,206 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
             render_create_form(frame, modal_area, form, app.palette());
         }
     }
+}
+
+fn render_help(frame: &mut Frame, area: Rect, palette: &Palette) {
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.border))
+        .title(Span::styled("Help", Style::default().fg(palette.accent)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let [content, footer] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+    let keys = help_keys();
+    let details = help_details();
+    if content.width >= 72 {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(content);
+        render_help_entries(frame, left, &keys, palette);
+        render_help_entries(frame, right, &details, palette);
+    } else {
+        let mut entries = keys;
+        entries.extend(details);
+        render_help_entries(frame, content, &entries, palette);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            truncate_to_width("?, Esc, q close help", usize::from(footer.width)),
+            Style::default().fg(palette.dim),
+        )),
+        footer,
+    );
+}
+
+fn help_keys() -> Vec<HelpEntry> {
+    vec![
+        HelpEntry::Heading("Keys — navigation and modes"),
+        HelpEntry::Key("j/k or ↑/↓: move; g/G: first/last."),
+        HelpEntry::Key("h/l or za: collapse/expand session in grouped mode."),
+        HelpEntry::Key(
+            "/: filter; text edits query; Backspace deletes; Esc returns to navigation and retains query.",
+        ),
+        HelpEntry::Key("Enter: jump; Ctrl-z: zoom then jump."),
+        HelpEntry::Key("Ctrl-s: send line; x: kill; n: create."),
+        HelpEntry::Key("Ctrl-u/Ctrl-d: inspect preview half-page up/down; Ctrl-r: follow bottom."),
+        HelpEntry::Key("s: grouped/flat; ?: help; navigation q/Esc: close popup."),
+        HelpEntry::Key("Send: text/Backspace, Enter send, Esc cancel."),
+        HelpEntry::Key("Kill: y/Y confirm; any other key cancels, except inert ?."),
+        HelpEntry::Key("Create choice: j/k or ↑/↓, Enter, Esc."),
+        HelpEntry::Key("Create form: text/Backspace, Tab/↓ and Shift-Tab/↑, Enter, Esc."),
+        HelpEntry::Key(
+            "Locked create submission: q/Esc closes the popup; all other keys are inert.",
+        ),
+    ]
+}
+
+fn help_details() -> Vec<HelpEntry> {
+    vec![
+        HelpEntry::Heading("Six statuses and glyphs"),
+        HelpEntry::Status(
+            Status::NeedsInput,
+            "waiting for a permission or question response.",
+        ),
+        HelpEntry::Status(Status::Working, "busy or retrying."),
+        HelpEntry::Status(Status::Idle, "known idle."),
+        HelpEntry::Status(
+            Status::Error,
+            "agent error latched until work/user activity clears it.",
+        ),
+        HelpEntry::Status(Status::Unknown, "no companion-plugin status is available."),
+        HelpEntry::Status(
+            Status::Stale,
+            "plugin heartbeat exceeded the configured stale threshold.",
+        ),
+        HelpEntry::Heading("Concepts and alerts"),
+        HelpEntry::Text(
+            "Grouped mode shows session headers and supports local collapse; flat mode status-sorts pane rows.",
+        ),
+        HelpEntry::Text(
+            "Filter is live and retained; matching grouped results temporarily expose collapsed sessions.",
+        ),
+        HelpEntry::Text(
+            "Inspect pauses only selected-pane preview capture; topology/status snapshots continue.",
+        ),
+        HelpEntry::Text(
+            "live updates lost — polling means control transport degraded to bounded fallback polling; other alert rows report runtime action/snapshot failures, config warnings, or dropped malformed records.",
+        ),
+        HelpEntry::Heading("Configuration"),
+        HelpEntry::Text(
+            "Path: nonempty $XDG_CONFIG_HOME/tmux-pane-dash/config.toml, otherwise nonempty $HOME/.config/tmux-pane-dash/config.toml.",
+        ),
+        HelpEntry::Text("Precedence: @pane-dash-theme built-in -> TOML theme -> per-slot colors."),
+        HelpEntry::Text("Built-ins: dark, light, terminal-native."),
+        HelpEntry::Text("Colors: canonical ANSI names, #RRGGBB, or ansi:0..255."),
+        HelpEntry::Text(
+            "Slots, in order: text, dim, accent, needs_input, working, idle, error, unknown, stale, warning, degrade, border, status_bar, selection_fg, selection_bg.",
+        ),
+        HelpEntry::Text("Config is read once per popup; reopen to reload."),
+    ]
+}
+
+fn render_help_entries(frame: &mut Frame, area: Rect, entries: &[HelpEntry], palette: &Palette) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let mut lines = Vec::new();
+    for entry in entries {
+        if lines.len() >= usize::from(area.height) {
+            break;
+        }
+        let remaining = usize::from(area.height).saturating_sub(lines.len());
+        lines.extend(help_entry_lines(
+            *entry,
+            usize::from(area.width),
+            palette,
+            remaining,
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn help_entry_lines(
+    entry: HelpEntry,
+    width: usize,
+    palette: &Palette,
+    limit: usize,
+) -> Vec<Line<'static>> {
+    let (text, style) = match entry {
+        HelpEntry::Heading(text) => (text, Style::default().fg(palette.accent)),
+        HelpEntry::Key(text) => (text, Style::default().fg(palette.text)),
+        HelpEntry::Text(text) => (text, Style::default().fg(palette.dim)),
+        HelpEntry::Status(status, description) => {
+            let prefix = format!("{} {}: ", status_glyph(status), status_text(status));
+            let mut descriptions =
+                wrap_help_segments(description, width.saturating_sub(prefix.width()), limit);
+            let first_description = descriptions.first().map_or("", String::as_str);
+            let mut rendered = vec![Line::from(vec![
+                Span::styled(
+                    truncate_to_width(status_glyph(status), width),
+                    Style::default().fg(status_color(status, palette)),
+                ),
+                Span::styled(
+                    truncate_to_width(
+                        &format!(" {}: {first_description}", status_text(status)),
+                        width.saturating_sub(status_glyph(status).width()),
+                    ),
+                    Style::default().fg(palette.dim),
+                ),
+            ])];
+            for description in descriptions.drain(1..) {
+                if rendered.len() == limit {
+                    break;
+                }
+                rendered.push(Line::styled(description, Style::default().fg(palette.dim)));
+            }
+            return rendered;
+        }
+    };
+    wrap_help_text(text, width, style, limit)
+}
+
+fn wrap_help_text(text: &str, width: usize, style: Style, limit: usize) -> Vec<Line<'static>> {
+    wrap_help_segments(text, width, limit)
+        .into_iter()
+        .map(|line| Line::styled(line, style))
+        .collect()
+}
+
+fn wrap_help_segments(text: &str, width: usize, limit: usize) -> Vec<String> {
+    if width == 0 || limit == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let separator = usize::from(!current.is_empty());
+        if current.width() + separator + word.width() > width && !current.is_empty() {
+            lines.push(current);
+            if lines.len() == limit {
+                return lines;
+            }
+            current = String::new();
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        if word.width() > width {
+            current.push_str(&truncate_to_width(word, width));
+        } else {
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() && lines.len() < limit {
+        lines.push(current);
+    }
+    lines
 }
 
 fn centered_modal_rect(area: Rect, desired_width: u16, desired_height: u16) -> Rect {

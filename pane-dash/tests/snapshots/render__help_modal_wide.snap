@@ -1,0 +1,54 @@
+---
+source: tests/render.rs
+expression: wide
+---
+▾ dash (6)                                                     1 working│select a pane to preview
+  ● needs_input  2m    1.2  tmp          sonnet  Question               │
+  ◐ working      2m    1.2  tmp          sonnet  Working                │
+  ○ idle         2m    1.2  tmp          sonnet  Idle                   │
+  ✗ error        2m    1.2  tmp          sonnet  Error                  │
+  ? unknown      2m    1.2  tmp          sonnet  Unknown                │
+  ? unknown      2m    1.2  tmp          sonnet  Stale                  │
+                                                                        │
+                                                                        │
+                                                                        │
+                                ┌Help──────────────────────────────────────────────────────────────────────────────────────────┐
+                                │Keys — navigation and modes                    Six statuses and glyphs                        │
+                                │j/k or ↑/↓: move; g/G: first/last.             ● needs_input: waiting for a permission or     │
+                                │h/l or za: collapse/expand session in grouped  question response.                             │
+                                │mode.                                          ◐ working: busy or retrying.                   │
+                                │/: filter; text edits query; Backspace deletes;○ idle: known idle.                            │
+                                │Esc returns to navigation and retains query.   ✗ error: agent error latched until work/user   │
+                                │Enter: jump; Ctrl-z: zoom then jump.           activity clears it.                            │
+                                │Ctrl-s: send line; x: kill; n: create.         ? unknown: no companion-plugin status is       │
+                                │Ctrl-u/Ctrl-d: inspect preview half-page       available.                                     │
+                                │up/down; Ctrl-r: follow bottom.                ⊘ stale: plugin heartbeat exceeded the         │
+                                │s: grouped/flat; ?: help; navigation q/Esc:    configured stale threshold.                    │
+                                │close popup.                                   Concepts and alerts                            │
+                                │Send: text/Backspace, Enter send, Esc cancel.  Grouped mode shows session headers and supports│
+                                │Kill: y/Y confirm; any other key cancels,      local collapse; flat mode status-sorts pane    │
+                                │except inert ?.                                rows.                                          │
+                                │Create choice: j/k or ↑/↓, Enter, Esc.         Filter is live and retained; matching grouped  │
+                                │Create form: text/Backspace, Tab/↓ and         results temporarily expose collapsed sessions. │
+                                │Shift-Tab/↑, Enter, Esc.                       Inspect pauses only selected-pane preview      │
+                                │Locked create submission: q/Esc closes the     capture; topology/status snapshots continue.   │
+                                │popup; all other keys are inert.               live updates lost — polling means control      │
+                                │                                               transport degraded to bounded fallback polling;│
+                                │                                               other alert rows report runtime action/snapshot│
+                                │                                               failures, config warnings, or dropped malformed│
+                                │                                               records.                                       │
+                                │                                               Configuration                                  │
+                                │                                               Path: nonempty                                 │
+                                │                                               $XDG_CONFIG_HOME/tmux-pane-dash/config.toml,   │
+                                │?, Esc, q close help                                                                          │
+                                └──────────────────────────────────────────────────────────────────────────────────────────────┘
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+                                                                        │
+needs_input 1  working 1  idle 1  error 1  unknown 2  6 panes  grouped | NAV

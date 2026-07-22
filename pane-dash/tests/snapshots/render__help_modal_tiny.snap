@@ -1,0 +1,5 @@
+---
+source: tests/render.rs
+expression: "draw(&state, 1, 1)"
+---
+┌

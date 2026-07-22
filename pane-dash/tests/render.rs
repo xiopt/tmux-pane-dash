@@ -161,6 +161,65 @@ fn kill_modal_is_centered_and_safe_at_narrow_and_tiny_sizes() {
 }
 
 #[test]
+fn help_modal_uses_canonical_content_palette_and_safe_geometry() {
+    let mut state = app_with_palette(
+        vec![
+            record("dash", "%1", "needs_input", "Question"),
+            record("dash", "%2", "working", "Working"),
+            record("dash", "%3", "idle", "Idle"),
+            record("dash", "%4", "error", "Error"),
+            record("dash", "%5", "unknown", "Unknown"),
+            record("dash", "%6", "stale", "Stale"),
+        ],
+        semantic_palette(),
+    );
+    state.modal = Some(Modal::Help);
+
+    let wide = draw(&state, 160, 50);
+    assert!(wide.contains("Help"));
+    assert!(wide.contains("Keys — navigation and modes"));
+    assert!(wide.contains("Six statuses and glyphs"));
+    assert!(wide.contains("● needs_input"));
+    assert!(wide.contains("?, Esc, q close help"));
+
+    let buffer = draw_buffer(&state, 160, 50, NOW);
+    assert_eq!(buffer[(33, 10)].fg, Color::Indexed(3));
+    assert_eq!(buffer[(32, 10)].fg, Color::Indexed(12));
+    assert_eq!(buffer[(34, 13)].fg, Color::Indexed(1));
+    assert_eq!(buffer[(80, 12)].fg, Color::Indexed(4));
+    assert_eq!(buffer[(81, 12)].fg, Color::Indexed(2));
+    assert_eq!(buffer[(33, 38)].fg, Color::Indexed(2));
+
+    insta::assert_snapshot!("help_modal_wide", wide);
+    insta::assert_snapshot!("help_modal", draw(&state, 80, 24));
+    insta::assert_snapshot!("help_modal_narrow", draw(&state, 18, 6));
+    insta::assert_snapshot!("help_modal_tiny", draw(&state, 1, 1));
+    assert!(draw(&state, 0, 0).is_empty());
+}
+
+#[test]
+fn help_modal_does_not_change_cells_outside_its_clamped_rectangle() {
+    let baseline = app(vec![record("dash", "%1", "working", "Task")]);
+    let mut overlay = app(vec![record("dash", "%1", "working", "Task")]);
+    overlay.modal = Some(Modal::Help);
+    let before = draw_buffer(&baseline, 160, 50, NOW);
+    let after = draw_buffer(&overlay, 160, 50, NOW);
+    let modal = Rect::new(32, 10, 96, 30);
+
+    for y in 0..50 {
+        for x in 0..160 {
+            if x < modal.x
+                || x >= modal.x + modal.width
+                || y < modal.y
+                || y >= modal.y + modal.height
+            {
+                assert_eq!(after[(x, y)], before[(x, y)], "cell ({x}, {y}) changed");
+            }
+        }
+    }
+}
+
+#[test]
 fn dashboard_layout_switches_at_one_hundred_columns() {
     let horizontal = dashboard_areas(Rect::new(0, 0, 160, 50));
     assert!(horizontal.horizontal);
