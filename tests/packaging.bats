@@ -12,7 +12,7 @@ setup() {
 
   cat > "$FAKE_BIN/cargo" <<'EOF'
 #!/bin/sh
-printf 'cargo\037%s\n' "$*" >> "$FAKE_LOG"
+printf 'cargo\037%s\037%s\n' "$0" "$*" >> "$FAKE_LOG"
 if [ "${1:-}" = clean ]; then
   rm -rf pane-dash/target
   exit 0
@@ -23,16 +23,58 @@ chmod 755 pane-dash/target/release/pane-dash
 EOF
   cat > "$FAKE_BIN/install" <<'EOF'
 #!/bin/sh
-printf 'install\037%s\n' "$*" >> "$FAKE_LOG"
-if [ "${FAIL_INSTALL:-}" = 1 ]; then
-  exit 73
-fi
-if [ "$1" = -m ]; then
+set -eu
+mode=
+if [ "${1:-}" = -m ]; then
   mode=$2
   shift 2
 fi
-cp "$1" "$2"
-chmod "$mode" "$2"
+source=$1
+destination=$2
+printf 'install\037%s\037%s\037%s\n' "$0" "$source" "$destination" >> "$FAKE_LOG"
+
+stage=
+case "$source" in
+  pane-dash/target/release/pane-dash) stage=build ;;
+  bin/pane-dash) stage=destination ;;
+  *) stage=unknown ;;
+esac
+
+case "$stage" in
+  build)
+    fail=${FAIL_BUILD_STAGE:-}
+    block=${BLOCK_BUILD_STAGE:-}
+    ;;
+  destination)
+    fail=${FAIL_DEST_STAGE:-}
+    block=${BLOCK_DEST_STAGE:-}
+    ;;
+  *)
+    fail=
+    block=
+    ;;
+esac
+
+if [ "$fail" = 1 ]; then
+  printf 'partial %s\n' "$stage" > "$destination"
+  chmod "${mode:-755}" "$destination"
+  [ "$stage" = build ] && exit 73
+  [ "$stage" = destination ] && exit 74
+fi
+
+if [ "$block" = 1 ]; then
+  : "${READY_MARKER:?READY_MARKER is required while blocking}"
+  : "${RELEASE_MARKER:?RELEASE_MARKER is required while blocking}"
+  printf 'partial %s\n' "$stage" > "$destination"
+  chmod "${mode:-755}" "$destination"
+  printf 'fake_pid=%s recipe_pid=%s stage=%s\n' "$$" "$PPID" "$stage" > "$READY_MARKER.$$.ready"
+  while [ ! -e "$RELEASE_MARKER" ]; do
+    sleep 0.01
+  done
+fi
+
+cp "$source" "$destination"
+chmod "$mode" "$destination"
 EOF
   chmod +x "$FAKE_BIN/cargo" "$FAKE_BIN/install"
 }
@@ -45,36 +87,194 @@ source_fingerprint() {
   (cd "$1" && cat Makefile pane-dash/Cargo.toml pane-dash/Cargo.lock | shasum -a 256 | awk '{print $1}')
 }
 
-assert_mode_755() {
-  [ "$(stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1")" = 755 ]
+assert_mode() {
+  [ "$(stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1")" = "$2" ]
+}
+
+assert_no_temporary() {
+  ! compgen -G "$1/.pane-dash.tmp.*" >/dev/null
+}
+
+wait_for_count() {
+  local pattern=$1 expected=$2 deadline=$((SECONDS + 5)) count
+  while :; do
+    count=$(compgen -G "$pattern" | wc -l | tr -d ' ')
+    [ "$count" -ge "$expected" ] && return 0
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.01
+  done
+}
+
+wait_for_exit() {
+  local pid=$1 deadline=$((SECONDS + 5)) state
+  while :; do
+    state=$(ps -p "$pid" -o stat= 2>/dev/null || :)
+    [ -z "$state" ] || [[ "$state" == Z* ]] && return 0
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.01
+  done
+}
+
+start_make() {
+  local target=$1 output=$2
+  shift 2
+  (cd "$SCRATCH" && exec python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' env "$@" make "$target") >"$output" 2>&1 &
+  MAKE_PID=$!
+}
+
+read_ready_processes() {
+  local marker=$1 line
+  line=$(<"$marker")
+  BLOCKER_PID=${line#fake_pid=}
+  BLOCKER_PID=${BLOCKER_PID%% *}
+  RECIPE_PID=${line#*recipe_pid=}
+  RECIPE_PID=${RECIPE_PID%% *}
+}
+
+assert_recipe_shell() {
+  local command
+  command=$(ps -p "$RECIPE_PID" -o command=)
+  [[ "$command" == *'.pane-dash.tmp.'* ]]
+}
+
+stop_blocked_make() {
+  local signal=$1 recipe_group blocker_group test_group
+  assert_recipe_shell
+  recipe_group=$(ps -p "$RECIPE_PID" -o pgid= | tr -d ' ')
+  blocker_group=$(ps -p "$BLOCKER_PID" -o pgid= | tr -d ' ')
+  test_group=$(ps -p "$$" -o pgid= | tr -d ' ')
+  [ "$recipe_group" = "$blocker_group" ]
+  [ "$recipe_group" != "$test_group" ]
+  kill "-$signal" -- "-$recipe_group"
+  if ! wait_for_exit "$MAKE_PID"; then
+    ps -p "$MAKE_PID,$RECIPE_PID,$BLOCKER_PID" -o pid,ppid,pgid,stat,command >&2 || :
+    kill -KILL -- "-$recipe_group" 2>/dev/null || :
+    kill -KILL "$MAKE_PID" 2>/dev/null || :
+    wait "$MAKE_PID" 2>/dev/null || :
+    return 1
+  fi
+  if wait "$MAKE_PID"; then
+    MAKE_STATUS=0
+  else
+    MAKE_STATUS=$?
+  fi
 }
 
 @test "bare make and build use the exact locked release cargo command and atomically create mode 0755 local binary" {
   run make -C "$SCRATCH" CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install"
 
   [ "$status" -eq 0 ]
-  grep -Fx $'cargo\037build --locked --release --manifest-path pane-dash/Cargo.toml' "$FAKE_LOG"
-  grep -E '^install.*\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG"
+  grep -Fx $'cargo\037'"$FAKE_BIN/cargo"$'\037build --locked --release --manifest-path pane-dash/Cargo.toml' "$FAKE_LOG"
+  grep -E $'^install\037.*\037pane-dash/target/release/pane-dash\037bin/\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG"
   [ -x "$SCRATCH/bin/pane-dash" ]
-  assert_mode_755 "$SCRATCH/bin/pane-dash"
-  ! compgen -G "$SCRATCH/bin/.pane-dash.*" >/dev/null
+  assert_mode "$SCRATCH/bin/pane-dash" 755
+  assert_no_temporary "$SCRATCH/bin"
 
   : > "$FAKE_LOG"
   run make -C "$SCRATCH" build CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install"
   [ "$status" -eq 0 ]
-  grep -Fx $'cargo\037build --locked --release --manifest-path pane-dash/Cargo.toml' "$FAKE_LOG"
+  grep -Fx $'cargo\037'"$FAKE_BIN/cargo"$'\037build --locked --release --manifest-path pane-dash/Cargo.toml' "$FAKE_LOG"
 }
 
-@test "failed local staging preserves the old binary and removes its same-directory temporary file" {
+@test "build staging failure preserves exact old content and mode without exposing the partial temporary" {
   mkdir -p "$SCRATCH/bin"
-  printf 'old binary\n' > "$SCRATCH/bin/pane-dash"
-  chmod 755 "$SCRATCH/bin/pane-dash"
+  printf 'old local binary\n' > "$SCRATCH/bin/pane-dash"
+  chmod 711 "$SCRATCH/bin/pane-dash"
 
-  run env FAIL_INSTALL=1 make -C "$SCRATCH" build CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install"
+  run env FAIL_BUILD_STAGE=1 make -C "$SCRATCH" build CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install"
 
   [ "$status" -ne 0 ]
-  [ "$(<"$SCRATCH/bin/pane-dash")" = 'old binary' ]
-  ! compgen -G "$SCRATCH/bin/.pane-dash.*" >/dev/null
+  [ "$(<"$SCRATCH/bin/pane-dash")" = 'old local binary' ]
+  assert_mode "$SCRATCH/bin/pane-dash" 711
+  assert_no_temporary "$SCRATCH/bin"
+  ! grep -F $'\037bin/pane-dash' "$FAKE_LOG"
+}
+
+@test "destination staging failure logs a successful build copy then preserves exact old destination content and mode" {
+  stage="$BATS_TEST_TMPDIR/stage"
+  destination="$stage/usr/local/bin/pane-dash"
+  mkdir -p "${destination%/*}"
+  printf 'old installed binary\n' > "$destination"
+  chmod 711 "$destination"
+
+  run env FAIL_DEST_STAGE=1 make -C "$SCRATCH" install DESTDIR="$stage" PREFIX=/usr/local CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install"
+
+  [ "$status" -eq 2 ]
+  [ "$(<"$destination")" = 'old installed binary' ]
+  assert_mode "$destination" 711
+  assert_no_temporary "$SCRATCH/bin"
+  assert_no_temporary "${destination%/*}"
+  [ "$(grep -Ec $'^install\037.*\037pane-dash/target/release/pane-dash\037bin/\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG")" -eq 1 ]
+  [ "$(grep -Ec $'^install\037.*\037bin/pane-dash\037.*/\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG")" -eq 1 ]
+}
+
+@test "TERM ends blocked build recipe shell, preserves the old local binary, and never resumes to mv" {
+  ready="$BATS_TEST_TMPDIR/build-ready"
+  release="$BATS_TEST_TMPDIR/build-release"
+  output="$BATS_TEST_TMPDIR/build-output"
+  mkdir -p "$SCRATCH/bin"
+  printf 'old local binary\n' > "$SCRATCH/bin/pane-dash"
+  chmod 711 "$SCRATCH/bin/pane-dash"
+
+  start_make build "$output" CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install" BLOCK_BUILD_STAGE=1 READY_MARKER="$ready" RELEASE_MARKER="$release"
+  wait_for_count "$ready.*.ready" 1
+  marker=$(compgen -G "$ready.*.ready")
+  read_ready_processes "$marker"
+  stop_blocked_make TERM
+
+  [ "$MAKE_STATUS" -eq 143 ]
+  [ "$(<"$SCRATCH/bin/pane-dash")" = 'old local binary' ]
+  assert_mode "$SCRATCH/bin/pane-dash" 711
+  assert_no_temporary "$SCRATCH/bin"
+}
+
+@test "INT ends blocked destination recipe shell after build, preserves the old install, and never resumes to mv" {
+  ready="$BATS_TEST_TMPDIR/destination-ready"
+  release="$BATS_TEST_TMPDIR/destination-release"
+  output="$BATS_TEST_TMPDIR/destination-output"
+  stage="$BATS_TEST_TMPDIR/stage"
+  destination="$stage/usr/local/bin/pane-dash"
+  mkdir -p "${destination%/*}"
+  printf 'old installed binary\n' > "$destination"
+  chmod 711 "$destination"
+
+  start_make install "$output" CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install" BLOCK_DEST_STAGE=1 READY_MARKER="$ready" RELEASE_MARKER="$release" DESTDIR="$stage" PREFIX=/usr/local
+  wait_for_count "$ready.*.ready" 1
+  marker=$(compgen -G "$ready.*.ready")
+  read_ready_processes "$marker"
+  stop_blocked_make INT
+
+  [ "$MAKE_STATUS" -eq 2 ]
+  grep -F 'Error 130' "$output"
+  [ "$(<"$destination")" = 'old installed binary' ]
+  assert_mode "$destination" 711
+  assert_no_temporary "${destination%/*}"
+  [ "$(grep -Ec $'^install\037.*\037pane-dash/target/release/pane-dash\037bin/\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG")" -eq 1 ]
+  [ "$(grep -Ec $'^install\037.*\037bin/pane-dash\037.*/\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG")" -eq 1 ]
+}
+
+@test "TERM ends blocked destination recipe shell after build and preserves the old install" {
+  ready="$BATS_TEST_TMPDIR/destination-term-ready"
+  release="$BATS_TEST_TMPDIR/destination-term-release"
+  output="$BATS_TEST_TMPDIR/destination-term-output"
+  stage="$BATS_TEST_TMPDIR/stage-term"
+  destination="$stage/usr/local/bin/pane-dash"
+  mkdir -p "${destination%/*}"
+  printf 'old installed binary\n' > "$destination"
+  chmod 711 "$destination"
+
+  start_make install "$output" CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install" BLOCK_DEST_STAGE=1 READY_MARKER="$ready" RELEASE_MARKER="$release" DESTDIR="$stage" PREFIX=/usr/local
+  wait_for_count "$ready.*.ready" 1
+  marker=$(compgen -G "$ready.*.ready")
+  read_ready_processes "$marker"
+  stop_blocked_make TERM
+
+  [ "$MAKE_STATUS" -eq 143 ]
+  [ "$(<"$destination")" = 'old installed binary' ]
+  assert_mode "$destination" 711
+  assert_no_temporary "${destination%/*}"
+  [ "$(grep -Ec $'^install\037.*\037pane-dash/target/release/pane-dash\037bin/\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG")" -eq 1 ]
+  [ "$(grep -Ec $'^install\037.*\037bin/pane-dash\037.*/\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG")" -eq 1 ]
 }
 
 @test "install builds first and atomically installs mode 0755 to DESTDIR+BINDIR" {
@@ -86,26 +286,12 @@ assert_mode_755() {
   [ "$status" -eq 0 ]
   [ -x "$SCRATCH/bin/pane-dash" ]
   [ -x "$stage$bindir/pane-dash" ]
-  [ "$(grep -Ec '^install.*\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG")" -eq 2 ]
-  assert_mode_755 "$stage$bindir/pane-dash"
-  ! compgen -G "$stage$bindir/.pane-dash.*" >/dev/null
+  [ "$(grep -c '^install' "$FAKE_LOG")" -eq 2 ]
+  assert_mode "$stage$bindir/pane-dash" 755
+  assert_no_temporary "$stage$bindir"
 }
 
-@test "install staging failure preserves old destination and removes its temporary file" {
-  stage="$BATS_TEST_TMPDIR/stage"
-  destination="$stage/usr/local/bin/pane-dash"
-  mkdir -p "${destination%/*}"
-  printf 'old installed binary\n' > "$destination"
-  chmod 755 "$destination"
-
-  run env FAIL_INSTALL=1 make -C "$SCRATCH" install DESTDIR="$stage" PREFIX=/usr/local CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install"
-
-  [ "$status" -ne 0 ]
-  [ "$(<"$destination")" = 'old installed binary' ]
-  ! compgen -G "${destination%/*}/.pane-dash.*" >/dev/null
-}
-
-@test "CARGO and INSTALL honor environment defaults and command-line overrides" {
+@test "CARGO and INSTALL use distinct executable identities for environment defaults and command-line overrides" {
   env_cargo="$FAKE_BIN/environment-cargo"
   cli_cargo="$FAKE_BIN/command-cargo"
   env_install="$FAKE_BIN/environment-install"
@@ -118,14 +304,62 @@ assert_mode_755() {
 
   run env CARGO="$env_cargo" INSTALL="$env_install" make -C "$SCRATCH" install DESTDIR="$BATS_TEST_TMPDIR/stage-env"
   [ "$status" -eq 0 ]
-  [ "$(grep -c '^cargo' "$FAKE_LOG")" -eq 1 ]
-  [ "$(grep -c '^install' "$FAKE_LOG")" -eq 2 ]
+  grep -F $'cargo\037'"$env_cargo"$'\037' "$FAKE_LOG"
+  [ "$(grep -Fc $'install\037'"$env_install"$'\037' "$FAKE_LOG")" -eq 2 ]
+  ! grep -F $'cargo\037'"$cli_cargo"$'\037' "$FAKE_LOG"
+  ! grep -F $'install\037'"$cli_install"$'\037' "$FAKE_LOG"
 
   : > "$FAKE_LOG"
   run env CARGO="$env_cargo" INSTALL="$env_install" make -C "$SCRATCH" install DESTDIR="$BATS_TEST_TMPDIR/stage-cli" CARGO="$cli_cargo" INSTALL="$cli_install"
   [ "$status" -eq 0 ]
-  [ "$(grep -c '^cargo' "$FAKE_LOG")" -eq 1 ]
-  [ "$(grep -c '^install' "$FAKE_LOG")" -eq 2 ]
+  grep -F $'cargo\037'"$cli_cargo"$'\037' "$FAKE_LOG"
+  [ "$(grep -Fc $'install\037'"$cli_install"$'\037' "$FAKE_LOG")" -eq 2 ]
+  ! grep -F $'cargo\037'"$env_cargo"$'\037' "$FAKE_LOG"
+  ! grep -F $'install\037'"$env_install"$'\037' "$FAKE_LOG"
+}
+
+@test "two concurrent builds use distinct temporaries and leave one complete mode 0755 local binary" {
+  ready="$BATS_TEST_TMPDIR/build-ready"
+  release="$BATS_TEST_TMPDIR/build-release"
+  start_make build "$BATS_TEST_TMPDIR/build-one" CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install" BLOCK_BUILD_STAGE=1 READY_MARKER="$ready" RELEASE_MARKER="$release"
+  first_pid=$MAKE_PID
+  start_make build "$BATS_TEST_TMPDIR/build-two" CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install" BLOCK_BUILD_STAGE=1 READY_MARKER="$ready" RELEASE_MARKER="$release"
+  second_pid=$MAKE_PID
+  wait_for_count "$ready.*.ready" 2
+  touch "$release"
+  wait_for_exit "$first_pid"
+  wait_for_exit "$second_pid"
+  wait "$first_pid"
+  wait "$second_pid"
+
+  [ "$(grep -Ec $'^install\037.*\037pane-dash/target/release/pane-dash\037bin/\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG")" -eq 2 ]
+  [ "$(grep -E $'^install\037.*\037pane-dash/target/release/pane-dash\037bin/\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG" | awk -F '\037' '{print $4}' | sort -u | wc -l | tr -d ' ')" -eq 2 ]
+  [ "$(<"$SCRATCH/bin/pane-dash")" = $'#!/bin/sh\nexit 0' ]
+  assert_mode "$SCRATCH/bin/pane-dash" 755
+  assert_no_temporary "$SCRATCH/bin"
+}
+
+@test "two concurrent installs use distinct temporaries and leave one complete mode 0755 destination binary" {
+  ready="$BATS_TEST_TMPDIR/destination-ready"
+  release="$BATS_TEST_TMPDIR/destination-release"
+  stage="$BATS_TEST_TMPDIR/stage"
+  start_make install "$BATS_TEST_TMPDIR/install-one" CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install" BLOCK_DEST_STAGE=1 READY_MARKER="$ready" RELEASE_MARKER="$release" DESTDIR="$stage" PREFIX=/usr/local
+  first_pid=$MAKE_PID
+  start_make install "$BATS_TEST_TMPDIR/install-two" CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install" BLOCK_DEST_STAGE=1 READY_MARKER="$ready" RELEASE_MARKER="$release" DESTDIR="$stage" PREFIX=/usr/local
+  second_pid=$MAKE_PID
+  wait_for_count "$ready.*.ready" 2
+  touch "$release"
+  wait_for_exit "$first_pid"
+  wait_for_exit "$second_pid"
+  wait "$first_pid"
+  wait "$second_pid"
+
+  destination="$stage/usr/local/bin/pane-dash"
+  [ "$(grep -Ec $'^install\037.*\037bin/pane-dash\037.*/\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG")" -eq 2 ]
+  [ "$(grep -E $'^install\037.*\037bin/pane-dash\037.*/\.pane-dash\.tmp\.[0-9]+$' "$FAKE_LOG" | awk -F '\037' '{print $4}' | sort -u | wc -l | tr -d ' ')" -eq 2 ]
+  [ "$(<"$destination")" = $'#!/bin/sh\nexit 0' ]
+  assert_mode "$destination" 755
+  assert_no_temporary "${destination%/*}"
 }
 
 @test "quoted recipes support hostile source, destination, prefix, and bindir paths" {
@@ -167,7 +401,6 @@ assert_mode_755() {
   before="$(source_fingerprint "$SCRATCH")"
 
   run make -C "$SCRATCH" clean CARGO="$FAKE_BIN/cargo"
-
   [ "$status" -eq 0 ]
   [ ! -e "$SCRATCH/pane-dash/target" ]
   [ ! -e "$SCRATCH/bin/pane-dash" ]
