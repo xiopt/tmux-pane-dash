@@ -8,7 +8,7 @@ source "$ROOT/spike/lib.sh"
 REAL_TMUX="$(command -v "$TMUX_BIN")"
 BIN="$ROOT/bin/pane-dash"
 TMP='' SOCKET='' WRAP='' LOG='' REJECT='' TASK9_MARKER='' TASK9_DEGRADED_INDEX='' TASK9_HOOK_INDEX=''
-CREATION_GATE='' CREATION_TOKEN='' CREATION_FAIL_STAGE='' CREATION_GONE='' FAILED=0
+CREATION_GATE='' CREATION_TOKEN='' CREATION_FAIL_STAGE='' CREATION_GONE='' CREATION_POPUP_WORK_OFFSET=0 FAILED=0
 declare -a CLIENT_PIDS=() CLIENT_TTYS=() PRODUCER_PIDS=() WRITER_FDS=()
 declare -a TRANSCRIPTS=() SESSIONS=() LABELS=() POPUP_CONTROLS=() POPUP_PIDS=()
 declare -a TASK9_SOURCE_SESSIONS=() TASK9_TARGET_SESSIONS=() TASK9_SOURCE_PANES=() CREATION_GATES=()
@@ -21,13 +21,22 @@ now() { perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%.9f",clock
 elapsed_ms() { perl -e 'printf "%.0f", ($ARGV[1] - $ARGV[0]) * 1000' "$1" "$(now)"; }
 cleanup() {
   set +e
-  local fd pid gate
+  local fd pid token wrapper gate records_valid
   task9_clear_causal_evidence
   if [[ -n "$TASK9_MARKER" ]]; then rm -f "$TASK9_MARKER"; TASK9_MARKER=''; fi
   if [[ -n "$REJECT" ]]; then rm -f "$REJECT"; REJECT=''; fi
   for gate in "${CREATION_GATES[@]:-}"; do
     [[ -d "$gate" ]] || continue
-    [[ ! -f "$gate/pids" ]] || while read -r pid _; do wrapper_pid_matches "$pid" || continue; kill -TERM "$pid" 2>/dev/null; done < "$gate/pids"
+    if [[ -f "$gate/pids" ]]; then
+      records_valid=1
+      while read -r pid token wrapper; do
+        creation_gate_wrapper_matches "$gate" "$pid" "$token" "$wrapper" || { records_valid=0; break; }
+      done < "$gate/pids"
+      if (( records_valid )); then
+        while read -r pid token wrapper; do kill -TERM "$pid" 2>/dev/null || true; done < "$gate/pids"
+      fi
+      rm -f "$gate/pids"
+    fi
     (( FAILED )) || rm -rf "$gate"
   done
   CREATION_GATES=(); CREATION_GATE=''
@@ -89,11 +98,16 @@ make_wrapper() {
   cat > "$WRAP/tmux" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+gate_wrapper_token=''
+gate_wrapper_path=''
+if [[ "${1:-}" == --pane-dash-gate-token ]]; then
+  gate_wrapper_token="${2:?missing gate wrapper token}"
+  [[ "${3:-}" == --pane-dash-gate-path ]] || { echo 'missing gate wrapper path flag' >&2; exit 79; }
+  gate_wrapper_path="${4:?missing gate wrapper path}"
+  shift 4
+fi
 args=("$@"); [[ -n "${TMUX:-}" ]] || args=(-S "$PD_SOCKET" "${args[@]}")
-f="$(mktemp "$PD_LOG/invocation.XXXXXXXX")"
-  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'my$f=shift;open my$o,">",$f or die$!;binmode$o;printf $o "%.9f\0",clock_gettime(CLOCK_MONOTONIC);print $o join("\0",@ARGV),"\0"' "$f" "${args[@]}"
-  if [[ -e "$PD_REJECT" ]]; then for x in "${args[@]}"; do [[ "$x" != -C ]] || exit 79; done; fi
-  command_index=0
+command_index=0
   while (( command_index < ${#args[@]} )); do
     case "${args[command_index]}" in
       -S|-f) ((command_index += 2)) ;;
@@ -101,6 +115,16 @@ f="$(mktemp "$PD_LOG/invocation.XXXXXXXX")"
     esac
   done
   command_name="${args[command_index]:-}"
+if [[ -n "${PD_CREATION_GATE:-}" && -z "$gate_wrapper_token" && ( "$command_name" == new-session || "$command_name" == new-window || "$command_name" == split-window ) ]]; then
+  exec "$0" --pane-dash-gate-token "${PD_CREATION_TOKEN:?missing creation token}" --pane-dash-gate-path "$PD_CREATION_GATE" "$@"
+fi
+f="$(mktemp "$PD_LOG/invocation.XXXXXXXX")"
+  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'my$f=shift;open my$o,">",$f or die$!;binmode$o;printf $o "%.9f\0",clock_gettime(CLOCK_MONOTONIC);print $o join("\0",@ARGV),"\0"' "$f" "${args[@]}"
+  if [[ -e "$PD_REJECT" ]]; then for x in "${args[@]}"; do [[ "$x" != -C ]] || exit 79; done; fi
+if [[ -n "$gate_wrapper_token" && ( "$gate_wrapper_token" != "${PD_CREATION_TOKEN:-}" || "$gate_wrapper_path" != "${PD_CREATION_GATE:-}" ) ]]; then
+    echo 'gate wrapper token mismatch' >&2
+    exit 79
+  fi
   if [[ "${PD_CREATION_FAIL_STAGE:-}" == tag && "$command_name" == set-option ]]; then
     for x in "${args[@]}"; do
       if [[ "$x" == @pane_dash_tag ]]; then
@@ -110,7 +134,8 @@ f="$(mktemp "$PD_LOG/invocation.XXXXXXXX")"
     done
   fi
   if [[ -n "${PD_CREATION_GATE:-}" && ( "$command_name" == new-session || "$command_name" == new-window || "$command_name" == split-window ) ]]; then
-    printf '%s %s %s\n' "$$" "${PD_CREATION_TOKEN:?missing creation token}" "$0" >> "$PD_CREATION_GATE/pids"
+    [[ -n "$gate_wrapper_token" ]] || { echo 'creation wrapper did not re-exec with token' >&2; exit 79; }
+    printf '%s %s %s\n' "$$" "$gate_wrapper_token" "$0" >> "$PD_CREATION_GATE/pids"
     : > "$PD_CREATION_GATE/started"
     trap 'exit 143' HUP INT TERM
     while [[ ! -e "$PD_CREATION_GATE/release" ]]; do sleep .02; done
@@ -175,6 +200,18 @@ start_client() { # session label
   LABELS[index]="$label"
   sleep .2
 }
+client_stopped() { ! pid_is_alive "$1"; }
+stop_client() { # index; close FIFO, reap producer, and detach tmux client
+  local index="$1"
+  local fd="${WRITER_FDS[index]:-}" producer="${PRODUCER_PIDS[index]:-}" client="${CLIENT_PIDS[index]:-}"
+  [[ -z "$fd" ]] || eval "exec ${fd}>&-"
+  [[ -z "$producer" ]] || kill -TERM "$producer" 2>/dev/null || true
+  [[ -z "$client" ]] || kill -TERM "$client" 2>/dev/null || true
+  [[ -z "$producer" ]] || wait_for "client ${LABELS[index]:-unknown} producer teardown" 2 client_stopped "$producer"
+  [[ -z "$client" ]] || wait_for "client ${LABELS[index]:-unknown} teardown" 2 client_stopped "$client"
+  CLIENT_PIDS[index]=''; CLIENT_TTYS[index]=''; PRODUCER_PIDS[index]=''; WRITER_FDS[index]=''
+  TRANSCRIPTS[index]=''; SESSIONS[index]=''; LABELS[index]=''; POPUP_CONTROLS[index]=''; POPUP_PIDS[index]=''
+}
 send_bytes() { write_bytes "$@"; sleep .1; }
 new_control() {
   local before="$1" pid
@@ -199,6 +236,12 @@ wrapper_pid_matches() {
   pid_is_alive "$pid" || return 1
   command="$(ps -o command= -p "$pid" 2>/dev/null)"
   [[ "$command" == *"$WRAP/tmux"* ]]
+}
+creation_gate_wrapper_matches() { # gate pid token wrapper
+  local gate="$1" pid="$2" token="$3" wrapper="$4" command
+  pid_is_alive "$pid" || return 1
+  command="$(ps -o command= -p "$pid" 2>/dev/null)"
+  [[ "$command" == *"$wrapper"* && "$command" == *"--pane-dash-gate-token $token"* && "$command" == *"--pane-dash-gate-path $gate"* ]]
 }
 pane_dash_process() {
   local pid="$1" command
@@ -521,19 +564,32 @@ creation_gate_release() { : > "$CREATION_GATE/release"; }
 creation_gate_release_path() { : > "$1/release"; }
 creation_gate_started() { [[ -e "$CREATION_GATE/started" ]]; }
 creation_gate_started_path() { [[ -e "$1/started" ]]; }
-creation_gate_pid() { awk 'NR==1 {print $1}' "$CREATION_GATE/pids"; }
-creation_gate_pid_reaped() { ! wrapper_pid_matches "$1"; }
-creation_gate_reap() { local pid="$1"; wait_for "creation wrapper $pid reap" 2 creation_gate_pid_reaped "$pid"; rm -f "$CREATION_GATE/pids"; }
+creation_gate_pid() { awk -v token="$2" '$2==token {print $1; exit}' "$1/pids"; }
+creation_gate_pid_reaped() { ! pid_is_alive "$1"; }
+creation_gate_reap() { # gate token pid
+  local gate="$1" token="$2" pid="$3" wrapper
+  wrapper="$(awk -v pid="$pid" -v token="$token" '$1==pid && $2==token {print $3; exit}' "$gate/pids")"
+  [[ -n "$wrapper" ]] || die "creation gate record missing before reap: $gate $token $pid"
+  if pid_is_alive "$pid"; then
+    creation_gate_wrapper_matches "$gate" "$pid" "$token" "$wrapper" || die "creation gate identity changed before reap: $gate $token $pid"
+  fi
+  rm -f "$gate/pids"
+  wait_for "creation wrapper $pid reap" 2 creation_gate_pid_reaped "$pid"
+}
 creation_gate_forget_path() { # only remove records after the recorded wrapper identities have exited
-  local gate="$1" pid
+  local gate="$1" token pid wrapper
   [[ -f "$gate/pids" ]] || return 0
-  while read -r pid _; do
-    wrapper_pid_matches "$pid" && die "creation gate wrapper still alive while cleaning $gate: $pid"
+  while read -r pid token wrapper; do
+    if pid_is_alive "$pid"; then
+      creation_gate_wrapper_matches "$gate" "$pid" "$token" "$wrapper" || die "creation gate identity changed while cleaning $gate: $pid"
+      die "creation gate wrapper still alive while cleaning $gate: $pid"
+    fi
   done < "$gate/pids"
   rm -f "$gate/pids"
 }
-creation_popup_work_since() { # gate token popup-pid command
-  awk -v token="$2" -v popup="$3" -v command="$4" '$2==popup && $3==token && $4==command { found=1 } END { exit !found }' "$1/popup-work" 2>/dev/null; }
+creation_popup_work_offset() { [[ -f "$1/popup-work" ]] && wc -c < "$1/popup-work" | tr -d ' ' || printf 0; }
+creation_popup_work_since() { # gate byte-offset token popup-pid command
+  perl -e 'use strict;my($path,$offset,$token,$popup,$command)=@ARGV;open my$fh,"<",$path or exit 1;binmode$fh;seek($fh,$offset,0) or exit 1;while(<$fh>){my@v=split;exit 0 if$#v>=3&&$v[1]eq$popup&&$v[2]eq$token&&$v[3]eq$command}exit 1' "$1/popup-work" "$2" "$3" "$4" "$5"; }
 creation_gate_tag_target() { awk -v token="$2" '$3==token && $4=="set-option" && $5!="" { found=1; print $5; exit } END { exit !found }' "$1/popup-work" 2>/dev/null; }
 creation_split_target() {
   local target
@@ -553,6 +609,7 @@ creation_tag_count_since() {
 creation_no_control_argv_since() { (( $(creation_control_argv_count_since "$1")==0 )); }
 creation_suite_begin() {
   local pane
+  REJECT="$TMP/reject"
   admin set-option -g @pane-dash-match '__pane_dash_creation_baseline_hidden__'
   admin set-option -g @pane_dash_group 1
   while read -r pane; do
@@ -567,6 +624,8 @@ creation_suite_begin() {
 }
 creation_open_deferred_source() { # label [required startup tag]
   local label="$1" required_tag="${2:-}"
+  CREATION_POPUP_WORK_OFFSET=0
+  [[ -z "$CREATION_GATE" ]] || CREATION_POPUP_WORK_OFFSET="$(creation_popup_work_offset "$CREATION_GATE")"
   start_client "$CREATION_SOURCE" "creation-${label}"
   CREATION_INDEX=$((${#CLIENT_PIDS[@]} - 1))
   CREATION_SOURCE_TAGS[CREATION_INDEX]="$CREATION_DEFERRED_TAG"
@@ -616,6 +675,7 @@ creation_cleanup() { # popup [separate new-session target]
   local index="$1" target
   shift
   if popup_open "$index"; then close_popup "$index"; fi
+  stop_client "$index"
   for target in "${CREATION_SOURCE_SESSIONS[index]:-}" "$@"; do
     [[ -n "$target" ]] || continue
     admin kill-session -t "$target" 2>/dev/null || true
@@ -635,19 +695,21 @@ creation_choice_order_and_context() {
   printf 'creation choices pane-context exact-order=right,left,bottom,top,window,session\n'
 }
 creation_success_responsive() {
-  local index started target snapshot_before selection_started modal_before
-  creation_gate_begin success; creation_setup success; index="$CREATION_INDEX"; creation_open_choice_modal "$index" 1; write_bytes "$index" '\r'
+  local index started target snapshot_before selection_started modal_before work_offset popup_pid control_pid
+  creation_gate_begin success; creation_setup success; index="$CREATION_INDEX"
+  wait_for 'creation startup same-popup list' 1.1 creation_popup_work_since "$CREATION_GATE" "$CREATION_POPUP_WORK_OFFSET" "$CREATION_TOKEN" "${POPUP_PIDS[index]}" list-panes
+  creation_open_choice_modal "$index" 1; write_bytes "$index" '\r'
   started="$(now)"; creation_submit_first_split "$index"; wait_for 'creation pending gate' 2 creation_gate_started
   wait_for 'creation pending row' 2 ansi_has "$index" 'creating...'
   # The gated child, its wrapper work, and the control client must all belong
   # to this popup. Do not prove responsiveness with a second popup.
   popup_control_has_owner "$index" "${POPUP_CONTROLS[index]}" || die 'creation held popup/control lineage'
-  wait_for 'creation held same-popup preview' 1.1 creation_popup_work_since "$CREATION_GATE" "$CREATION_TOKEN" "${POPUP_PIDS[index]}" capture-pane
-  snapshot_before="$(ansi_size "$index")"
+  work_offset="$(creation_popup_work_offset "$CREATION_GATE")"
+  wait_for 'creation held same-popup preview' 1.1 creation_popup_work_since "$CREATION_GATE" "$work_offset" "$CREATION_TOKEN" "${POPUP_PIDS[index]}" capture-pane
+  snapshot_before="$(( $(ansi_size "$index") + 1 ))"; work_offset="$(creation_popup_work_offset "$CREATION_GATE")"
   admin set-option -p -t "$CREATION_PANE" @pane_dash_tag creation-held-snapshot
-  wait_for 'creation held same-popup snapshot query' 1.1 creation_popup_work_since "$CREATION_GATE" "$CREATION_TOKEN" "${POPUP_PIDS[index]}" list-panes
-  wait_for 'creation held snapshot render' 1.1 ansi_grew_from "$index" "$snapshot_before"
   creation_gate_release; wait_for 'creation tag target' 3 creation_target_since "$started"; target="$(creation_target_since "$started")"; creation_gate_forget_path "$CREATION_GATE"
+  wait_for 'creation mutation render exact tag' 3 popup_tail_has "$index" "$snapshot_before" creation-held-snapshot
   wait_for 'creation target tagged' 3 pane_contains "$target" ''
   [[ "$(admin show-options -pv -t "$target" @pane_dash_tag)" == dash-created ]] || die 'creation success tag missing'
   snapshot_before="$(ansi_size "$index")"; wait_for 'creation selected row snapshot' 1.1 ansi_grew_from "$index" "$snapshot_before"
@@ -661,8 +723,9 @@ creation_success_responsive() {
   ansi_tail_has "$index" "$((modal_before+1))" 'Split right' || die 'creation pending did not clear into create modal'
   send_bytes "$index" '\033'
   budget 'creation success follow' 10 0
+  popup_pid="${POPUP_PIDS[index]}"; control_pid="${POPUP_CONTROLS[index]}"
   creation_cleanup "$index"
-  printf 'creation success pending-immediate same-popup=%s control=%s preview+snapshot=causal target=%s argv=create,tag once control=0 closed\n' "${POPUP_PIDS[index]}" "${POPUP_CONTROLS[index]}" "$target"
+  printf 'creation success pending-immediate same-popup=%s control=%s preview+snapshot=causal target=%s argv=create,tag once control=0 closed\n' "$popup_pid" "$control_pid" "$target"
 }
 creation_stage1_retry() {
   local index started target
@@ -706,16 +769,18 @@ creation_created_then_gone() {
   printf 'creation created-then-gone no-ephemeral exited-toast later-stages=0\n'
 }
 creation_concurrent_isolation() {
-  local a b started target_a target_b session_a session_b
+  local a b started target_a target_b tagged_a tagged_b session_a session_b a_work_offset a_transcript_offset b_work_offset
   local nonce="${RANDOM}${RANDOM}" token_a token_b
   creation_gate_begin concurrent-a; local gate_a="$CREATION_GATE"; token_a="$CREATION_TOKEN"; creation_setup concurrent-a "creation-A-$nonce"; a="$CREATION_INDEX"; local pane_a="$CREATION_PANE" tag_a="${CREATION_SOURCE_TAGS[a]}"
-  wait_for 'concurrent popup A initial snapshot provenance' 1.1 creation_popup_work_since "$gate_a" "$token_a" "${POPUP_PIDS[a]}" list-panes
+  a_work_offset="$CREATION_POPUP_WORK_OFFSET"
+  wait_for 'concurrent popup A initial snapshot provenance' 1.1 creation_popup_work_since "$gate_a" "$a_work_offset" "$token_a" "${POPUP_PIDS[a]}" list-panes
+  a_work_offset="$(creation_popup_work_offset "$gate_a")"; a_transcript_offset="$(( $(ansi_size "$a") + 1 ))"
   creation_gate_begin concurrent-b; local gate_b="$CREATION_GATE"; token_b="$CREATION_TOKEN"; creation_setup concurrent-b "creation-B-$nonce" '' 1; local tag_b="$CREATION_DEFERRED_TAG"
   # B is now discoverable but has not opened its own popup, so the recorded
   # query is attributable to A's existing popup/control lineage.
-  wait_for 'concurrent popup A snapshot after B tag' 1.1 creation_popup_work_since "$gate_a" "$token_a" "${POPUP_PIDS[a]}" list-panes
-  creation_open_deferred_source concurrent-b "$tag_a"; b="$CREATION_INDEX"; local pane_b="$CREATION_PANE"
-  wait_for 'concurrent popup B snapshot provenance' 1.1 creation_popup_work_since "$gate_b" "$token_b" "${POPUP_PIDS[b]}" list-panes
+  wait_for 'concurrent popup A transcript includes B tag' 1.1 popup_tail_has "$a" "$a_transcript_offset" "$tag_b"
+  creation_open_deferred_source concurrent-b "$tag_a"; b="$CREATION_INDEX"; b_work_offset="$CREATION_POPUP_WORK_OFFSET"; local pane_b="$CREATION_PANE"
+  wait_for 'concurrent popup B snapshot provenance' 1.1 creation_popup_work_since "$gate_b" "$b_work_offset" "$token_b" "${POPUP_PIDS[b]}" list-panes
   ansi_has "$b" "$tag_b" || die 'concurrent popup B lost its own tagged source frame'
   creation_open_choice_modal "$a" 1; write_bytes "$a" '\r'
   creation_open_choice_modal "$b" 3; write_bytes "$b" '\r'
@@ -727,6 +792,11 @@ creation_concurrent_isolation() {
   creation_gate_release_path "$gate_b"
   wait_for 'concurrent creation target b' 3 creation_split_target "$session_b" "$pane_b"
   target_a="$(creation_split_target "$session_a" "$pane_a")"; target_b="$(creation_split_target "$session_b" "$pane_b")"
+  wait_for 'concurrent token A tag target' 3 creation_gate_tag_target "$gate_a" "$token_a"
+  wait_for 'concurrent token B tag target' 3 creation_gate_tag_target "$gate_b" "$token_b"
+  tagged_a="$(creation_gate_tag_target "$gate_a" "$token_a")"; tagged_b="$(creation_gate_tag_target "$gate_b" "$token_b")"
+  [[ "$tagged_a" == "$target_a" ]] || die "concurrent token A tagged wrong target: $tagged_a != $target_a"
+  [[ "$tagged_b" == "$target_b" ]] || die "concurrent token B tagged wrong target: $tagged_b != $target_b"
   creation_gate_forget_path "$gate_a"; creation_gate_forget_path "$gate_b"
   [[ "$target_a" != "$target_b" ]] || die 'concurrent popups tagged the same target'
   [[ "$(admin display-message -p -t "$target_a" '#{session_id}')" == "$session_a" ]] || die 'concurrent a target/session correlation'
@@ -741,9 +811,9 @@ creation_concurrent_isolation() {
 creation_quit_reaps_blocked_stage() {
   local index started popup_pid child_pid exited
   creation_gate_begin quit; creation_setup quit; index="$CREATION_INDEX"; popup_pid="${POPUP_PIDS[index]}"; creation_open_choice_modal "$index" 1; write_bytes "$index" '\r'; started="$(now)"; creation_submit_first_split "$index"
-  wait_for 'creation quit gate' 2 creation_gate_started; child_pid="$(creation_gate_pid)"; kill -0 "$child_pid" 2>/dev/null || die 'creation quit gate did not expose a live direct wrapper child'; send_bytes "$index" q
+  wait_for 'creation quit gate' 2 creation_gate_started; child_pid="$(creation_gate_pid "$CREATION_GATE" "$CREATION_TOKEN")"; creation_gate_wrapper_matches "$CREATION_GATE" "$child_pid" "$CREATION_TOKEN" "$WRAP/tmux" || die 'creation quit gate did not expose a unique direct wrapper child'; send_bytes "$index" q
   wait_for 'creation quit popup exit' 2 popup_closed "$index"
-  creation_gate_reap "$child_pid"
+  creation_gate_reap "$CREATION_GATE" "$CREATION_TOKEN" "$child_pid"
   (( $(record_count "$started" "$(now)" split-window)==1 )) || die 'creation quit stage-1 count'
   (( $(creation_tag_count_since "$started")==0 && $(record_count "$started" "$(now)" send-keys)==0 )) || die 'creation quit ran a later stage'
   creation_no_control_argv_since "$started" || die 'creation quit used persistent control stdin'

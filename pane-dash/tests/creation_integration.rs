@@ -575,13 +575,23 @@ async fn creation_commands_are_literal_and_never_replayed_on_failure_or_empty_in
         .expect("new-window argv");
     assert!(!create.iter().any(|arg| arg == "-n" || arg == "-s"));
 
-    let sentinel = harness.dir.path().join("hostile-command-side-effect");
-    let hostile = "printf '%b' '-leading #{not-a-format}; \"quoted\" 雪\\nsecond; line\\n'";
+    let sentinel = PathBuf::from(format!(
+        "/tmp/pane-dash-sentinel-{}-{}",
+        std::process::id(),
+        NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_file(&sentinel);
+    harness.text(["set-option", "-g", "default-command", "exec cat"]);
+    let hostile = format!(
+        "-leading #{{}} #{{not-a-format}} \"quoted\" 雪
+touch {};",
+        sentinel.display()
+    );
     let before = harness.log_entries().len();
     let literal = harness
         .create(
             CreateContext::NewSession,
-            draft("literal-command", cwd, hostile),
+            draft("literal-command", cwd, &hostile),
         )
         .await;
     assert!(matches!(
@@ -598,21 +608,43 @@ async fn creation_commands_are_literal_and_never_replayed_on_failure_or_empty_in
         2,
         "one literal send and one Enter, with no replay"
     );
-    assert_eq!(
-        sends[0].last().map(String::as_str),
-        Some("printf '%b' '-leading #{not-a-format}; \"quoted\" 雪\\nsecond; line\\n'")
-    );
-    assert_eq!(sends[1].last().map(String::as_str), Some("Enter"));
     let literal_pane = created_pane(&literal);
+    let expected_wire_command = format!(
+        "{}\\;",
+        hostile
+            .strip_suffix(';')
+            .expect("hostile command must end with a semicolon")
+    );
+    assert_eq!(
+        sends[0],
+        &vec![
+            "send-keys".to_owned(),
+            "-l".to_owned(),
+            "-t".to_owned(),
+            literal_pane.0.clone(),
+            "--".to_owned(),
+            expected_wire_command,
+        ],
+        "literal command wrapper argv must use tmux's exact escaped trailing-semicolon wire form"
+    );
+    assert_eq!(
+        sends[1],
+        &vec![
+            "send-keys".to_owned(),
+            "-t".to_owned(),
+            literal_pane.0.clone(),
+            "Enter".to_owned(),
+        ]
+    );
     let started = Instant::now();
     let captured = loop {
         let capture = harness.text(["capture-pane", "-p", "-t", &literal_pane.0]);
         if capture
             .lines()
-            .any(|line| line.trim_end() == "-leading #{not-a-format}; \"quoted\" 雪")
+            .any(|line| line.trim_end() == "-leading #{} #{not-a-format} \"quoted\" 雪")
             && capture
                 .lines()
-                .any(|line| line.trim_end() == "second; line")
+                .any(|line| line.trim_end() == format!("touch {};", sentinel.display()))
         {
             break capture;
         }
@@ -625,13 +657,13 @@ async fn creation_commands_are_literal_and_never_replayed_on_failure_or_empty_in
     assert!(
         captured
             .lines()
-            .any(|line| line.trim_end() == "-leading #{not-a-format}; \"quoted\" 雪"),
+            .any(|line| line.trim_end() == "-leading #{} #{not-a-format} \"quoted\" 雪"),
         "first literal line was not exact: {captured:?}"
     );
     assert!(
         captured
             .lines()
-            .any(|line| line.trim_end() == "second; line"),
+            .any(|line| line.trim_end() == format!("touch {};", sentinel.display())),
         "second literal line was not exact: {captured:?}"
     );
     assert!(
