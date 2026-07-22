@@ -234,7 +234,13 @@ fn load_ui_config_impl(tmux_theme: &str, io: &impl ConfigIo) -> LoadedUiConfig {
             ));
         }
     }
-    for key in table.keys().filter(|key| !is_known_key(key)) {
+    let mut unknown_keys: Vec<_> = table
+        .keys()
+        .filter(|key| !is_known_key(key))
+        .map(String::as_str)
+        .collect();
+    unknown_keys.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    for key in unknown_keys {
         if key.is_ascii()
             && let Some(known) = nearest_known_key(key)
         {
@@ -299,7 +305,9 @@ fn is_known_key(key: &str) -> bool {
 }
 
 fn first_nested_key(table: &toml::Table) -> Option<&str> {
-    table.iter().find_map(|(key, value)| match value {
+    let mut entries: Vec<_> = table.iter().collect();
+    entries.sort_unstable_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+    entries.into_iter().find_map(|(key, value)| match value {
         toml::Value::Array(_) | toml::Value::Table(_) => Some(key.as_str()),
         _ => None,
     })
@@ -371,6 +379,7 @@ fn safe_path(path: &Path) -> String {
 
 fn safe_display(value: &str) -> String {
     let mut output = String::new();
+    let mut boundaries = Vec::new();
     for character in value.chars() {
         let escaped = match character {
             '\\' => "\\\\".to_owned(),
@@ -380,10 +389,14 @@ fn safe_display(value: &str) -> String {
             }
             character => character.to_string(),
         };
-        if output.chars().count() + escaped.chars().count() > 47 {
+        if output.chars().count() + escaped.chars().count() > 48 {
+            while output.chars().count() > 47 {
+                output.truncate(boundaries.pop().expect("nonempty escaped output"));
+            }
             output.push('…');
             return output;
         }
+        boundaries.push(output.len());
         output.push_str(&escaped);
     }
     output
@@ -754,6 +767,13 @@ mod tests {
         assert!(!displayed.contains('\u{7f}'));
     }
 
+    #[test]
+    fn safe_display_keeps_an_exact_48_scalar_escaped_value_without_ellipsis() {
+        let displayed = safe_display(&"\\".repeat(24));
+        assert_eq!(displayed.chars().count(), 48);
+        assert!(!displayed.ends_with('…'));
+    }
+
     #[cfg(unix)]
     #[test]
     fn non_utf8_environment_path_is_preserved() {
@@ -764,8 +784,153 @@ mod tests {
             env: BTreeMap::from([("XDG_CONFIG_HOME", xdg.clone())]),
             ..FakeIo::default()
         }
-        .with_file(path, Vec::new());
-        assert_eq!(load("dark", io).palette, Palette::dark());
+        .with_file(path.clone(), b"theme = 'light'\naccent = 'red'".to_vec());
+        let loaded = load("dark", io);
+        let mut expected = Palette::light();
+        expected.accent = crate::palette::parse_color("red").unwrap();
+        assert_eq!(loaded.palette, expected);
+        assert_eq!(
+            loaded.palette.accent,
+            crate::palette::parse_color("red").unwrap()
+        );
+        assert!(loaded.warning_texts().is_empty());
+        assert_eq!(path, xdg_path(&xdg));
+    }
+
+    #[test]
+    fn fatal_files_ignore_valid_siblings_and_report_one_canonical_warning() {
+        for (document, expected_prefix) in [
+            (
+                "theme = 'light'\naccent = 'red'\ntheme = 'dark'",
+                "config: TOML parse error",
+            ),
+            (
+                "theme = 'light'\naccent = 'red'\n[zz]\nx = 1\n[aa]\nx = 1",
+                "config: nested table or array at 'aa'; ignored",
+            ),
+            (
+                "theme = 'light'\naccent = 'red'\nzz = []\naa = []",
+                "config: nested table or array at 'aa'; ignored",
+            ),
+            (
+                "theme = 'light'\naccent = 'red'\nextra.value = 1",
+                "config: nested table or array at 'extra'; ignored",
+            ),
+            (
+                "theme = 'light'\naccent = 'red'\n[[zz]]\nx = 1",
+                "config: nested table or array at 'zz'; ignored",
+            ),
+        ] {
+            let io = FakeIo::default().with_file(
+                "/xdg/tmux-pane-dash/config.toml",
+                document.as_bytes().to_vec(),
+            );
+            let io = FakeIo {
+                env: BTreeMap::from([("XDG_CONFIG_HOME", OsString::from("/xdg"))]),
+                ..io
+            };
+            let loaded = load("terminal-native", io);
+            assert_eq!(loaded.palette, Palette::terminal_native());
+            assert_eq!(loaded.warning_texts().len(), 1);
+            assert!(loaded.warning_texts()[0].starts_with(expected_prefix));
+        }
+    }
+
+    #[test]
+    fn read_errors_and_not_found_races_have_their_specified_effects() {
+        let path = PathBuf::from("/xdg/tmux-pane-dash/config.toml");
+        let base = FakeIo {
+            env: BTreeMap::from([("XDG_CONFIG_HOME", OsString::from("/xdg"))]),
+            metadata: BTreeMap::from([(
+                path.clone(),
+                Ok(FakeMetadata {
+                    is_file: true,
+                    len: 1,
+                }),
+            )]),
+            ..FakeIo::default()
+        };
+        let denied = FakeIo {
+            reads: BTreeMap::from([(path.clone(), Err(ErrorKind::PermissionDenied))]),
+            ..base
+        };
+        assert_eq!(
+            load("light", denied).warning_texts(),
+            ["config: cannot read '/xdg/tmux-pane-dash/config.toml' (PermissionDenied); ignored"]
+        );
+        let race = FakeIo {
+            reads: BTreeMap::from([(path, Err(ErrorKind::NotFound))]),
+            ..FakeIo {
+                env: BTreeMap::from([("XDG_CONFIG_HOME", OsString::from("/xdg"))]),
+                metadata: BTreeMap::from([(
+                    PathBuf::from("/xdg/tmux-pane-dash/config.toml"),
+                    Ok(FakeMetadata {
+                        is_file: true,
+                        len: 1,
+                    }),
+                )]),
+                ..FakeIo::default()
+            }
+        };
+        let loaded = load("light", race);
+        assert_eq!(loaded.palette, Palette::light());
+        assert!(loaded.warning_texts().is_empty());
+    }
+
+    #[test]
+    fn warning_deduplication_precedes_the_first_three_plus_summary_cap() {
+        let loaded = finish(
+            Palette::dark(),
+            vec![
+                "one".into(),
+                "one".into(),
+                "two".into(),
+                "three".into(),
+                "four".into(),
+                "five".into(),
+            ],
+        );
+        assert_eq!(
+            loaded.warning_texts(),
+            [
+                "one",
+                "two",
+                "three",
+                "config: 2 additional warnings suppressed"
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_slot_warnings_follow_palette_slot_order_not_toml_source_order() {
+        let body = PaletteSlot::ALL
+            .into_iter()
+            .rev()
+            .map(|slot| format!("{} = 'invalid-{}'", slot.name(), slot.name()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let io = FakeIo::default().with_file("/xdg/tmux-pane-dash/config.toml", body.into_bytes());
+        let io = FakeIo {
+            env: BTreeMap::from([("XDG_CONFIG_HOME", OsString::from("/xdg"))]),
+            ..io
+        };
+        let loaded = load("dark", io);
+        assert_eq!(
+            loaded.warning_texts()[0],
+            "config: invalid color 'invalid-text' for 'text'; keeping previous value"
+        );
+        assert_eq!(
+            loaded.warning_texts()[1],
+            "config: invalid color 'invalid-dim' for 'dim'; keeping previous value"
+        );
+        assert_eq!(
+            loaded.warning_texts()[2],
+            "config: invalid color 'invalid-accent' for 'accent'; keeping previous value"
+        );
+        assert_eq!(
+            loaded.warning_texts()[3],
+            "config: 12 additional warnings suppressed"
+        );
     }
 
     #[test]
