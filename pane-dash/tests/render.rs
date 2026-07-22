@@ -9,6 +9,7 @@ use pane_dash::creation::{
 };
 use pane_dash::model::{Model, ModelConfig, PaneId};
 use pane_dash::options::DashConfig;
+use pane_dash::palette::Palette;
 use pane_dash::preview::PreviewFrame;
 use pane_dash::snapshot::RawRecord;
 use pane_dash::ui::{
@@ -493,6 +494,30 @@ fn grouped_render_at_160x50() {
     ]);
 
     insta::assert_snapshot!(draw(&state, 160, 50));
+}
+
+#[test]
+fn grouped_session_header_uses_the_loaded_palette_accent() {
+    let mut palette = Palette::dark();
+    palette.accent = Color::Rgb(1, 2, 3);
+    let state = AppState::new(
+        Model::build(
+            &[record("grouped", "%1", "working", "Header")],
+            &ModelConfig::default(),
+            NOW,
+        ),
+        DashConfig::default(),
+        LoadedUiConfig::with_palette(palette),
+    );
+
+    let buffer = draw_buffer(&state, 80, 24, NOW);
+    let header = buffer
+        .content()
+        .iter()
+        .find(|cell| cell.symbol() == "▾")
+        .unwrap();
+
+    assert_eq!(header.style().fg, Some(Color::Rgb(1, 2, 3)));
 }
 
 #[test]

@@ -36,6 +36,13 @@ pub struct LoadedUiConfig {
 }
 
 impl LoadedUiConfig {
+    pub fn with_palette(palette: Palette) -> Self {
+        Self {
+            palette,
+            warnings: Box::new([]),
+        }
+    }
+
     pub fn warnings(&self) -> &[ConfigWarning] {
         &self.warnings
     }
@@ -47,10 +54,7 @@ impl LoadedUiConfig {
 
 impl Default for LoadedUiConfig {
     fn default() -> Self {
-        Self {
-            palette: Palette::dark(),
-            warnings: Box::new([]),
-        }
+        Self::with_palette(Palette::dark())
     }
 }
 

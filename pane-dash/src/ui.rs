@@ -620,7 +620,7 @@ fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> 
             };
             let mut spans = vec![Span::styled(
                 format!("{marker} {name} ({pane_count})"),
-                Style::default().fg(palette::ACCENT),
+                Style::default().fg(app.palette().accent),
             )];
             if *working_count > 0 {
                 let suffix = format!("{working_count} working");
