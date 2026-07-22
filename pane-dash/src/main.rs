@@ -14,6 +14,7 @@ use crossterm::terminal::{
 use futures_util::StreamExt;
 use pane_dash::actions::{execute_jump, kill_pane, send_text};
 use pane_dash::app::{Action, ActionOutcome, AppState, CompletedAction, Event, reduce};
+use pane_dash::config::load_ui_config;
 use pane_dash::control::{ControlEvent, ControlHandle, is_safe_client_tty};
 use pane_dash::creation::{CreateRequest, CreationId, CreationProgress, run_creation};
 use pane_dash::model::{Model, ModelConfig};
@@ -265,6 +266,8 @@ async fn main() -> Result<()> {
     let tmux = TmuxExec::new("tmux");
     let (snapshot_bytes, options_bytes) = tmux.startup().await?;
     let cfg = parse_show_options(&options_bytes);
+    let config_started = Instant::now();
+    let loaded_ui = load_ui_config(&cfg.theme);
     let initial_snapshot = parse(&snapshot_bytes);
     let model = Model::build(
         &initial_snapshot.records,
@@ -274,7 +277,7 @@ async fn main() -> Result<()> {
         },
         now_secs(),
     );
-    let mut app = AppState::new(model, cfg);
+    let mut app = AppState::new(model, cfg, loaded_ui);
     app.dropped_records = initial_snapshot.dropped;
 
     let _terminal = TerminalGuard::enter()?;
@@ -285,6 +288,10 @@ async fn main() -> Result<()> {
         eprintln!(
             "{}",
             bench_first_frame_message(startup_started.elapsed().as_secs_f64() * 1_000.0)
+        );
+        eprintln!(
+            "{}",
+            bench_config_to_frame_message(config_started.elapsed().as_secs_f64() * 1_000.0)
         );
         return Ok(());
     }
@@ -640,6 +647,10 @@ where
 
 fn bench_first_frame_message(elapsed_ms: f64) -> String {
     format!("pane-dash coldframe_ms={elapsed_ms:.3}")
+}
+
+fn bench_config_to_frame_message(elapsed_ms: f64) -> String {
+    format!("pane-dash config_to_frame_ms={elapsed_ms:.3}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1041,15 +1052,17 @@ fn install_panic_cleanup() {
 mod tests {
     use super::{
         ActionEffects, ConnectionMessageKind, ConnectionRoute, RuntimeTimer, SnapshotGeneration,
-        SnapshotInFlight, SnapshotSource, apply_event, bench_first_frame_message,
-        classify_connection_message, classify_snapshot_payload, cleanup_creation_task,
-        clear_terminated_connection_state, dispatch_directives, next_runtime_timer,
-        parse_args_from, preview_interval, process_action_effects, run_runtime_timer_step,
-        snapshot_interval, snapshot_keeps_launch_session, source_session_changed_requires_quit,
-        spawn_preview_capture, start_creation, start_preview_capture, sync_transport_degraded,
+        SnapshotInFlight, SnapshotSource, apply_event, bench_config_to_frame_message,
+        bench_first_frame_message, classify_connection_message, classify_snapshot_payload,
+        cleanup_creation_task, clear_terminated_connection_state, dispatch_directives,
+        next_runtime_timer, parse_args_from, preview_interval, process_action_effects,
+        run_runtime_timer_step, snapshot_interval, snapshot_keeps_launch_session,
+        source_session_changed_requires_quit, spawn_preview_capture, start_creation,
+        start_preview_capture, sync_transport_degraded,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pane_dash::app::{Action, AppState, Event, reduce};
+    use pane_dash::config::LoadedUiConfig;
     use pane_dash::creation::{CreateContext, CreateDraft, CreationProgress, build_request};
     use pane_dash::model::{Model, ModelConfig};
     use pane_dash::options::DashConfig;
@@ -1094,6 +1107,7 @@ mod tests {
         let mut app = AppState::new(
             Model::build(&outcome.records, &ModelConfig::default(), 0),
             DashConfig::default(),
+            LoadedUiConfig::default(),
         );
         reduce(
             &mut app,
@@ -1456,6 +1470,7 @@ mod tests {
         let mut app = AppState::new(
             Model::build(&[], &ModelConfig::default(), 0),
             DashConfig::default(),
+            LoadedUiConfig::default(),
         );
         assert!(sync_transport_degraded(&mut app, &coordinator));
         assert!(app.transport_degraded);
@@ -2259,6 +2274,14 @@ mod tests {
         assert_eq!(
             bench_first_frame_message(12.345),
             "pane-dash coldframe_ms=12.345"
+        );
+    }
+
+    #[test]
+    fn formats_the_config_to_frame_measurement_for_the_probe() {
+        assert_eq!(
+            bench_config_to_frame_message(12.345),
+            "pane-dash config_to_frame_ms=12.345"
         );
     }
 

@@ -45,6 +45,15 @@ impl LoadedUiConfig {
     }
 }
 
+impl Default for LoadedUiConfig {
+    fn default() -> Self {
+        Self {
+            palette: Palette::dark(),
+            warnings: Box::new([]),
+        }
+    }
+}
+
 pub fn load_ui_config(tmux_theme: &str) -> LoadedUiConfig {
     load_ui_config_impl(tmux_theme, &SystemIo)
 }

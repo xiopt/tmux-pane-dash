@@ -3,6 +3,7 @@ use pane_dash::app::{
     AppState, CreateChoice, CreateChoiceKind, CreateField, CreateForm, CreateModal, Event, Modal,
     Mode, PendingCreation, PendingCreationState, reduce,
 };
+use pane_dash::config::LoadedUiConfig;
 use pane_dash::creation::{
     CreateContext, CreateDraft, CreationId, CreationResolution, SplitDirection,
 };
@@ -50,6 +51,7 @@ fn app(records: Vec<RawRecord>) -> AppState {
     AppState::new(
         Model::build(&records, &ModelConfig::default(), NOW),
         DashConfig::default(),
+        LoadedUiConfig::default(),
     )
 }
 

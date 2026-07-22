@@ -4,6 +4,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pane_dash::{
     app::{AppState, Event, reduce},
+    config::LoadedUiConfig,
     filter::ranked_row_indices,
     model::{Model, ModelConfig},
     options::DashConfig,
@@ -54,7 +55,7 @@ fn model(panes: usize, grouped: bool) -> Model {
 }
 
 fn prepared_filter_bench(model: Model) -> (AppState, Terminal<TestBackend>) {
-    let mut app = AppState::new(model, DashConfig::default());
+    let mut app = AppState::new(model, DashConfig::default(), LoadedUiConfig::default());
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
     reduce(
         &mut app,

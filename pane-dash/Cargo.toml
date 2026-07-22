@@ -24,6 +24,10 @@ path = "tests/render.rs"
 name = "creation_integration"
 path = "tests/creation_integration.rs"
 
+[[test]]
+name = "config_startup"
+path = "tests/config_startup.rs"
+
 [dependencies]
 ansi-to-tui = "8.0.1"
 anyhow = "1"

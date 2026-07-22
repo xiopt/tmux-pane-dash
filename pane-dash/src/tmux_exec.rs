@@ -320,13 +320,39 @@ mod tests {
     use crate::model::{Model, ModelConfig};
     use crate::snapshot::parse;
 
-    use super::{TmuxCommandError, TmuxExec};
+    use super::{SNAPSHOT_FORMAT, TmuxCommandError, TmuxExec};
 
     #[test]
     fn bin_returns_the_configured_executable_path() {
         let exec = TmuxExec::new("/usr/local/bin/tmux-custom");
 
         assert_eq!(exec.bin(), Path::new("/usr/local/bin/tmux-custom"));
+    }
+
+    #[tokio::test]
+    async fn startup_issues_only_snapshot_and_global_options_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("argv.log");
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+        TmuxExec::new(executable).startup().await.unwrap();
+
+        let call_log = fs::read_to_string(log).unwrap();
+        let mut calls = call_log.lines().collect::<Vec<_>>();
+        calls.sort_unstable();
+        assert_eq!(
+            calls,
+            [
+                format!("list-panes -a -F {SNAPSHOT_FORMAT}"),
+                "show-options -g".to_owned(),
+            ]
+        );
     }
 
     #[tokio::test]

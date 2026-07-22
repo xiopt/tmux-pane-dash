@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::config::{ConfigWarning, LoadedUiConfig};
 use crate::creation::{
     CreateContext, CreateDraft, CreateStage, CreationProgress, CreationResolution, SplitDirection,
     build_request, display_error,
@@ -262,6 +263,8 @@ pub(crate) struct RenderCache {
 pub struct AppState {
     pub model: Model,
     pub cfg: DashConfig,
+    palette: crate::palette::Palette,
+    config_warnings: Box<[ConfigWarning]>,
     pub mode: Mode,
     pub input_mode: InputMode,
     pub filter_query: String,
@@ -291,7 +294,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(model: Model, cfg: DashConfig) -> Self {
+    pub fn new(model: Model, cfg: DashConfig, loaded_ui: LoadedUiConfig) -> Self {
         let mode = if model.grouped() {
             Mode::Grouped
         } else {
@@ -301,6 +304,8 @@ impl AppState {
             mode,
             model,
             cfg,
+            palette: loaded_ui.palette,
+            config_warnings: loaded_ui.warnings().into(),
             input_mode: InputMode::Navigation,
             filter_query: String::new(),
             selection: None,
@@ -334,6 +339,14 @@ impl AppState {
             match_pattern: self.cfg.match_pattern.clone(),
             stale_secs: self.cfg.stale_secs,
         }
+    }
+
+    pub fn palette(&self) -> &crate::palette::Palette {
+        &self.palette
+    }
+
+    pub fn config_warnings(&self) -> &[ConfigWarning] {
+        &self.config_warnings
     }
 
     fn grouped(&self) -> bool {
@@ -1901,6 +1914,7 @@ fn reduce_snapshot_failure(state: &mut AppState, error: String) -> ReduceResult 
 
 #[cfg(test)]
 mod tests {
+    use crate::config::LoadedUiConfig;
     use std::collections::HashSet;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1946,6 +1960,7 @@ mod tests {
         AppState::new(
             Model::build(&records, &ModelConfig::default(), 10),
             crate::options::DashConfig::default(),
+            LoadedUiConfig::default(),
         )
     }
 
@@ -1954,7 +1969,11 @@ mod tests {
             new_command: new_command.into(),
             ..crate::options::DashConfig::default()
         };
-        AppState::new(Model::build(&records, &ModelConfig::default(), 10), config)
+        AppState::new(
+            Model::build(&records, &ModelConfig::default(), 10),
+            config,
+            LoadedUiConfig::default(),
+        )
     }
 
     fn key(code: KeyCode) -> Event {
@@ -4117,7 +4136,7 @@ mod tests {
             ..Default::default()
         };
 
-        let app = AppState::new(model, cfg);
+        let app = AppState::new(model, cfg, LoadedUiConfig::default());
 
         assert_eq!(app.mode, Mode::Flat);
     }
