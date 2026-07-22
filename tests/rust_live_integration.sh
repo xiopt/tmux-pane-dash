@@ -590,6 +590,9 @@ creation_gate_forget_path() { # only remove records after the recorded wrapper i
 creation_popup_work_offset() { [[ -f "$1/popup-work" ]] && wc -c < "$1/popup-work" | tr -d ' ' || printf 0; }
 creation_popup_work_since() { # gate byte-offset token popup-pid command
   perl -e 'use strict;my($path,$offset,$token,$popup,$command)=@ARGV;open my$fh,"<",$path or exit 1;binmode$fh;seek($fh,$offset,0) or exit 1;while(<$fh>){my@v=split;exit 0 if$#v>=3&&$v[1]eq$popup&&$v[2]eq$token&&$v[3]eq$command}exit 1' "$1/popup-work" "$2" "$3" "$4" "$5"; }
+creation_popup_work_since_with_live_child() { # gate byte-offset token popup-pid child-pid command
+  pid_is_alive "$5" && creation_popup_work_since "$1" "$2" "$3" "$4" "$6"
+}
 creation_gate_tag_target() { awk -v token="$2" '$3==token && $4=="set-option" && $5!="" { found=1; print $5; exit } END { exit !found }' "$1/popup-work" 2>/dev/null; }
 creation_split_target() {
   local target
@@ -695,20 +698,26 @@ creation_choice_order_and_context() {
   printf 'creation choices pane-context exact-order=right,left,bottom,top,window,session\n'
 }
 creation_success_responsive() {
-  local index started target snapshot_before selection_started modal_before work_offset popup_pid control_pid
+  local index started target snapshot_before selection_started modal_before work_offset popup_pid control_pid child_pid
   creation_gate_begin success; creation_setup success; index="$CREATION_INDEX"
   wait_for 'creation startup same-popup list' 1.1 creation_popup_work_since "$CREATION_GATE" "$CREATION_POPUP_WORK_OFFSET" "$CREATION_TOKEN" "${POPUP_PIDS[index]}" list-panes
-  creation_open_choice_modal "$index" 1; write_bytes "$index" '\r'
-  started="$(now)"; creation_submit_first_split "$index"; wait_for 'creation pending gate' 2 creation_gate_started
-  wait_for 'creation pending row' 2 ansi_has "$index" 'creating...'
   # The gated child, its wrapper work, and the control client must all belong
   # to this popup. Do not prove responsiveness with a second popup.
   popup_control_has_owner "$index" "${POPUP_CONTROLS[index]}" || die 'creation held popup/control lineage'
+  creation_open_choice_modal "$index" 1; write_bytes "$index" '\r'
+  : > "$REJECT"; admin run-shell "kill -TERM ${POPUP_CONTROLS[index]}"
+  wait_for 'creation held degraded snapshot timer' 3 ansi_has "$index" 'live updates lost — polling'
+  wait_for 'creation held no persistent control' 2 control_is_zero
+  started="$(now)"; creation_submit_first_split "$index"; wait_for 'creation pending gate' 2 creation_gate_started
+  child_pid="$(creation_gate_pid "$CREATION_GATE" "$CREATION_TOKEN")"
+  wait_for 'creation pending row' 2 ansi_has "$index" 'creating...'
   work_offset="$(creation_popup_work_offset "$CREATION_GATE")"
   wait_for 'creation held same-popup preview' 1.1 creation_popup_work_since "$CREATION_GATE" "$work_offset" "$CREATION_TOKEN" "${POPUP_PIDS[index]}" capture-pane
   snapshot_before="$(( $(ansi_size "$index") + 1 ))"; work_offset="$(creation_popup_work_offset "$CREATION_GATE")"
   admin set-option -p -t "$CREATION_PANE" @pane_dash_tag creation-held-snapshot
+  wait_for 'creation held same-popup list snapshot while child lives' 1.1 creation_popup_work_since_with_live_child "$CREATION_GATE" "$work_offset" "$CREATION_TOKEN" "${POPUP_PIDS[index]}" "$child_pid" list-panes
   creation_gate_release; wait_for 'creation tag target' 3 creation_target_since "$started"; target="$(creation_target_since "$started")"; creation_gate_forget_path "$CREATION_GATE"
+  rm -f "$REJECT"
   wait_for 'creation mutation render exact tag' 3 popup_tail_has "$index" "$snapshot_before" creation-held-snapshot
   wait_for 'creation target tagged' 3 pane_contains "$target" ''
   [[ "$(admin show-options -pv -t "$target" @pane_dash_tag)" == dash-created ]] || die 'creation success tag missing'
@@ -722,7 +731,7 @@ creation_success_responsive() {
   wait_for 'creation pending clears into create modal' 3 ansi_grew_from "$index" "$modal_before"
   ansi_tail_has "$index" "$((modal_before+1))" 'Split right' || die 'creation pending did not clear into create modal'
   send_bytes "$index" '\033'
-  budget 'creation success follow' 10 0
+  budget 'creation success follow' 10 5
   popup_pid="${POPUP_PIDS[index]}"; control_pid="${POPUP_CONTROLS[index]}"
   creation_cleanup "$index"
   printf 'creation success pending-immediate same-popup=%s control=%s preview+snapshot=causal target=%s argv=create,tag once control=0 closed\n' "$popup_pid" "$control_pid" "$target"
