@@ -52,17 +52,21 @@ fn app_state_keeps_explicit_loaded_config_immutable_through_reducer_events() {
 #[test]
 fn production_loader_uses_isolated_child_environments_for_valid_invalid_missing_and_concurrent_configs()
  {
-    let valid = child_home("accent = \"red\"\n");
+    let valid = child_home("accent = \"#010203\"\nborder = \"#040506\"\n");
     let invalid = child_home("accent = \"invalid\"\n");
     let missing = TempDir::new().unwrap();
 
     let valid_result = run_child(valid.path(), "probe");
-    assert!(valid_result.contains("accent=Red"));
-    assert!(valid_result.contains("warnings="));
+    assert!(valid_result.contains("accent=Rgb(1, 2, 3)"));
+    assert!(valid_result.ends_with("warnings=\n"));
 
     let invalid_result = run_child(invalid.path(), "probe");
     assert!(invalid_result.contains("accent=Cyan"));
-    assert!(invalid_result.contains("invalid color 'invalid' for 'accent'"));
+    assert!(
+        invalid_result.contains(
+            "warnings=config: invalid color 'invalid' for 'accent'; keeping previous value"
+        )
+    );
 
     let missing_result = run_child(missing.path(), "probe");
     assert!(missing_result.contains("accent=Cyan"));

@@ -8,6 +8,7 @@ source "$ROOT/spike/lib.sh"
 REAL_TMUX="$(command -v "$TMUX_BIN")"
 BIN="$ROOT/bin/pane-dash"
 TMP='' SOCKET='' WRAP='' LOG='' REJECT='' TASK9_MARKER='' TASK9_DEGRADED_INDEX='' TASK9_HOOK_INDEX=''
+PHASE6_XDG_WAS_SET=0 PHASE6_XDG_VALUE=''
 CREATION_GATE='' CREATION_TOKEN='' CREATION_FAIL_STAGE='' CREATION_GONE='' CREATION_NEW_COMMAND='' CREATION_POPUP_WORK_OFFSET=0 FAILED=0
 declare -a CLIENT_PIDS=() CLIENT_TTYS=() PRODUCER_PIDS=() WRITER_FDS=()
 declare -a TRANSCRIPTS=() SESSIONS=() LABELS=() POPUP_CONTROLS=() POPUP_PIDS=()
@@ -23,6 +24,7 @@ cleanup() {
   set +e
   local fd pid token wrapper gate records_valid
   task9_clear_causal_evidence
+  phase6_restore_xdg || true
   if [[ -n "$TASK9_MARKER" ]]; then rm -f "$TASK9_MARKER"; TASK9_MARKER=''; fi
   if [[ -n "$REJECT" ]]; then rm -f "$REJECT"; REJECT=''; fi
   for gate in "${CREATION_GATES[@]:-}"; do
@@ -82,6 +84,9 @@ ansi_has() { grep -aFq "$2" "${TRANSCRIPTS[$1]}"; }
 ansi_size() { wc -c < "${TRANSCRIPTS[$1]}" | tr -d ' '; }
 ansi_grew_from() { (( $(ansi_size "$1") > $2 )); }
 ansi_tail_has() { tail -c "+$2" "${TRANSCRIPTS[$1]}" | grep -aFq "$3"; }
+ansi_tail_compact_has() { # index offset canonical-text; normalize terminal-diff escapes and skipped spaces.
+  tail -c "+$2" "${TRANSCRIPTS[$1]}" | perl -0777 -pe 's/\e\[[0-?]*[ -\/]*[@-~]//g; s/\e\][^\a\e]*(?:\a|\e\\)//g; s/\s+//g' | grep -aFq "$(tr -d '[:space:]' <<< "$3")"
+}
 write_bytes() { local fd="${WRITER_FDS[$1]}"; printf '%b' "$2" >&"$fd"; }
 popup_tail_has() { # popup offset text
   popup_open "$1" && ansi_tail_has "$1" "$2" "$3"
@@ -89,6 +94,8 @@ popup_tail_has() { # popup offset text
 # Count the command word, not an arbitrary matching argv element: target text is
 # untrusted and may itself contain words such as "capture-pane".
 record_count() { perl -e 'use strict;my($d,$a,$b,$wanted)=@ARGV;my$n=0;for my$f(glob "$d/*"){open my$h,"<",$f or die$!;binmode$h;local$/;my@v=split/\0/,<$h>,-1;my$t=shift@v;next if$t<$a||$t>$b;while(@v){my$x=shift@v;if($x eq q(-S)||$x eq q(-f)){shift@v;next}if($x eq q(-C)){if($wanted eq q(-C)){$n++}next}if($x eq $wanted){$n++}last}}print"$n\n"' "$LOG" "$1" "$2" "$3"; }
+phase6_read_only_classes_since() { # timestamp: report only permitted scheduled runtime reads.
+  perl -e 'use strict;my($d,$after)=@ARGV;my%seen;for my$f(glob "$d/*"){open my$h,"<",$f or die$!;binmode$h;local$/;my@v=split/\0/,<$h>,-1;my$t=shift@v;next if$t<$after;my$i=0;while($i<@v&&($v[$i]eq q(-S)||$v[$i]eq q(-f))){$i+=2}next if$i>=@v;my$c=$v[$i];$seen{$c}++;}for my$c(sort keys%seen){print "$c=$seen{$c}\n";exit 1 unless$c eq q(capture-pane)||$c eq q(list-panes)}' "$LOG" "$1"; }
 has_capture_since() { (( $(record_count "$1" "$(now)" capture-pane)>0 )); }
 has_list_since() { (( $(record_count "$1" "$(now)" list-panes)>0 )); }
 budget() { local tag="$1" cap="$2" list="$3" a b c l; a="$(now)"; sleep 5; b="$(now)"; c="$(record_count "$a" "$b" capture-pane)"; l="$(record_count "$a" "$b" list-panes)"; printf 'budget %s capture=%s list=%s\n' "$tag" "$c" "$l"; ((c<=cap&&l<=list)) || die "$tag process budget"; }
@@ -286,6 +293,88 @@ close_popup() {
   wait_for "popup $index pane-dash exit" 2 popup_closed "$index"
   ! control_present "$control" || die "popup $index control survived pane-dash exit: $control"
   POPUP_CONTROLS[index]=''
+}
+phase6_restore_xdg() {
+  [[ -n "$SOCKET" && "$PHASE6_XDG_WAS_SET" != 0 ]] || return 0
+  if (( PHASE6_XDG_WAS_SET == 2 )); then
+    admin set-environment -g XDG_CONFIG_HOME "$PHASE6_XDG_VALUE"
+  else
+    admin set-environment -gu XDG_CONFIG_HOME
+  fi
+  PHASE6_XDG_WAS_SET=0
+  PHASE6_XDG_VALUE=''
+}
+phase6_theme_help_isolation() {
+  local home_a="$TMP/phase6-xdg-a" home_b="$TMP/phase6-xdg-b" prior_xdg a_offset b_offset help_offset action_start b_start close_help_offset a_popup b_popup closed
+  mkdir -p "$home_a/tmux-pane-dash" "$home_b/tmux-pane-dash"
+  printf 'accent = "#010203"\nborder = "#040506"\n' > "$home_a/tmux-pane-dash/config.toml"
+  printf 'accent = "#070809"\nborder = "#0a0b0c"\n' > "$home_b/tmux-pane-dash/config.toml"
+  if prior_xdg="$(admin show-environment -g XDG_CONFIG_HOME 2>/dev/null)"; then
+    PHASE6_XDG_WAS_SET=2
+    PHASE6_XDG_VALUE="${prior_xdg#XDG_CONFIG_HOME=}"
+  else
+    PHASE6_XDG_WAS_SET=1
+  fi
+
+  admin set-environment -g XDG_CONFIG_HOME "$home_a"
+  a_offset="$(ansi_size 0)"
+  open_popup 0
+  a_popup="${POPUP_PIDS[0]}"
+  wait_for 'phase6 popup A first frame' 3 popup_tail_has 0 "$((a_offset + 1))" $'\033[38;2;1;2;3m'
+  ansi_tail_has 0 "$((a_offset + 1))" $'\033[38;2;4;5;6m' || die 'phase6 popup A missing configured border'
+  ! ansi_tail_has 0 "$((a_offset + 1))" $'\033[38;2;7;8;9m' || die 'phase6 popup A inherited popup B accent'
+  ! ansi_tail_has 0 "$((a_offset + 1))" $'\033[38;2;10;11;12m' || die 'phase6 popup A inherited popup B border'
+
+  admin set-environment -g XDG_CONFIG_HOME "$home_b"
+  b_offset="$(ansi_size 1)"
+  open_popup 1
+  b_popup="${POPUP_PIDS[1]}"
+  wait_for 'phase6 popup B first frame' 3 popup_tail_has 1 "$((b_offset + 1))" $'\033[38;2;7;8;9m'
+  ansi_tail_has 1 "$((b_offset + 1))" $'\033[38;2;10;11;12m' || die 'phase6 popup B missing configured border'
+  ! ansi_tail_has 1 "$((b_offset + 1))" $'\033[38;2;1;2;3m' || die 'phase6 popup B inherited popup A accent'
+  ! ansi_tail_has 1 "$((b_offset + 1))" $'\033[38;2;4;5;6m' || die 'phase6 popup B inherited popup A border'
+  has_two_controls || die 'phase6 expected two popup-local controls'
+  popup_control_has_owner 0 "${POPUP_CONTROLS[0]}" || die 'phase6 popup A control owner'
+  popup_control_has_owner 1 "${POPUP_CONTROLS[1]}" || die 'phase6 popup B control owner'
+
+  help_offset="$(ansi_size 0)"
+  write_bytes 0 '?'
+  wait_for 'phase6 help A canonical keys' 2 popup_tail_has 0 "$((help_offset + 1))" 'Keys — navigation and modes'
+  popup_tail_has 0 "$((help_offset + 1))" 'Six statuses and glyphs' || die 'phase6 help missing statuses heading'
+  # Terminal diffs can split style runs or omit unchanged spaces, so normalize
+  # only control sequences/whitespace before matching canonical help text.
+  ansi_tail_compact_has 0 "$((help_offset + 1))" '?, Esc, q close help' || die 'phase6 help missing close footer'
+  action_start="$(now)"
+  write_bytes 0 $'nx\r\023sj'
+  phase6_read_only_classes_since "$action_start" || die 'phase6 help action dispatched a tmux write/control command'
+  popup_open 0 || die 'phase6 help action closed popup A'
+  popup_tail_has 0 "$((help_offset + 1))" 'Keys — navigation and modes' || die 'phase6 help action dismissed help'
+
+  b_start="$(now)"
+  write_bytes 1 $'jj\022'
+  wait_for 'phase6 popup B preview while A help is open' .5 has_capture_since "$b_start"
+  popup_open 1 || die 'phase6 popup B became unusable while A help open'
+  popup_tail_has 0 "$((help_offset + 1))" 'Keys — navigation and modes' || die 'phase6 popup A left help while B navigated'
+  # Pause B's selected-pane preview before attributing A's post-close quiescence;
+  # topology reads remain permitted, but no other popup may contribute captures.
+  write_bytes 1 '\025'
+
+  close_help_offset="$(ansi_size 0)"
+  write_bytes 0 q
+  wait_for 'phase6 q closes help only' 2 popup_tail_has 0 "$((close_help_offset + 1))" live-spare
+  popup_open 0 && [[ "${POPUP_PIDS[0]}" == "$a_popup" ]] || die 'phase6 first q did not retain popup A'
+  control_present "${POPUP_CONTROLS[0]}" || die 'phase6 first q replaced popup A control'
+  close_popup 0
+  closed="$(now)"
+  assert_no_popup_runtime_after_exit 'phase6 popup A' "$a_popup" "$closed"
+  (( $(control_count) == 1 )) || die 'phase6 popup A close did not leave exactly popup B control'
+  popup_open 1 && [[ "${POPUP_PIDS[1]}" == "$b_popup" ]] || die 'phase6 popup B did not remain open after popup A close'
+  close_popup 1
+  closed="$(now)"
+  assert_no_popup_runtime_after_exit 'phase6 popup B' "$b_popup" "$closed"
+  (( $(control_count) == 0 )) || die 'phase6 popup close left a control client'
+  phase6_restore_xdg
+  printf 'phase6 themes A=%s B=%s controls=2->0 help=local read-only-classes=attributed post-close-runtime=0\n' "$a_popup" "$b_popup"
 }
 target_gone() { ! admin list-panes -a -F '#{pane_id}' | grep -Fxq "$1"; }
 target_present() { admin list-panes -a -F '#{pane_id}' | grep -Fxq "$1"; }
@@ -934,7 +1023,8 @@ main() {
     destroy_popup_detach_on
     destroy_popup_while_degraded
     task9_scenarios
-    creation_scenarios
+     phase6_theme_help_isolation
+     creation_scenarios
    printf 'ok: controls startup=2 replacement=1 rejected=1; process budgets passed\n'
 }
 session_gone() { ! admin has-session -t "$1" 2>/dev/null; }
