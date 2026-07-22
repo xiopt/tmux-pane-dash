@@ -20,38 +20,54 @@ Rust 1.85+ is the edition-2024 language floor. The Rust dashboard itself does no
 
 ### TPM
 
-Add the plugin to `~/.tmux.conf`, then install or update it with TPM:
+Add the plugin to `~/.tmux.conf`:
 
 ```tmux
-set -g @plugin 'youruser/tmux-pane-dash'
+set -g @plugin 'OWNER/tmux-pane-dash'
 ```
 
-From TPM's cloned plugin directory, build the Rust dashboard:
+**Mandatory:** this checkout has no configured canonical remote; substitute the owner from the published repository URL before TPM use, replacing `OWNER`. Run `<prefix> I` to install through TPM. TPM normally clones to `$HOME/.tmux/plugins/tmux-pane-dash`; from that directory, build the Rust dashboard:
 
 ```sh
+cd "$HOME/.tmux/plugins/tmux-pane-dash"
 make build
 ```
 
-TPM loading does not compile on load. `make install` is an optional alternative and also runs the build. Plugin-local `bin/pane-dash` wins over PATH, so `make build` is the most direct way to make TPM use the Rust dashboard.
+TPM loading does not compile on load. After `<prefix> U` updates the plugin, `cd "$HOME/.tmux/plugins/tmux-pane-dash"` and rerun `make build`. If your TPM path is custom, `cd` to that plugin directory instead. `make install` is an optional alternative and also runs the build. Plugin-local `bin/pane-dash` wins over PATH, so `make build` is the most direct way to make TPM use the Rust dashboard.
 
 ### Manual or source clone
 
-Clone or unpack the source, build it, then add its absolute path to tmux:
+Clone or unpack the source, build it, then add its absolute path to tmux. Replace `<repository-url>` with the published repository URL; this workflow does not depend on a configured remote in this checkout:
 
 ```sh
-git clone https://github.com/youruser/tmux-pane-dash.git ~/src/tmux-pane-dash
-cd ~/src/tmux-pane-dash
+git clone <repository-url> "$HOME/.tmux/plugins/tmux-pane-dash"
+cd "$HOME/.tmux/plugins/tmux-pane-dash"
 make build
 ```
 
 ```tmux
-run-shell '~/src/tmux-pane-dash/pane_dash.tmux'
+run-shell "$HOME/.tmux/plugins/tmux-pane-dash/pane_dash.tmux"
 ```
 
 Reload tmux after changing the entry:
 
 ```sh
-tmux source-file ~/.tmux.conf
+tmux source-file "$HOME/.tmux.conf"
+```
+
+### Optional OpenCode status plugin
+
+From the plugin checkout, install the optional status producer:
+
+```sh
+mkdir -p "$HOME/.config/opencode/plugin"
+ln -sf "$PWD/opencode-plugin/pane-dash.ts" "$HOME/.config/opencode/plugin/pane-dash.ts"
+```
+
+Restart or reopen the OpenCode process after creating the symlink. Without the plugin, command-matched panes remain visible with `? unknown` status. To remove the companion plugin, run:
+
+```sh
+rm "$HOME/.config/opencode/plugin/pane-dash.ts"
 ```
 
 ### Optional PATH install
@@ -246,6 +262,7 @@ cargo test --manifest-path pane-dash/Cargo.toml -- --ignored --nocapture --test-
 tests/integration.sh
 tests/pane_dash_integration.sh
 tests/rust_engine_integration.sh
+tests/rust_engine_quoting_integration.sh
 tests/rust_live_integration.sh
 ```
 
