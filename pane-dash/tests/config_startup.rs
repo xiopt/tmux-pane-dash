@@ -187,6 +187,22 @@ fn real_binary_startup_loads_configured_header_accent_within_budget() {
 
     let coldframe_p95 = percentile_95(&coldframe_samples);
     let config_to_frame_p95 = percentile_95(&config_to_frame_samples);
+    if let Some(path) = std::env::var_os("PANE_DASH_CONFIG_STARTUP_SAMPLES") {
+        let rows = coldframe_samples
+            .iter()
+            .zip(&config_to_frame_samples)
+            .enumerate()
+            .map(|(run, (coldframe_ms, config_to_frame_ms))| {
+                format!("{run},{coldframe_ms:.3},{config_to_frame_ms:.3}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(
+            path,
+            format!("run,coldframe_ms,config_to_frame_ms\n{rows}\n"),
+        )
+        .unwrap();
+    }
     eprintln!(
         "config_startup real coldframe_ms p50={:.3} p95={coldframe_p95:.3}",
         median(&coldframe_samples)
@@ -466,11 +482,25 @@ fn parse_samples(output: &str) -> Vec<f64> {
 fn median(samples: &[f64]) -> f64 {
     let mut samples = samples.to_vec();
     samples.sort_by(f64::total_cmp);
-    samples[samples.len() / 2]
+    samples[nearest_rank_index(samples.len(), 50)]
 }
 
 fn percentile_95(samples: &[f64]) -> f64 {
     let mut samples = samples.to_vec();
     samples.sort_by(f64::total_cmp);
-    samples[(samples.len() * 95).div_ceil(100) - 1]
+    samples[nearest_rank_index(samples.len(), 95)]
+}
+
+fn nearest_rank_index(sample_count: usize, percentile: usize) -> usize {
+    assert!(sample_count > 0);
+    assert!((1..=100).contains(&percentile));
+    (sample_count * percentile).div_ceil(100) - 1
+}
+
+#[test]
+fn percentile_metrics_use_nearest_rank_indices() {
+    let samples = (0..100).map(f64::from).collect::<Vec<_>>();
+
+    assert_eq!(median(&samples), 49.0);
+    assert_eq!(percentile_95(&samples), 94.0);
 }

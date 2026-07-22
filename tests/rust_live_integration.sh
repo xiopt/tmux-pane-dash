@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/spike/lib.sh"
 REAL_TMUX="$(command -v "$TMUX_BIN")"
 BIN="$ROOT/bin/pane-dash"
-TMP='' SOCKET='' WRAP='' LOG='' REJECT='' TASK9_MARKER='' TASK9_DEGRADED_INDEX='' TASK9_HOOK_INDEX=''
+TMP='' SOCKET='' WRAP='' LOG='' OWNER_LOG='' REJECT='' TASK9_MARKER='' TASK9_DEGRADED_INDEX='' TASK9_HOOK_INDEX=''
 PHASE6_XDG_WAS_SET=0 PHASE6_XDG_VALUE=''
 CREATION_GATE='' CREATION_TOKEN='' CREATION_FAIL_STAGE='' CREATION_GONE='' CREATION_NEW_COMMAND='' CREATION_POPUP_WORK_OFFSET=0 FAILED=0
 declare -a CLIENT_PIDS=() CLIENT_TTYS=() PRODUCER_PIDS=() WRITER_FDS=()
@@ -87,6 +87,10 @@ ansi_tail_has() { tail -c "+$2" "${TRANSCRIPTS[$1]}" | grep -aFq "$3"; }
 ansi_tail_compact_has() { # index offset canonical-text; normalize terminal-diff escapes and skipped spaces.
   tail -c "+$2" "${TRANSCRIPTS[$1]}" | perl -0777 -pe 's/\e\[[0-?]*[ -\/]*[@-~]//g; s/\e\][^\a\e]*(?:\a|\e\\)//g; s/\s+//g' | grep -aFq "$(tr -d '[:space:]' <<< "$3")"
 }
+ansi_tail_has_rgb() { # index offset r g b; accepts standard semicolon/colon SGR forms.
+  local index="$1" offset="$2" red="$3" green="$4" blue="$5"
+  tail -c "+$offset" "${TRANSCRIPTS[index]}" | perl -0777 -e '$_=<STDIN>;my($r,$g,$b)=@ARGV;exit !/\e\[[^m]*?(?:38;2;$r;$g;${b}|38:2::?$r:$g:${b})(?:;[0-9:]+)*m/' "$red" "$green" "$blue"
+}
 write_bytes() { local fd="${WRITER_FDS[$1]}"; printf '%b' "$2" >&"$fd"; }
 popup_tail_has() { # popup offset text
   popup_open "$1" && ansi_tail_has "$1" "$2" "$3"
@@ -127,6 +131,18 @@ if [[ -n "${PD_CREATION_GATE:-}" && -z "$gate_wrapper_token" && ( "$command_name
 fi
 f="$(mktemp "$PD_LOG/invocation.XXXXXXXX")"
   perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'my$f=shift;open my$o,">",$f or die$!;binmode$o;printf $o "%.9f\0",clock_gettime(CLOCK_MONOTONIC);print $o join("\0",@ARGV),"\0"' "$f" "${args[@]}"
+  target=''
+  for ((i=0; i<${#args[@]}-1; i++)); do [[ "${args[i]}" != -t ]] || { target="${args[i+1]}"; break; }; done
+  if [[ "$command_name" == -C ]]; then
+    owner_class=control; owner_command=control
+  else
+    owner_command="$command_name"
+    case "$command_name" in capture-pane|list-panes|show-options|show-option) owner_class=read ;; *) owner_class=action ;; esac
+  fi
+  owner_record="$(perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%.9f",clock_gettime(CLOCK_MONOTONIC)')"$'\t'"$$"$'\t'"$PPID"$'\t'"$owner_command"$'\t'"$target"$'\t'"$owner_class"
+  # A single sub-PIPE_BUF append follows complete construction; readers never
+  # use partial records and the legacy NUL argv log above is unchanged.
+  printf '%s\n' "$owner_record" >> "$PD_OWNER_LOG"
   if [[ -e "$PD_REJECT" ]]; then for x in "${args[@]}"; do [[ "$x" != -C ]] || exit 79; done; fi
 if [[ -n "$gate_wrapper_token" && ( "$gate_wrapper_token" != "${PD_CREATION_TOKEN:-}" || "$gate_wrapper_path" != "${PD_CREATION_GATE:-}" ) ]]; then
     echo 'gate wrapper token mismatch' >&2
@@ -189,13 +205,28 @@ if [[ -n "$gate_wrapper_token" && ( "$gate_wrapper_token" != "${PD_CREATION_TOKE
 EOF
   chmod 755 "$WRAP/tmux"
 }
+owner_has() { # start end owner command target
+  OWNER_START="$1" OWNER_END="$2" OWNER_PID="$3" OWNER_COMMAND="$4" OWNER_TARGET="$5" perl -F'\t' -ane 'next if @F < 6 || $F[0] < $ENV{OWNER_START} || $F[0] > $ENV{OWNER_END}; $found=1 if $F[2] == $ENV{OWNER_PID} && $F[3] eq $ENV{OWNER_COMMAND} && $F[4] eq $ENV{OWNER_TARGET}; END { exit !$found }' < "$OWNER_LOG"
+}
+owner_has_since() { owner_has "$1" "$(now)" "$2" "$3" "$4"; }
+status_snapshot_rendered() { # committed-at transcript-offset popup-owner status
+  owner_has_since "$1" "$3" list-panes '' && ansi_tail_has 0 "$2" "$4"
+}
+owner_only_read_or_control() { # start end owner
+  OWNER_START="$1" OWNER_END="$2" OWNER_PID="$3" perl -F'\t' -ane 'next if @F < 6 || $F[0] < $ENV{OWNER_START} || $F[0] > $ENV{OWNER_END} || $F[2] != $ENV{OWNER_PID}; chomp $F[5]; print "$F[3]=$F[4] class=$F[5]\n"; exit 1 unless $F[5] eq q(read) || $F[5] eq q(control)' < "$OWNER_LOG"
+}
+owner_pids() { OWNER_START="$1" OWNER_END="$2" OWNER_PID="$3" perl -F'\t' -ane 'next if @F < 6 || $F[0] < $ENV{OWNER_START} || $F[0] > $ENV{OWNER_END} || $F[2] != $ENV{OWNER_PID}; print "$F[1]\n"' < "$OWNER_LOG" | sort -un; }
+owner_count() { OWNER_START="$1" OWNER_END="$2" OWNER_PID="$3" perl -F'\t' -ane 'BEGIN { $n = 0 } next if @F < 6 || $F[0] < $ENV{OWNER_START} || $F[0] > $ENV{OWNER_END} || $F[2] != $ENV{OWNER_PID}; $n++; END { print "$n\n" }' < "$OWNER_LOG"; }
+process_identity() { local pid="$1"; ps -o lstart= -o command= -p "$pid" 2>/dev/null | tr -s ' ' || true; }
+identity_is_dead() { local pid="$1" identity="$2"; ! pid_is_alive "$pid" || [[ "$(process_identity "$pid")" != "$identity" ]]; }
+wait_for_elapsed() { local started="$1" minimum="$2"; perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'exit clock_gettime(CLOCK_MONOTONIC)-$ARGV[0] >= $ARGV[1] ? 0 : 1' "$started" "$minimum"; }
 start_client() { # session label
   local session="$1" label="$2" index="${#CLIENT_PIDS[@]}" before fifo transcript fd pid
   before="$(normal_clients)"
   fifo="$TMP/$label.fifo" transcript="$TMP/$label.ansi"
   mkfifo "$fifo"
   # cat turns the FIFO producer into the regular stdin pipeline supported by macOS script.
-  cat "$fifo" | PD_REAL_TMUX="$REAL_TMUX" PD_SOCKET="$SOCKET" PD_LOG="$LOG" PD_REJECT="$REJECT" PD_CREATION_GATE="$CREATION_GATE" PD_CREATION_TOKEN="$CREATION_TOKEN" PD_CREATION_FAIL_STAGE="$CREATION_FAIL_STAGE" PD_CREATION_GONE="$CREATION_GONE" PATH="$WRAP:$PATH" TMUX='' pd_run_in_pty "$WRAP/tmux" attach-session -t "$session" >"$transcript" 2>&1 &
+  cat "$fifo" | PD_REAL_TMUX="$REAL_TMUX" PD_SOCKET="$SOCKET" PD_LOG="$LOG" PD_OWNER_LOG="$OWNER_LOG" PD_REJECT="$REJECT" PD_CREATION_GATE="$CREATION_GATE" PD_CREATION_TOKEN="$CREATION_TOKEN" PD_CREATION_FAIL_STAGE="$CREATION_FAIL_STAGE" PD_CREATION_GONE="$CREATION_GONE" PATH="$WRAP:$PATH" TERM=xterm-256color COLORTERM=truecolor TMUX='' pd_run_in_pty "$WRAP/tmux" attach-session -t "$session" >"$transcript" 2>&1 &
   pid=$!; exec {fd}>"$fifo"
   wait_for "client $label attach" 3 new_normal_client "$before"
   CLIENT_PIDS[index]="$NEW_CLIENT_PID"
@@ -305,7 +336,7 @@ phase6_restore_xdg() {
   PHASE6_XDG_VALUE=''
 }
 phase6_theme_help_isolation() {
-  local home_a="$TMP/phase6-xdg-a" home_b="$TMP/phase6-xdg-b" prior_xdg a_offset b_offset help_offset action_start b_start close_help_offset a_popup b_popup closed
+  local home_a="$TMP/phase6-xdg-a" home_b="$TMP/phase6-xdg-b" prior_xdg a_offset b_offset help_offset action_start b_start close_help_offset a_popup b_popup closed b_source reopened_offset quiescence_start quiescence_end owner_start a_control b_control
   mkdir -p "$home_a/tmux-pane-dash" "$home_b/tmux-pane-dash"
   printf 'accent = "#010203"\nborder = "#040506"\n' > "$home_a/tmux-pane-dash/config.toml"
   printf 'accent = "#070809"\nborder = "#0a0b0c"\n' > "$home_b/tmux-pane-dash/config.toml"
@@ -316,23 +347,28 @@ phase6_theme_help_isolation() {
     PHASE6_XDG_WAS_SET=1
   fi
 
+  # RGB capability is relevant only to the semantic RGB scenario below. Keeping
+  # it out of the prior harness phases prevents its terminal-diff timing from
+  # perturbing their independent assertions.
+  admin set-option -sa terminal-features '*:RGB'
   admin set-environment -g XDG_CONFIG_HOME "$home_a"
+  owner_start="$(now)"
   a_offset="$(ansi_size 0)"
   open_popup 0
   a_popup="${POPUP_PIDS[0]}"
-  wait_for 'phase6 popup A first frame' 3 popup_tail_has 0 "$((a_offset + 1))" $'\033[38;2;1;2;3m'
-  ansi_tail_has 0 "$((a_offset + 1))" $'\033[38;2;4;5;6m' || die 'phase6 popup A missing configured border'
-  ! ansi_tail_has 0 "$((a_offset + 1))" $'\033[38;2;7;8;9m' || die 'phase6 popup A inherited popup B accent'
-  ! ansi_tail_has 0 "$((a_offset + 1))" $'\033[38;2;10;11;12m' || die 'phase6 popup A inherited popup B border'
+  wait_for 'phase6 popup A first frame' 3 ansi_tail_has_rgb 0 "$((a_offset + 1))" 1 2 3
+  ansi_tail_has_rgb 0 "$((a_offset + 1))" 4 5 6 || die 'phase6 popup A missing configured border'
+  ! ansi_tail_has_rgb 0 "$((a_offset + 1))" 7 8 9 || die 'phase6 popup A inherited popup B accent'
+  ! ansi_tail_has_rgb 0 "$((a_offset + 1))" 10 11 12 || die 'phase6 popup A inherited popup B border'
 
   admin set-environment -g XDG_CONFIG_HOME "$home_b"
   b_offset="$(ansi_size 1)"
   open_popup 1
   b_popup="${POPUP_PIDS[1]}"
-  wait_for 'phase6 popup B first frame' 3 popup_tail_has 1 "$((b_offset + 1))" $'\033[38;2;7;8;9m'
-  ansi_tail_has 1 "$((b_offset + 1))" $'\033[38;2;10;11;12m' || die 'phase6 popup B missing configured border'
-  ! ansi_tail_has 1 "$((b_offset + 1))" $'\033[38;2;1;2;3m' || die 'phase6 popup B inherited popup A accent'
-  ! ansi_tail_has 1 "$((b_offset + 1))" $'\033[38;2;4;5;6m' || die 'phase6 popup B inherited popup A border'
+  wait_for 'phase6 popup B first frame' 3 ansi_tail_has_rgb 1 "$((b_offset + 1))" 7 8 9
+  ansi_tail_has_rgb 1 "$((b_offset + 1))" 10 11 12 || die 'phase6 popup B missing configured border'
+  ! ansi_tail_has_rgb 1 "$((b_offset + 1))" 1 2 3 || die 'phase6 popup B inherited popup A accent'
+  ! ansi_tail_has_rgb 1 "$((b_offset + 1))" 4 5 6 || die 'phase6 popup B inherited popup A border'
   has_two_controls || die 'phase6 expected two popup-local controls'
   popup_control_has_owner 0 "${POPUP_CONTROLS[0]}" || die 'phase6 popup A control owner'
   popup_control_has_owner 1 "${POPUP_CONTROLS[1]}" || die 'phase6 popup B control owner'
@@ -346,14 +382,29 @@ phase6_theme_help_isolation() {
   ansi_tail_compact_has 0 "$((help_offset + 1))" '?, Esc, q close help' || die 'phase6 help missing close footer'
   action_start="$(now)"
   write_bytes 0 $'nx\r\023sj'
-  phase6_read_only_classes_since "$action_start" || die 'phase6 help action dispatched a tmux write/control command'
-  popup_open 0 || die 'phase6 help action closed popup A'
-  popup_tail_has 0 "$((help_offset + 1))" 'Keys — navigation and modes' || die 'phase6 help action dismissed help'
+  close_help_offset="$(ansi_size 0)"
+  write_bytes 0 '?'
+  wait_for 'phase6 inert barrier closes Help to dashboard' 2 popup_tail_has 0 "$((close_help_offset + 1))" live-spare
+  reopened_offset="$(ansi_size 0)"
+  write_bytes 0 '?'
+  wait_for 'phase6 inert barrier reopens Help' 2 popup_tail_has 0 "$((reopened_offset + 1))" 'Keys — navigation and modes'
+  ansi_tail_compact_has 0 "$((reopened_offset + 1))" '?, Esc, q close help' || die 'phase6 inert barrier lost Help footer'
+  popup_open 0 || die 'phase6 inert barrier closed popup A'
+  quiescence_start="$(now)"
+  wait_for 'phase6 Help quiescence >=1.1s' 1.3 wait_for_elapsed "$quiescence_start" 1.1
+  if ! popup_open 0 || ! popup_tail_has 0 "$((reopened_offset + 1))" 'Keys — navigation and modes'; then
+    die 'phase6 Help was not current after quiescence'
+  fi
+  quiescence_end="$(now)"
+  owner_only_read_or_control "$action_start" "$quiescence_end" "$a_popup" || die 'phase6 Help emitted owner-specific write/action tmux argv'
 
+  b_source="$(client_snapshot "${CLIENT_TTYS[1]}")"; b_source="${b_source#* }"
+  [[ -n "$b_source" ]] || die 'phase6 popup B source pane identity'
   b_start="$(now)"
   write_bytes 1 $'jj\022'
-  wait_for 'phase6 popup B preview while A help is open' .5 has_capture_since "$b_start"
+  wait_for 'phase6 popup B owner preview while A help is open' .5 owner_has_since "$b_start" "$b_popup" capture-pane "$b_source"
   popup_open 1 || die 'phase6 popup B became unusable while A help open'
+  ansi_grew_from 1 "$b_offset" || die 'phase6 popup B dashboard did not redraw after navigation'
   popup_tail_has 0 "$((help_offset + 1))" 'Keys — navigation and modes' || die 'phase6 popup A left help while B navigated'
   # Pause B's selected-pane preview before attributing A's post-close quiescence;
   # topology reads remain permitted, but no other popup may contribute captures.
@@ -364,14 +415,16 @@ phase6_theme_help_isolation() {
   wait_for 'phase6 q closes help only' 2 popup_tail_has 0 "$((close_help_offset + 1))" live-spare
   popup_open 0 && [[ "${POPUP_PIDS[0]}" == "$a_popup" ]] || die 'phase6 first q did not retain popup A'
   control_present "${POPUP_CONTROLS[0]}" || die 'phase6 first q replaced popup A control'
+  a_control="${POPUP_CONTROLS[0]}"
   close_popup 0
   closed="$(now)"
-  assert_no_popup_runtime_after_exit 'phase6 popup A' "$a_popup" "$closed"
+  assert_phase6_owner_stopped 'phase6 popup A' "$a_popup" "$a_control" "$owner_start" "$closed"
   (( $(control_count) == 1 )) || die 'phase6 popup A close did not leave exactly popup B control'
   popup_open 1 && [[ "${POPUP_PIDS[1]}" == "$b_popup" ]] || die 'phase6 popup B did not remain open after popup A close'
+  b_control="${POPUP_CONTROLS[1]}"
   close_popup 1
   closed="$(now)"
-  assert_no_popup_runtime_after_exit 'phase6 popup B' "$b_popup" "$closed"
+  assert_phase6_owner_stopped 'phase6 popup B' "$b_popup" "$b_control" "$owner_start" "$closed"
   (( $(control_count) == 0 )) || die 'phase6 popup close left a control client'
   phase6_restore_xdg
   printf 'phase6 themes A=%s B=%s controls=2->0 help=local read-only-classes=attributed post-close-runtime=0\n' "$a_popup" "$b_popup"
@@ -389,6 +442,21 @@ assert_no_popup_runtime_after_exit() {
   (( duration >= 1100 )) || die "$label post-exit observation shorter than fallback interval: ${duration}ms"
   (( captures == 0 && lists == 0 )) || die "$label popup runtime after pane-dash exit: capture-pane=$captures list-panes=$lists"
   printf '%s popup-pid=%s post-exit-observation=%sms capture-pane=%s list-panes=%s\n' "$label" "$popup_pid" "$duration" "$captures" "$lists"
+}
+assert_phase6_owner_stopped() { # label popup-owner control start exit
+  local label="$1" owner="$2" control="$3" started="$4" exited="$5" observed control_identity child child_identity
+  control_identity="$(process_identity "$control")"
+  wait_for "$label owner quiescence >=1.1s" 1.3 wait_for_elapsed "$exited" 1.1
+  observed="$(now)"
+  (( $(owner_count "$exited" "$observed" "$owner") == 0 )) || die "$label owner emitted tmux argv after exit"
+  [[ -z "$control_identity" ]] || identity_is_dead "$control" "$control_identity" || die "$label control PID survived or was reused"
+  while read -r child; do
+    [[ -n "$child" ]] || continue
+    child_identity="$(process_identity "$child")"
+    [[ -z "$child_identity" ]] || identity_is_dead "$child" "$child_identity" || die "$label wrapper child PID survived or was reused"
+  done < <(owner_pids "$started" "$exited" "$owner")
+  ! pane_dash_process "$owner" || die "$label pane-dash owner survived exit"
+  printf '%s owner=%s control=%s post-exit-owner-records=0 children-dead=1 owner-dead=1\n' "$label" "$owner" "$control"
 }
 pane_contains() { admin capture-pane -p -t "$1" | grep -aFq "$2"; }
 client_snapshot() { admin list-clients -F '#{client_tty} #{session_id} #{pane_id}' | awk -v tty="$1" '$1==tty {print $2 " " $3; exit}'; }
@@ -959,16 +1027,16 @@ main() {
   [[ -x "$BIN" ]] || die "missing $BIN; run make build"
   if ! command -v perl >/dev/null || ! command -v script >/dev/null; then die 'perl and script required'; fi
   perl -e 'exit($ARGV[0]=~/^(\d+)\.(\d+)/&&($1>3||$1==3&&$2>=6)?0:1)' "$($REAL_TMUX -V|awk '{print $2}')" || die 'tmux >=3.6 required'
-  TMP="$(mktemp -d "${TMPDIR:-/tmp}/pane-dash-live.XXXXXXXX")"; SOCKET="$TMP/socket"; WRAP="$TMP/wrap"; LOG="$TMP/log"; REJECT="$TMP/reject"; make_wrapper
+  TMP="$(mktemp -d "${TMPDIR:-/tmp}/pane-dash-live.XXXXXXXX")"; SOCKET="$TMP/socket"; WRAP="$TMP/wrap"; LOG="$TMP/log"; OWNER_LOG="$TMP/owners.tsv"; REJECT="$TMP/reject"; : > "$OWNER_LOG"; make_wrapper
   TMUX='' "$REAL_TMUX" -S "$SOCKET" -f /dev/null new-session -d -s live -x 120 -y 40 'exec cat'
   admin new-session -d -s other -x 120 -y 40 'exec cat'
-  local pane target startup old_control t before after captures
+  local pane target startup old_control t before after captures status_commit
   pane="$(admin display-message -p -t live:0.0 '#{pane_id}')"; target="$(admin split-window -d -P -F '#{pane_id}' -t live:0 'exec cat')"
   admin set-option -g @pane-dash-engine rust; admin set-option -g @pane-dash-width 100%; admin set-option -g @pane-dash-height 100%; admin set-option -p -t "$pane" @pane_dash_tag live-test; admin set-option -p -t "$target" @pane_dash_tag live-spare
   TASK9_MARKER="$TMP/task9-marker"
-  admin set-environment -g PATH "$WRAP:$PATH"; admin set-environment -g PD_REAL_TMUX "$REAL_TMUX"; admin set-environment -g PD_SOCKET "$SOCKET"; admin set-environment -g PD_LOG "$LOG"; admin set-environment -g PD_REJECT "$REJECT"; admin set-environment -g PD_TASK9_MARKER "$TASK9_MARKER"
+  admin set-environment -g PATH "$WRAP:$PATH"; admin set-environment -g PD_REAL_TMUX "$REAL_TMUX"; admin set-environment -g PD_SOCKET "$SOCKET"; admin set-environment -g PD_LOG "$LOG"; admin set-environment -g PD_OWNER_LOG "$OWNER_LOG"; admin set-environment -g PD_REJECT "$REJECT"; admin set-environment -g PD_TASK9_MARKER "$TASK9_MARKER"
   # Install pane_dash.tmux through the wrapper; do not directly run pane-dash.
-  PATH="$WRAP:$PATH" PD_REAL_TMUX="$REAL_TMUX" PD_SOCKET="$SOCKET" PD_LOG="$LOG" PD_REJECT="$REJECT" TMUX='' "$ROOT/pane_dash.tmux"
+  PATH="$WRAP:$PATH" PD_REAL_TMUX="$REAL_TMUX" PD_SOCKET="$SOCKET" PD_LOG="$LOG" PD_OWNER_LOG="$OWNER_LOG" PD_REJECT="$REJECT" TMUX='' "$ROOT/pane_dash.tmux"
   [[ "$(admin show-options -gv focus-events)" == on ]] || die 'production plugin did not enable focus-events'
   terminal_features="$(admin show-options -sv terminal-features)"
   grep -Fxq '*:focus' <<< "$terminal_features" || die 'production plugin did not enable terminal focus feature'
@@ -1006,8 +1074,11 @@ main() {
   admin set-option -p -t "$pane" @pane_dash_status idle
   admin set-option -p -t "$pane" @pane_dash_status_since "$epoch"
   admin set-option -p -t "$pane" @pane_dash_heartbeat "$epoch"
-  wait_for 'status fallback list-panes <=1.1s' 1.1 has_list_since "$t"
-  ansi_tail_has 0 "$((status_offset+1))" idle || die 'new status snapshot did not render idle'
+  status_commit="$(now)"
+  # A list-panes request that races the first two option writes can legitimately
+  # render the prior incoherent status. Require a snapshot started after the
+  # coherent triple was committed and its fresh frame from this popup owner.
+  wait_for 'fresh coherent status snapshot <=1.1s' 1.1 status_snapshot_rendered "$status_commit" "$((status_offset + 1))" "${POPUP_PIDS[0]}" idle
   (( $(record_count "$t" "$(now)" show-options)==0 )) || die 'status polling used show-options'
   # The selected visible cat pane receives literal hostile text before it is
   # killed. $target remains alive to keep the attached session/popup valid.
