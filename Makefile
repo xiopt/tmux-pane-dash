@@ -8,7 +8,7 @@ DESTDIR ?=
 
 build:
 	@set -eu; \
-	cargo=$${CARGO:-cargo}; install=$${INSTALL:-install}; \
+	cargo=$${CARGO-cargo}; install=$${INSTALL-install}; \
 	"$$cargo" build --locked --release --manifest-path pane-dash/Cargo.toml; \
 	mkdir -p "bin"; \
 	temporary="bin/.pane-dash.tmp.$$$$"; \
@@ -20,7 +20,7 @@ build:
 
 install: build
 	@set -eu; \
-	install=$${INSTALL:-install}; prefix=$${PREFIX:-$$HOME/.local}; bindir=$${BINDIR:-$$prefix/bin}; destdir=$${DESTDIR:-}; \
+	install=$${INSTALL-install}; prefix=$${PREFIX-$$HOME/.local}; bindir=$${BINDIR-$$prefix/bin}; destdir=$${DESTDIR-}; \
 	directory="$$destdir$$bindir"; \
 	mkdir -p "$$directory"; \
 	temporary="$$directory/.pane-dash.tmp.$$$$"; \
@@ -31,11 +31,11 @@ install: build
 	trap - 0 HUP INT TERM
 
 uninstall:
-	@prefix=$${PREFIX:-$$HOME/.local}; bindir=$${BINDIR:-$$prefix/bin}; destdir=$${DESTDIR:-}; \
+	@prefix=$${PREFIX-$$HOME/.local}; bindir=$${BINDIR-$$prefix/bin}; destdir=$${DESTDIR-}; \
 	rm -f "$$destdir$$bindir/pane-dash"
 
 clean:
-	@cargo=$${CARGO:-cargo}; "$$cargo" clean --manifest-path pane-dash/Cargo.toml
+	@cargo=$${CARGO-cargo}; "$$cargo" clean --manifest-path pane-dash/Cargo.toml
 	rm -f "bin/pane-dash"
 	rmdir "bin" 2>/dev/null || :
 

@@ -1,9 +1,13 @@
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   SCRATCH="$BATS_TEST_TMPDIR/source"
-  mkdir -p "$SCRATCH/pane-dash"
+  mkdir -p "$SCRATCH/pane-dash/src" "$SCRATCH/scripts" "$SCRATCH/docs"
   cp "$ROOT/Makefile" "$SCRATCH/Makefile"
   cp "$ROOT/pane-dash/Cargo.toml" "$ROOT/pane-dash/Cargo.lock" "$SCRATCH/pane-dash/"
+  cp "$ROOT/pane-dash/src/main.rs" "$SCRATCH/pane-dash/src/"
+  cp "$ROOT/README.md" "$SCRATCH/README.md"
+  cp "$ROOT/scripts/dash.sh" "$SCRATCH/scripts/"
+  cp "$ROOT/docs/superpowers/specs/2026-07-22-v2-phase7-packaging-design.md" "$SCRATCH/docs/"
 
   FAKE_BIN="$BATS_TEST_TMPDIR/fake-bin"
   mkdir -p "$FAKE_BIN"
@@ -84,7 +88,13 @@ fingerprint() {
 }
 
 source_fingerprint() {
-  (cd "$1" && cat Makefile pane-dash/Cargo.toml pane-dash/Cargo.lock | shasum -a 256 | awk '{print $1}')
+  (
+    cd "$1" || return
+    find . -type f ! -path './pane-dash/target/*' ! -path './bin/*' -exec shasum -a 256 {} \; \
+      | LC_ALL=C sort \
+      | shasum -a 256 \
+      | awk '{print $1}'
+  )
 }
 
 assert_mode() {
@@ -115,6 +125,28 @@ wait_for_exit() {
   done
 }
 
+wait_for_no_temporary() {
+  local directory=$1 deadline=$((SECONDS + 5))
+  while :; do
+    compgen -G "$directory/.pane-dash.tmp.*" >/dev/null || return 0
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.01
+  done
+}
+
+wait_for_signal_effect() {
+  local temporary_directory=$1 command=$2 attempt current
+  for attempt in {1..50}; do
+    current=$(ps -p "$RECIPE_PID" -o command= 2>/dev/null || :)
+    if ! compgen -G "$temporary_directory/.pane-dash.tmp.*" >/dev/null \
+      && { [ -z "$current" ] || [ "$current" != "$command" ]; }; then
+      return 0
+    fi
+    sleep 0.01
+  done
+  return 1
+}
+
 start_make() {
   local target=$1 output=$2
   shift 2
@@ -135,20 +167,26 @@ assert_recipe_shell() {
   local command
   command=$(ps -p "$RECIPE_PID" -o command=)
   [[ "$command" == *'.pane-dash.tmp.'* ]]
+  RECIPE_COMMAND=$command
 }
 
 stop_blocked_make() {
-  local signal=$1 recipe_group blocker_group test_group
+  local signal=$1 temporary_directory=$2 release_marker=$3
   assert_recipe_shell
-  recipe_group=$(ps -p "$RECIPE_PID" -o pgid= | tr -d ' ')
-  blocker_group=$(ps -p "$BLOCKER_PID" -o pgid= | tr -d ' ')
-  test_group=$(ps -p "$$" -o pgid= | tr -d ' ')
-  [ "$recipe_group" = "$blocker_group" ]
-  [ "$recipe_group" != "$test_group" ]
-  kill "-$signal" -- "-$recipe_group"
+  kill "-$signal" "$RECIPE_PID"
+  if wait_for_signal_effect "$temporary_directory" "$RECIPE_COMMAND"; then
+    [ -n "$(ps -p "$BLOCKER_PID" -o stat= 2>/dev/null || :)" ]
+  fi
+  touch "$release_marker"
+  if ! wait_for_exit "$RECIPE_PID" || ! wait_for_no_temporary "$temporary_directory"; then
+    ps -p "$MAKE_PID,$RECIPE_PID,$BLOCKER_PID" -o pid,ppid,pgid,stat,command >&2 || :
+    touch "$release_marker"
+    wait "$MAKE_PID" 2>/dev/null || :
+    return 1
+  fi
   if ! wait_for_exit "$MAKE_PID"; then
     ps -p "$MAKE_PID,$RECIPE_PID,$BLOCKER_PID" -o pid,ppid,pgid,stat,command >&2 || :
-    kill -KILL -- "-$recipe_group" 2>/dev/null || :
+    kill -KILL "$BLOCKER_PID" 2>/dev/null || :
     kill -KILL "$MAKE_PID" 2>/dev/null || :
     wait "$MAKE_PID" 2>/dev/null || :
     return 1
@@ -220,9 +258,9 @@ stop_blocked_make() {
   wait_for_count "$ready.*.ready" 1
   marker=$(compgen -G "$ready.*.ready")
   read_ready_processes "$marker"
-  stop_blocked_make TERM
+  stop_blocked_make TERM "$SCRATCH/bin" "$release"
 
-  [ "$MAKE_STATUS" -eq 143 ]
+  [ "$MAKE_STATUS" -eq 143 ] || grep -F 'Error 143' "$output"
   [ "$(<"$SCRATCH/bin/pane-dash")" = 'old local binary' ]
   assert_mode "$SCRATCH/bin/pane-dash" 711
   assert_no_temporary "$SCRATCH/bin"
@@ -242,7 +280,7 @@ stop_blocked_make() {
   wait_for_count "$ready.*.ready" 1
   marker=$(compgen -G "$ready.*.ready")
   read_ready_processes "$marker"
-  stop_blocked_make INT
+  stop_blocked_make INT "${destination%/*}" "$release"
 
   [ "$MAKE_STATUS" -eq 2 ]
   grep -F 'Error 130' "$output"
@@ -267,9 +305,9 @@ stop_blocked_make() {
   wait_for_count "$ready.*.ready" 1
   marker=$(compgen -G "$ready.*.ready")
   read_ready_processes "$marker"
-  stop_blocked_make TERM
+  stop_blocked_make TERM "${destination%/*}" "$release"
 
-  [ "$MAKE_STATUS" -eq 143 ]
+  [ "$MAKE_STATUS" -eq 143 ] || grep -F 'Error 143' "$output"
   [ "$(<"$destination")" = 'old installed binary' ]
   assert_mode "$destination" 711
   assert_no_temporary "${destination%/*}"
@@ -316,6 +354,45 @@ stop_blocked_make() {
   [ "$(grep -Fc $'install\037'"$cli_install"$'\037' "$FAKE_LOG")" -eq 2 ]
   ! grep -F $'cargo\037'"$env_cargo"$'\037' "$FAKE_LOG"
   ! grep -F $'install\037'"$env_install"$'\037' "$FAKE_LOG"
+}
+
+@test "explicitly empty CARGO and INSTALL overrides fail instead of using defaults" {
+  run env PATH="$FAKE_BIN:$PATH" make -C "$SCRATCH" build CARGO= INSTALL="$FAKE_BIN/install"
+  [ "$status" -ne 0 ]
+  ! grep -F $'cargo\037' "$FAKE_LOG"
+
+  : > "$FAKE_LOG"
+  run env PATH="$FAKE_BIN:$PATH" make -C "$SCRATCH" build CARGO="$FAKE_BIN/cargo" INSTALL=
+  [ "$status" -ne 0 ]
+  grep -F $'cargo\037'"$FAKE_BIN/cargo"$'\037' "$FAKE_LOG"
+  ! grep -F $'install\037' "$FAKE_LOG"
+}
+
+@test "explicit empty PREFIX uses /bin beneath DESTDIR" {
+  stage="$BATS_TEST_TMPDIR/empty-prefix-stage"
+
+  run make -C "$SCRATCH" install DESTDIR="$stage" PREFIX= CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install"
+
+  [ "$status" -eq 0 ]
+  [ -x "$stage/bin/pane-dash" ]
+}
+
+@test "explicit empty BINDIR installs directly beneath DESTDIR" {
+  stage="$BATS_TEST_TMPDIR/empty-bindir-stage"
+
+  run make -C "$SCRATCH" install DESTDIR="$stage" BINDIR= CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install"
+
+  [ "$status" -eq 0 ]
+  [ -x "$stage/pane-dash" ]
+}
+
+@test "explicit empty DESTDIR leaves an absolute BINDIR unstaged" {
+  bindir="$BATS_TEST_TMPDIR/absolute-bindir"
+
+  run make -C "$SCRATCH" install DESTDIR= BINDIR="$bindir" CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install"
+
+  [ "$status" -eq 0 ]
+  [ -x "$bindir/pane-dash" ]
 }
 
 @test "two concurrent builds use distinct temporaries and leave one complete mode 0755 local binary" {
@@ -443,7 +520,15 @@ stop_blocked_make() {
   run make -C "$SCRATCH" help
   [ "$status" -eq 0 ]
   [ "$before" = "$(fingerprint "$SCRATCH")" ]
+  [[ "$output" == *'CARGO      Cargo command (default: cargo).'* ]]
   [[ "$output" == *'Install executable (default: install; no embedded arguments).'* ]]
+  [[ "$output" == *'PREFIX     Installation prefix (default: $(HOME)/.local).'* ]]
+  [[ "$output" == *'BINDIR     Binary directory (default: $(PREFIX)/bin).'* ]]
+  [[ "$output" == *'DESTDIR    Staging prefix (default: empty).'* ]]
+  [[ "$output" == *'Install destination: $(DESTDIR)$(BINDIR)/pane-dash'* ]]
+  [[ "$output" == *'make install'* ]]
+  [[ "$output" == *'make install PREFIX=/usr/local'* ]]
+  [[ "$output" == *'make install DESTDIR=/tmp/package PREFIX=/usr/local'* ]]
 }
 
 @test "Makefile uses POSIX shell defaults instead of GNU export and default HOME destination" {
@@ -464,4 +549,39 @@ stop_blocked_make() {
   run env CARGO="$FAKE_BIN/cargo" INSTALL="$spaced" make -C "$SCRATCH" build
   [ "$status" -eq 0 ]
   [ -x "$SCRATCH/bin/pane-dash" ]
+}
+
+@test "signal tests reject a cleanup-only TERM trap" {
+  mutated="$BATS_TEST_TMPDIR/mutated-source"
+  cp -R "$SCRATCH" "$mutated"
+  python3 - "$mutated/Makefile" <<'PY'
+from pathlib import Path
+path = Path(__import__('sys').argv[1])
+path.write_text(path.read_text().replace("trap 'exit 143' TERM", "trap ':' TERM"))
+PY
+  ready="$BATS_TEST_TMPDIR/mutated-ready"
+  release="$BATS_TEST_TMPDIR/mutated-release"
+  output="$BATS_TEST_TMPDIR/mutated-output"
+  mkdir -p "$mutated/bin"
+  printf 'old local binary\n' > "$mutated/bin/pane-dash"
+
+  SCRATCH="$mutated"
+  start_make build "$output" CARGO="$FAKE_BIN/cargo" INSTALL="$FAKE_BIN/install" BLOCK_BUILD_STAGE=1 READY_MARKER="$ready" RELEASE_MARKER="$release"
+  wait_for_count "$ready.*.ready" 1
+  marker=$(compgen -G "$ready.*.ready")
+  read_ready_processes "$marker"
+  assert_recipe_shell
+  kill -TERM "$RECIPE_PID"
+  touch "$release"
+  wait_for_exit "$MAKE_PID"
+  wait "$MAKE_PID" 2>/dev/null || :
+
+  [ "$(<"$mutated/bin/pane-dash")" != 'old local binary' ]
+}
+
+@test "Makefile signal traps exit with conventional signal statuses" {
+  run grep -F "trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM;" "$SCRATCH/Makefile"
+
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 2 ]
 }
