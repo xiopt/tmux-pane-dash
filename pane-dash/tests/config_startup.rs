@@ -17,6 +17,9 @@ use std::{
 };
 use tempfile::TempDir;
 
+#[cfg(not(unix))]
+compile_error!("config startup integration tests require a Unix PTY environment");
+
 #[test]
 fn app_state_keeps_explicit_loaded_config_immutable_through_reducer_events() {
     let loaded = LoadedUiConfig::default();
@@ -302,7 +305,7 @@ fn run_child(home: &Path, mode: &str) -> String {
     )
     .unwrap();
     fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
-    let status = Command::new(std::env::current_exe().unwrap())
+    let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_config_probe", "--nocapture"])
         .env_clear()
         .env("PANE_DASH_CONFIG_STARTUP_CHILD", mode)
@@ -310,8 +313,9 @@ fn run_child(home: &Path, mode: &str) -> String {
         .env("XDG_CONFIG_HOME", home)
         .env("HOME", home)
         .env("PATH", tmux_bin.path())
-        .status()
+        .spawn()
         .unwrap();
+    let status = wait_for_exit(&mut child, Duration::from_secs(5));
     assert!(status.success());
     assert!(
         !tmux_log.exists(),
@@ -367,7 +371,7 @@ fn real_startup_command(
         OsStr::new("--bench-first-frame"),
     ];
     let mut command = Command::new(script);
-    #[cfg(target_os = "macos")]
+    #[cfg(all(unix, not(target_os = "linux")))]
     command
         .arg("-q")
         .arg(transcript)
