@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod app;
+pub mod config;
 pub mod control;
 pub mod creation;
 pub mod filter;

@@ -31,8 +31,10 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "=0.3.32"
 nucleo-matcher = "0.3.1"
 ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "macros", "time", "process", "sync", "io-util", "test-util"] }
+toml = "0.9"
 unicode-width = "0.2"
 unicode-segmentation = "1"
 
