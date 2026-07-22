@@ -24,7 +24,10 @@ cleanup() {
   task9_clear_causal_evidence
   if [[ -n "$TASK9_MARKER" ]]; then rm -f "$TASK9_MARKER"; TASK9_MARKER=''; fi
   if [[ -n "$REJECT" ]]; then rm -f "$REJECT"; REJECT=''; fi
-  if [[ -n "$CREATION_GATE" ]]; then rm -rf "$CREATION_GATE"; CREATION_GATE=''; fi
+  if [[ -n "$CREATION_GATE" ]]; then
+    [[ ! -f "$CREATION_GATE/pids" ]] || while read -r pid; do kill -TERM "$pid" 2>/dev/null; done < "$CREATION_GATE/pids"
+    rm -rf "$CREATION_GATE"; CREATION_GATE=''
+  fi
   if [[ -n "$TASK9_DEGRADED_INDEX" ]]; then TASK9_DEGRADED_INDEX=''; fi
   for fd in "${WRITER_FDS[@]:-}"; do eval "exec ${fd}>&-"; done
   for pid in "${POPUP_CONTROLS[@]:-}" "${CLIENT_PIDS[@]:-}" "${PRODUCER_PIDS[@]:-}"; do kill "$pid" 2>/dev/null; done
@@ -488,6 +491,8 @@ creation_gate_begin() {
 }
 creation_gate_release() { : > "$CREATION_GATE/release"; }
 creation_gate_started() { [[ -e "$CREATION_GATE/started" ]]; }
+creation_gate_pid() { head -n 1 "$CREATION_GATE/pids"; }
+creation_gate_pid_reaped() { ! kill -0 "$1" 2>/dev/null; }
 creation_control_argv_count_since() {
   perl -e 'use strict;my($d,$after)=@ARGV;my$n=0;for my$f(glob "$d/*"){open my$h,"<",$f or die$!;binmode$h;local$/;my@v=split/\0/,<$h>,-1;my$t=shift@v;next if$t<$after;my$i=0;while($i<@v&&($v[$i]eq q(-S)||$v[$i]eq q(-f))){$i+=2}next unless($v[$i]//q())=~/^(?:new-session|new-window|split-window|set-option|send-keys)$/;$n++ if grep {$_ eq q(-C)} @v}print"$n\n"' "$LOG" "$1"
 }
@@ -538,7 +543,7 @@ creation_choice_order_and_context() {
   printf 'creation choices pane-context exact-order=right,left,bottom,top,window,session\n'
 }
 creation_success_responsive() {
-  local index nav_index started target after nav_before snapshot_before
+  local index nav_index started target after nav_before snapshot_before selection_started
   creation_gate_begin; creation_setup success; index="$CREATION_INDEX"; creation_open_first_split_form "$index"
   started="$(now)"; creation_submit_first_split "$index"; wait_for 'creation pending gate' 2 creation_gate_started
   wait_for 'creation pending row' 2 ansi_has "$index" 'creating...'
@@ -554,6 +559,9 @@ creation_success_responsive() {
   creation_gate_release; wait_for 'creation tag target' 3 creation_target_since "$started"; target="$(creation_target_since "$started")"
   wait_for 'creation target tagged' 3 pane_contains "$target" ''
   [[ "$(admin show-options -pv -t "$target" @pane_dash_tag)" == dash-created ]] || die 'creation success tag missing'
+  snapshot_before="$(ansi_size "$index")"; wait_for 'creation selected row snapshot' 1.1 ansi_grew_from "$index" "$snapshot_before"
+  selection_started="$(now)"; send_bytes "$index" '\022'
+  wait_for 'creation selected row targets created pane' .5 log_has_target_since "$selection_started" capture-pane "$target"
   (( $(record_count "$started" "$(now)" split-window)==1 )) || die 'creation success replayed stage 1'
   (( $(creation_tag_count_since "$started")==1 )) || die 'creation success tag count'
   creation_no_control_argv_since "$started" || die 'creation argv used persistent control stdin'
@@ -617,15 +625,16 @@ creation_concurrent_isolation() {
   printf 'creation concurrent popups=2 isolated-create=2 isolated-tag=2 control=0 closed\n'
 }
 creation_quit_reaps_blocked_stage() {
-  local index started popup_pid
+  local index started popup_pid child_pid exited
   creation_gate_begin; creation_setup quit; index="$CREATION_INDEX"; popup_pid="${POPUP_PIDS[index]}"; creation_open_first_split_form "$index"; started="$(now)"; creation_submit_first_split "$index"
-  wait_for 'creation quit gate' 2 creation_gate_started; send_bytes "$index" q
+  wait_for 'creation quit gate' 2 creation_gate_started; child_pid="$(creation_gate_pid)"; kill -0 "$child_pid" 2>/dev/null || die 'creation quit gate did not expose a live direct wrapper child'; send_bytes "$index" q
   wait_for 'creation quit popup exit' 2 popup_closed "$index"
+  wait_for 'creation quit direct wrapper child reaped' 2 creation_gate_pid_reaped "$child_pid"
   (( $(record_count "$started" "$(now)" split-window)==1 )) || die 'creation quit stage-1 count'
   (( $(creation_tag_count_since "$started")==0 && $(record_count "$started" "$(now)" send-keys)==0 )) || die 'creation quit ran a later stage'
   creation_no_control_argv_since "$started" || die 'creation quit used persistent control stdin'
-  assert_no_popup_runtime_after_exit 'creation quit-blocked' "$popup_pid" "$(now)"
-  printf 'creation quit blocked-stage popup=%s later-stages=0 control=0 closed\n' "$popup_pid"
+  exited="$(now)"; assert_no_popup_runtime_after_exit 'creation quit-blocked' "$popup_pid" "$exited"
+  printf 'creation quit direct-child=%s reaped popup=%s later-stages=0 control=0 closed\n' "$child_pid" "$popup_pid"
 }
 
 creation_scenarios() {

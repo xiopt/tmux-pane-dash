@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
     sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
 };
 
 use pane_dash::{
@@ -31,6 +32,7 @@ struct Harness {
     socket: String,
     tmux: PathBuf,
     log: PathBuf,
+    hang_pid: PathBuf,
 }
 
 impl Harness {
@@ -43,12 +45,14 @@ impl Harness {
         );
         let real_tmux = env::var_os("TMUX_BIN").unwrap_or_else(|| "tmux".into());
         let log = dir.path().join("argv.log");
+        let hang_pid = dir.path().join("hung-wrapper.pid");
         let tmux = dir.path().join("tmux");
         fs::write(
             &tmux,
             format!(
-                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\0' \"$@\" >> {log}\nprintf '\\n' >> {log}\ncase \"${{PD_CREATION_FAIL:-}}:$*\" in\n  tag:set-option*) echo 'tag stage rejected' >&2; exit 71 ;;\n  command:send-keys\\ -l*) echo 'command stage rejected' >&2; exit 72 ;;\nesac\nexec {real} -L {socket} \"$@\"\n",
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\0' \"$@\" >> {log}\nprintf '\\n' >> {log}\ncase \"${{PD_CREATION_FAIL:-}}:$*\" in\n  tag:set-option*) echo 'tag stage rejected' >&2; exit 71 ;;\n  command:send-keys\\ -l*) echo 'command stage rejected' >&2; exit 72 ;;\nesac\nif [[ \"${{PD_CREATION_HANG:-}}\" == 1 && \"${{1:-}}\" == split-window ]]; then\n  printf '%s\\n' \"$$\" > {hang_pid}\n  trap 'exit 143' HUP INT TERM\n  while :; do sleep 0.1; done\nfi\nexec {real} -L {socket} \"$@\"\n",
                 log = shell_quote(&log),
+                hang_pid = shell_quote(&hang_pid),
                 real = shell_quote(Path::new(&real_tmux)),
                 socket = shell_quote(Path::new(&socket)),
             ),
@@ -61,6 +65,7 @@ impl Harness {
             socket,
             tmux,
             log,
+            hang_pid,
         };
         harness.run([
             "-f",
@@ -166,6 +171,31 @@ fn draft(name: &str, cwd: &Path, command: &str) -> CreateDraft {
     }
 }
 
+fn created_pane(events: &[CreationProgress]) -> PaneId {
+    events
+        .iter()
+        .find_map(|event| match event {
+            CreationProgress::Created { pane_id, .. } => Some(pane_id.clone()),
+            _ => None,
+        })
+        .expect("created pane")
+}
+
+fn wait_for_pid_exit(pid: &str) {
+    let started = Instant::now();
+    while Command::new("kill")
+        .args(["-0", pid])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "hung wrapper {pid} was not reaped"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires tmux >= 3.6; serial scratch server"]
 async fn creation_uses_exact_targets_directions_child_cwd_and_one_shot_stages() {
@@ -196,6 +226,21 @@ async fn creation_uses_exact_targets_directions_child_cwd_and_one_shot_stages() 
             progress.last(),
             Some(CreationProgress::Finished { .. })
         ));
+        let created = created_pane(&progress);
+        assert_eq!(
+            harness
+                .text([
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &created.0,
+                    "#{pane_current_path}"
+                ])
+                .trim(),
+            cwd.canonicalize()
+                .expect("canonical hostile cwd")
+                .to_string_lossy()
+        );
         let create = harness
             .log_entries()
             .into_iter()
@@ -230,6 +275,29 @@ async fn creation_uses_exact_targets_directions_child_cwd_and_one_shot_stages() 
             .contains(hostile_name)
     );
 
+    let linked_session = "linked";
+    harness.text(["new-session", "-d", "-s", linked_session, "exec cat"]);
+    harness.text(["link-window", "-s", "base:0", "-t", "linked:"]);
+    let linked = harness
+        .create(
+            CreateContext::Split {
+                target: pane.clone(),
+                initiating_session: session.clone(),
+                linked_session_count: 2,
+                direction: SplitDirection::Right,
+            },
+            draft("", &cwd, ""),
+        )
+        .await;
+    let linked_pane = created_pane(&linked);
+    assert!(
+        harness
+            .text(["list-panes", "-t", "linked", "-F", "#{pane_id}"])
+            .lines()
+            .any(|id| id == linked_pane.0),
+        "created pane must remain a member of the initiating linked window"
+    );
+
     let session_name = "session space; #{literal} 'quote' 雪 -leading#;";
     let progress = harness
         .create(CreateContext::NewSession, draft(session_name, &cwd, ""))
@@ -250,6 +318,65 @@ async fn creation_uses_exact_targets_directions_child_cwd_and_one_shot_stages() 
             .text(["display-message", "-p", "-t", &created.0, "#{session_name}"])
             .trim(),
         session_name
+    );
+    assert_eq!(
+        harness
+            .text([
+                "show-options",
+                "-p",
+                "-v",
+                "-t",
+                &created.0,
+                "@pane_dash_tag"
+            ])
+            .trim(),
+        "dash-created"
+    );
+    assert!(
+        harness
+            .run(["set-option", "-p", "-u", "-t", &created.0, "@pane_dash_tag"])
+            .status
+            .success()
+    );
+    assert!(
+        harness
+            .run([
+                "show-options",
+                "-p",
+                "-v",
+                "-t",
+                &created.0,
+                "@pane_dash_tag"
+            ])
+            .stdout
+            .is_empty(),
+        "ordinary toggle removes the creation tag"
+    );
+    assert!(
+        harness
+            .run([
+                "set-option",
+                "-p",
+                "-t",
+                &created.0,
+                "@pane_dash_tag",
+                "cat"
+            ])
+            .status
+            .success()
+    );
+    assert_eq!(
+        harness
+            .text([
+                "show-options",
+                "-p",
+                "-v",
+                "-t",
+                &created.0,
+                "@pane_dash_tag"
+            ])
+            .trim(),
+        "cat"
     );
 
     assert!(
@@ -335,12 +462,53 @@ async fn creation_commands_are_literal_and_never_replayed_on_failure_or_empty_in
         empty.last(),
         Some(CreationProgress::Finished { .. })
     ));
+    let empty_request =
+        build_request(CreateContext::NewSession, &draft("", cwd, "")).expect("empty name request");
+    assert!(
+        !empty_request
+            .argv
+            .iter()
+            .any(|arg| arg == "-s" || arg == "-n")
+    );
+    let empty_name = harness
+        .create(CreateContext::NewSession, draft("", cwd, ""))
+        .await;
+    assert!(matches!(
+        empty_name.last(),
+        Some(CreationProgress::Finished { .. })
+    ));
+    let session_create = harness
+        .log_entries()
+        .into_iter()
+        .rev()
+        .find(|argv| argv.first().is_some_and(|arg| arg == "new-session"))
+        .expect("new-session argv");
+    assert!(!session_create.iter().any(|arg| arg == "-n" || arg == "-s"));
     let empty_argv = harness.log_entries();
     assert!(
         !empty_argv[before..]
             .iter()
             .any(|argv| argv.first().is_some_and(|arg| arg == "send-keys"))
     );
+    let window_empty = harness
+        .create(
+            CreateContext::NewWindow {
+                target: harness.session("base:0.0"),
+            },
+            draft("", cwd, ""),
+        )
+        .await;
+    assert!(matches!(
+        window_empty.last(),
+        Some(CreationProgress::Finished { .. })
+    ));
+    let create = harness
+        .log_entries()
+        .into_iter()
+        .rev()
+        .find(|argv| argv.first().is_some_and(|arg| arg == "new-window"))
+        .expect("new-window argv");
+    assert!(!create.iter().any(|arg| arg == "-n" || arg == "-s"));
 
     let hostile = "echo '#{not-a-format}; \"quoted\" 雪 -leading'; # trailing;";
     let before = harness.log_entries().len();
@@ -402,5 +570,44 @@ async fn creation_commands_are_literal_and_never_replayed_on_failure_or_empty_in
         !failed_argv
             .iter()
             .any(|argv| argv.last().is_some_and(|arg| arg == "Enter"))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires tmux >= 3.6; serial scratch server"]
+async fn creation_timeout_kills_and_reaps_a_hung_stage_without_later_stages() {
+    let harness = Harness::new();
+    let old_hang = env::var_os("PD_CREATION_HANG");
+    unsafe { env::set_var("PD_CREATION_HANG", "1") };
+    let started = Instant::now();
+    let events = harness
+        .create(
+            CreateContext::Split {
+                target: harness.pane("base:0.0"),
+                initiating_session: harness.session("base:0.0"),
+                linked_session_count: 1,
+                direction: SplitDirection::Right,
+            },
+            draft("", harness.dir.path(), "echo must-not-run"),
+        )
+        .await;
+    unsafe { env::remove_var("PD_CREATION_HANG") };
+    if let Some(value) = old_hang {
+        unsafe { env::set_var("PD_CREATION_HANG", value) }
+    }
+
+    assert!(started.elapsed() >= Duration::from_secs(10));
+    assert!(matches!(
+        events.last(),
+        Some(CreationProgress::TimedOut { .. })
+    ));
+    let pid = fs::read_to_string(&harness.hang_pid).expect("hung wrapper pid");
+    wait_for_pid_exit(pid.trim());
+    assert!(
+        !harness.log_entries().iter().any(|argv| {
+            argv.first()
+                .is_some_and(|arg| arg == "set-option" || arg == "send-keys")
+        }),
+        "timeout must not start tag or command stages"
     );
 }
