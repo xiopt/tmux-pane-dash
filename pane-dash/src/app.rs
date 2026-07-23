@@ -4816,4 +4816,56 @@ mod tests {
         assert_eq!(right.modal, None);
         assert!(moved.actions.is_empty());
     }
+
+    #[test]
+    fn creation_create_timeout_repeated_ephemeral_snapshots_are_idempotent_then_death_prunes() {
+        let mut app = state(Vec::new());
+        app.pending_creation = Some(PendingCreation {
+            id: CreationId(1),
+            initiating_session: Some("$start".into()),
+            state: PendingCreationState::AwaitingSnapshot {
+                pane_id: "%new".into(),
+                resolution: CreationResolution::TimedOut {
+                    stage: CreateStage::Create,
+                },
+            },
+        });
+        let undiscovered = || {
+            let mut pane = record("$start", "@start", "%new", 0);
+            pane.pane_current_command = "shell".into();
+            pane.status.clear();
+            pane.tag.clear();
+            pane
+        };
+
+        reduce(&mut app, snapshot(vec![undiscovered()], 11));
+        assert!(app.pending_creation.is_none());
+        assert!(app.ephemeral_panes.contains(&PaneId::from("%new")));
+        assert_eq!(app.model.memberships().len(), 1);
+        assert_eq!(
+            app.banner.as_deref(),
+            Some("pane %new created, creation timed out")
+        );
+
+        reduce(&mut app, snapshot(vec![undiscovered()], 12));
+        assert!(app.ephemeral_panes.contains(&PaneId::from("%new")));
+        assert!(app.model.panes().contains_key(&PaneId::from("%new")));
+        assert_eq!(app.model.memberships().len(), 1);
+
+        let repeated = reduce(&mut app, snapshot(vec![undiscovered()], 13));
+        assert!(!repeated.changed);
+        assert!(app.ephemeral_panes.contains(&PaneId::from("%new")));
+        assert_eq!(app.model.memberships().len(), 1);
+
+        let mut dead_pane = undiscovered();
+        dead_pane.pane_dead = true;
+        let death = reduce(&mut app, snapshot(vec![dead_pane], 14));
+        assert!(death.changed);
+        assert!(!app.ephemeral_panes.contains(&PaneId::from("%new")));
+        assert!(!app.model.panes().contains_key(&PaneId::from("%new")));
+
+        let absent = reduce(&mut app, snapshot(Vec::new(), 15));
+        assert!(!absent.changed);
+        assert!(!app.model.panes().contains_key(&PaneId::from("%new")));
+    }
 }
