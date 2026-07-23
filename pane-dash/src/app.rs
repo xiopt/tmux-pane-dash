@@ -64,9 +64,16 @@ pub enum JumpTarget {
     Pane(PaneId),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HelpState {
+    pub offset: usize,
+    pub max_offset: usize,
+    pub page_height: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
-    Help,
+    Help(HelpState),
     Send {
         pane_id: PaneId,
         command: String,
@@ -196,6 +203,10 @@ pub enum Event {
     },
     PreviewTick,
     PreviewViewport(u16),
+    HelpViewport {
+        max_offset: usize,
+        page_height: u16,
+    },
     TerminalFocus(bool),
     PreviewCaptured {
         sequence: u64,
@@ -502,6 +513,10 @@ pub fn reduce(state: &mut AppState, event: Event) -> ReduceResult {
         Event::Tick { now } => reduce_tick(state, now),
         Event::PreviewTick => reduce_preview_tick(state),
         Event::PreviewViewport(height) => reduce_preview_viewport(state, height),
+        Event::HelpViewport {
+            max_offset,
+            page_height,
+        } => reduce_help_viewport(state, max_offset, page_height),
         Event::TerminalFocus(focused) => reduce_terminal_focus(state, focused),
         Event::PreviewCaptured {
             sequence,
@@ -595,6 +610,20 @@ fn reduce_preview_viewport(state: &mut AppState, height: u16) -> ReduceResult {
     ReduceResult {
         actions: Vec::new(),
         changed: old_height != height || old_offset != state.preview.lines_from_bottom,
+    }
+}
+
+fn reduce_help_viewport(state: &mut AppState, max_offset: usize, page_height: u16) -> ReduceResult {
+    let Some(Modal::Help(help)) = state.modal.as_mut() else {
+        return ReduceResult::default();
+    };
+    let previous = help.clone();
+    help.max_offset = max_offset;
+    help.page_height = page_height;
+    help.offset = help.offset.min(max_offset);
+    ReduceResult {
+        actions: Vec::new(),
+        changed: *help != previous,
     }
 }
 
@@ -827,7 +856,7 @@ fn reduce_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
     if key.code == KeyCode::Char('?')
         && (key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT)
     {
-        state.modal = Some(Modal::Help);
+        state.modal = Some(Modal::Help(HelpState::default()));
         return ReduceResult {
             actions: Vec::new(),
             changed: true,
@@ -1107,36 +1136,15 @@ fn reduce_modal_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
     let Some(modal) = state.modal.take() else {
         return ReduceResult::default();
     };
-    if matches!(modal, Modal::Help) {
-        return match key.code {
-            KeyCode::Char('?')
-                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                ReduceResult {
-                    actions: Vec::new(),
-                    changed: true,
-                }
-            }
-            KeyCode::Esc => ReduceResult {
-                actions: Vec::new(),
-                changed: true,
-            },
-            KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => ReduceResult {
-                actions: Vec::new(),
-                changed: true,
-            },
-            _ => {
-                state.modal = Some(Modal::Help);
-                ReduceResult::default()
-            }
-        };
+    if let Modal::Help(help) = modal {
+        return reduce_help_key(state, help, key);
     }
     if key.code == KeyCode::Char('?') {
         state.modal = Some(modal);
         return ReduceResult::default();
     }
     match modal {
-        Modal::Help => unreachable!("help was handled before modal dispatch"),
+        Modal::Help(_) => unreachable!("help was handled before modal dispatch"),
         Modal::Send {
             pane_id,
             command,
@@ -1203,6 +1211,60 @@ fn reduce_modal_key(state: &mut AppState, key: KeyEvent) -> ReduceResult {
             },
         },
         Modal::Create(modal) => reduce_create_modal_key(state, modal, key),
+    }
+}
+
+fn reduce_help_key(state: &mut AppState, mut help: HelpState, key: KeyEvent) -> ReduceResult {
+    let closes = match key.code {
+        KeyCode::Char('?') => {
+            key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT
+        }
+        KeyCode::Esc => true,
+        KeyCode::Char('q') => key.modifiers == KeyModifiers::NONE,
+        _ => false,
+    };
+    if closes {
+        return ReduceResult {
+            actions: Vec::new(),
+            changed: true,
+        };
+    }
+
+    let old_offset = help.offset;
+    let half_page = usize::from(help.page_height / 2).max(1);
+    let full_page = usize::from(help.page_height).max(1);
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
+            help.offset = help.offset.saturating_add(1).min(help.max_offset);
+        }
+        KeyCode::Char('k') | KeyCode::Up if key.modifiers == KeyModifiers::NONE => {
+            help.offset = help.offset.saturating_sub(1);
+        }
+        KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+            help.offset = help.offset.saturating_add(half_page).min(help.max_offset);
+        }
+        KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+            help.offset = help.offset.saturating_sub(half_page);
+        }
+        KeyCode::PageDown if key.modifiers == KeyModifiers::NONE => {
+            help.offset = help.offset.saturating_add(full_page).min(help.max_offset);
+        }
+        KeyCode::PageUp if key.modifiers == KeyModifiers::NONE => {
+            help.offset = help.offset.saturating_sub(full_page);
+        }
+        KeyCode::Char('g') if key.modifiers == KeyModifiers::NONE => help.offset = 0,
+        KeyCode::Char('G')
+            if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            help.offset = help.max_offset;
+        }
+        _ => {}
+    }
+    let changed = help.offset != old_offset;
+    state.modal = Some(Modal::Help(help));
+    ReduceResult {
+        actions: Vec::new(),
+        changed,
     }
 }
 
@@ -1971,8 +2033,8 @@ mod tests {
 
     use crate::app::{
         Action, ActionOutcome, AppState, CompletedAction, CreateChoice, CreateChoiceKind,
-        CreateField, CreateForm, CreateModal, CreationId, Event, Focus, InputMode, JumpTarget,
-        Modal, Mode, PendingCreation, PendingCreationState, reduce,
+        CreateField, CreateForm, CreateModal, CreationId, Event, Focus, HelpState, InputMode,
+        JumpTarget, Modal, Mode, PendingCreation, PendingCreationState, ReduceResult, reduce,
     };
     use crate::creation::{
         CreateContext, CreateDraft, CreateStage, CreationProgress, CreationResolution,
@@ -4663,7 +4725,7 @@ mod tests {
             let result = reduce(&mut app, key_with_modifiers(KeyCode::Char('?'), modifiers));
             assert!(result.changed);
             assert!(result.actions.is_empty());
-            assert_eq!(app.modal, Some(Modal::Help));
+            assert_eq!(app.modal, Some(Modal::Help(HelpState::default())));
             let closed = reduce(&mut app, key_with_modifiers(KeyCode::Char('?'), modifiers));
             assert!(closed.changed);
             assert!(closed.actions.is_empty());
@@ -4756,7 +4818,7 @@ mod tests {
             control_key(KeyCode::Esc),
             key(KeyCode::Char('q')),
         ] {
-            app.modal = Some(Modal::Help);
+            app.modal = Some(Modal::Help(HelpState::default()));
             let result = reduce(&mut app, key_event);
             assert!(result.changed);
             assert!(result.actions.is_empty());
@@ -4767,10 +4829,6 @@ mod tests {
         let action_keys = [
             key(KeyCode::Enter),
             key(KeyCode::Char('/')),
-            key(KeyCode::Char('j')),
-            key(KeyCode::Char('k')),
-            key(KeyCode::Char('g')),
-            key(KeyCode::Char('G')),
             key(KeyCode::Char('h')),
             key(KeyCode::Char('l')),
             key(KeyCode::Char('z')),
@@ -4781,8 +4839,6 @@ mod tests {
             key(KeyCode::Backspace),
             key(KeyCode::Tab),
             control_key(KeyCode::Char('s')),
-            control_key(KeyCode::Char('u')),
-            control_key(KeyCode::Char('d')),
             control_key(KeyCode::Char('r')),
             control_key(KeyCode::Char('z')),
             control_key(KeyCode::Char('q')),
@@ -4791,12 +4847,12 @@ mod tests {
             shift_key(KeyCode::Char('y')),
         ];
         for key_event in action_keys {
-            app.modal = Some(Modal::Help);
+            app.modal = Some(Modal::Help(HelpState::default()));
             let description = format!("{key_event:?}");
             let result = reduce(&mut app, key_event);
             assert!(!result.changed, "{description}");
             assert!(result.actions.is_empty());
-            assert_eq!(app.modal, Some(Modal::Help));
+            assert_eq!(app.modal, Some(Modal::Help(HelpState::default())));
             assert!(!app.should_quit);
         }
     }
@@ -4807,14 +4863,234 @@ mod tests {
         let mut right = state(vec![record("$b", "@b", "%b", 0)]);
 
         let opened = reduce(&mut left, key(KeyCode::Char('?')));
-        let moved = reduce(&mut right, key(KeyCode::Char('j')));
+        let right_opened = reduce(&mut right, key(KeyCode::Char('?')));
+        let left_viewport = reduce(
+            &mut left,
+            Event::HelpViewport {
+                max_offset: 30,
+                page_height: 6,
+            },
+        );
+        let right_viewport = reduce(
+            &mut right,
+            Event::HelpViewport {
+                max_offset: 8,
+                page_height: 3,
+            },
+        );
+        let moved = reduce(&mut right, control_key(KeyCode::Char('d')));
         let closed = reduce(&mut left, key(KeyCode::Esc));
 
         assert!(opened.actions.is_empty());
+        assert!(right_opened.actions.is_empty());
+        assert!(left_viewport.actions.is_empty());
+        assert!(right_viewport.actions.is_empty());
         assert!(closed.actions.is_empty());
         assert_eq!(left.modal, None);
-        assert_eq!(right.modal, None);
+        assert_eq!(
+            right.modal,
+            Some(Modal::Help(HelpState {
+                offset: 1,
+                max_offset: 8,
+                page_height: 3,
+            }))
+        );
         assert!(moved.actions.is_empty());
+    }
+
+    #[test]
+    fn help_open_close_and_reopen_reset_popup_local_scroll_state() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+
+        let opened = reduce(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.modal, Some(Modal::Help(HelpState::default())));
+        assert_eq!(
+            opened,
+            ReduceResult {
+                actions: vec![],
+                changed: true
+            }
+        );
+
+        assert!(
+            reduce(
+                &mut app,
+                Event::HelpViewport {
+                    max_offset: 40,
+                    page_height: 9,
+                },
+            )
+            .changed
+        );
+        assert!(reduce(&mut app, key(KeyCode::Char('G'))).changed);
+        assert_eq!(
+            app.modal,
+            Some(Modal::Help(HelpState {
+                offset: 40,
+                max_offset: 40,
+                page_height: 9,
+            }))
+        );
+
+        assert!(reduce(&mut app, key(KeyCode::Esc)).changed);
+        assert_eq!(app.modal, None);
+        assert!(reduce(&mut app, shift_key(KeyCode::Char('?'))).changed);
+        assert_eq!(app.modal, Some(Modal::Help(HelpState::default())));
+    }
+
+    #[test]
+    fn help_viewport_records_clamps_once_and_repeated_feedback_is_idempotent() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        assert_eq!(
+            reduce(
+                &mut app,
+                Event::HelpViewport {
+                    max_offset: 8,
+                    page_height: 3,
+                },
+            ),
+            ReduceResult::default()
+        );
+
+        app.modal = Some(Modal::Help(HelpState {
+            offset: 12,
+            max_offset: 12,
+            page_height: 4,
+        }));
+        let resized = reduce(
+            &mut app,
+            Event::HelpViewport {
+                max_offset: 5,
+                page_height: 7,
+            },
+        );
+        assert_eq!(
+            resized,
+            ReduceResult {
+                actions: vec![],
+                changed: true
+            }
+        );
+        assert_eq!(
+            app.modal,
+            Some(Modal::Help(HelpState {
+                offset: 5,
+                max_offset: 5,
+                page_height: 7,
+            }))
+        );
+        assert_eq!(
+            reduce(
+                &mut app,
+                Event::HelpViewport {
+                    max_offset: 5,
+                    page_height: 7,
+                },
+            ),
+            ReduceResult::default()
+        );
+    }
+
+    #[test]
+    fn help_navigation_applies_exact_steps_and_strict_modifiers() {
+        let accepted = [
+            (key(KeyCode::Char('j')), 11),
+            (key(KeyCode::Down), 11),
+            (key(KeyCode::Char('k')), 9),
+            (key(KeyCode::Up), 9),
+            (control_key(KeyCode::Char('d')), 14),
+            (control_key(KeyCode::Char('u')), 6),
+            (key(KeyCode::PageDown), 19),
+            (key(KeyCode::PageUp), 1),
+            (key(KeyCode::Char('g')), 0),
+            (key(KeyCode::Char('G')), 30),
+            (shift_key(KeyCode::Char('G')), 30),
+        ];
+        for (key_event, expected_offset) in accepted {
+            let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+            app.modal = Some(Modal::Help(HelpState {
+                offset: 10,
+                max_offset: 30,
+                page_height: 9,
+            }));
+            let description = format!("{key_event:?}");
+            let result = reduce(&mut app, key_event);
+            assert!(result.changed, "{description}");
+            assert!(result.actions.is_empty());
+            assert_eq!(
+                app.modal,
+                Some(Modal::Help(HelpState {
+                    offset: expected_offset,
+                    max_offset: 30,
+                    page_height: 9,
+                }))
+            );
+        }
+
+        for key_event in [
+            key_with_modifiers(KeyCode::Down, KeyModifiers::SHIFT),
+            key_with_modifiers(KeyCode::PageDown, KeyModifiers::CONTROL),
+            control_key(KeyCode::Char('j')),
+            shift_key(KeyCode::Char('k')),
+            key_with_modifiers(KeyCode::Char('g'), KeyModifiers::ALT),
+            control_key(KeyCode::Char('G')),
+        ] {
+            let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+            let help = HelpState {
+                offset: 10,
+                max_offset: 30,
+                page_height: 9,
+            };
+            app.modal = Some(Modal::Help(help.clone()));
+            assert_eq!(reduce(&mut app, key_event), ReduceResult::default());
+            assert_eq!(app.modal, Some(Modal::Help(help)));
+        }
+    }
+
+    #[test]
+    fn help_navigation_boundaries_and_zero_page_height_are_noop_or_step_one() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        app.modal = Some(Modal::Help(HelpState {
+            offset: 0,
+            max_offset: 3,
+            page_height: 0,
+        }));
+        for key_event in [
+            key(KeyCode::Char('k')),
+            key(KeyCode::Up),
+            key(KeyCode::PageUp),
+            control_key(KeyCode::Char('u')),
+            key(KeyCode::Char('g')),
+        ] {
+            assert_eq!(reduce(&mut app, key_event), ReduceResult::default());
+        }
+        for key_event in [control_key(KeyCode::Char('d')), key(KeyCode::PageDown)] {
+            assert!(reduce(&mut app, key_event).changed);
+        }
+        assert_eq!(
+            app.modal,
+            Some(Modal::Help(HelpState {
+                offset: 2,
+                max_offset: 3,
+                page_height: 0,
+            }))
+        );
+
+        app.modal = Some(Modal::Help(HelpState {
+            offset: 3,
+            max_offset: 3,
+            page_height: 9,
+        }));
+        for key_event in [
+            key(KeyCode::Char('j')),
+            key(KeyCode::Down),
+            key(KeyCode::PageDown),
+            control_key(KeyCode::Char('d')),
+            key(KeyCode::Char('G')),
+            shift_key(KeyCode::Char('G')),
+        ] {
+            assert_eq!(reduce(&mut app, key_event), ReduceResult::default());
+        }
     }
 
     #[test]

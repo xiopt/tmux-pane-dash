@@ -171,7 +171,7 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
         return;
     }
     match modal {
-        Modal::Help => render_help(frame, centered_modal_rect(area, 96, 30), app.palette()),
+        Modal::Help(_) => render_help(frame, centered_modal_rect(area, 96, 30), app.palette()),
         Modal::Send {
             pane_id,
             command,

@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pane_dash::app::{
-    AppState, CreateChoice, CreateChoiceKind, CreateField, CreateForm, CreateModal, Event, Modal,
-    Mode, PendingCreation, PendingCreationState, reduce,
+    AppState, CreateChoice, CreateChoiceKind, CreateField, CreateForm, CreateModal, Event,
+    HelpState, Modal, Mode, PendingCreation, PendingCreationState, reduce,
 };
 use pane_dash::config::LoadedUiConfig;
 use pane_dash::creation::{
@@ -173,7 +173,7 @@ fn help_modal_uses_canonical_content_palette_and_safe_geometry() {
         ],
         semantic_palette(),
     );
-    state.modal = Some(Modal::Help);
+    state.modal = Some(Modal::Help(HelpState::default()));
 
     let wide = draw(&state, 160, 50);
     assert!(wide.contains("Help"));
@@ -201,7 +201,7 @@ fn help_modal_uses_canonical_content_palette_and_safe_geometry() {
 fn help_modal_does_not_change_cells_outside_its_clamped_rectangle() {
     let baseline = app(vec![record("dash", "%1", "working", "Task")]);
     let mut overlay = app(vec![record("dash", "%1", "working", "Task")]);
-    overlay.modal = Some(Modal::Help);
+    overlay.modal = Some(Modal::Help(HelpState::default()));
     let before = draw_buffer(&baseline, 160, 50, NOW);
     let after = draw_buffer(&overlay, 160, 50, NOW);
     let modal = Rect::new(32, 10, 96, 30);
