@@ -245,6 +245,34 @@ selection_bg = "light_cyan"
 | Unexpected behavior after update | Rebuild the source binary and reload the plugin; there is no auto-build. |
 | Wrong client or pane | Collect the tmux version and reproduce with the real routing test; do not rediscover a "best" client. |
 
+### Interactive `after-*` hooks and one-shot creation
+
+Synchronous interactive `after-*` hooks can block a noninteractive one-shot tmux
+client after tmux has already applied the requested mutation and emitted machine
+output. Condition interactive commands such as `command-prompt` on an attached
+client's terminal:
+
+```tmux
+set-hook -g after-new-window 'if-shell -F "#{client_tty}" "command-prompt -I \"#{window_name}\" \"rename-window %%\""'
+```
+
+Operators who prefer an explicit nonempty predicate can use:
+
+```tmux
+set-hook -g after-new-window "if-shell -F '#{!=:#{client_tty},}' 'command-prompt -I \"#{window_name}\" \"rename-window %%\"'"
+```
+
+In this use, `#{client_tty}` is nonempty only for an attached interactive
+client. `%%` is the literal percent required by `command-prompt`; the quoting
+must preserve format expansion for tmux rather than the shell. pane-dash does
+not inspect, detect, disable, suppress, or rewrite hooks: the operator owns
+hook policy.
+
+If creation times out after parser-proven stage-1 pane output, pane-dash
+preserves and reconciles that real pane when present. Tagging never started, so
+the pane remains untagged; pane-dash does not retry or roll back creation, and
+does not send the configured command or Enter.
+
 ## Local verification
 
 Run local checks in dependency order:

@@ -18,8 +18,8 @@ use std::{
 
 use pane_dash::{
     creation::{
-        CreateContext, CreateDraft, CreateStage, CreationId, CreationProgress, SplitDirection,
-        build_request, run_creation,
+        CreateContext, CreateDraft, CreateStage, CreationId, CreationProgress, CreationResolution,
+        SplitDirection, build_request, run_creation,
     },
     model::{PaneId, SessionId},
     tmux_exec::TmuxExec,
@@ -87,7 +87,7 @@ impl Harness {
         fs::write(
             &tmux,
             format!(
-                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\0' \"$@\" >> {log}\nprintf '\\n' >> {log}\ncase \"${{PD_CREATION_FAIL:-}}:$*\" in\n  tag:set-option*) echo 'tag stage rejected' >&2; exit 71 ;;\n  command:send-keys\\ -l*) echo 'command stage rejected' >&2; exit 72 ;;\nesac\nif [[ \"${{PD_CREATION_HANG:-}}\" == 1 && \"${{1:-}}\" == split-window ]]; then\n  printf '%s\\n' \"$$\" > {hang_pid}\n  trap 'exit 143' HUP INT TERM\n  while :; do sleep 0.1; done\nfi\nexec {real} -S {socket} \"$@\"\n",
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\0' \"$@\" >> {log}\nprintf '\\n' >> {log}\ncase \"${{PD_CREATION_FAIL:-}}:$*\" in\n  tag:set-option*) echo 'tag stage rejected' >&2; exit 71 ;;\n  command:send-keys\\ -l*) echo 'command stage rejected' >&2; exit 72 ;;\nesac\nif [[ \"${{PD_CREATION_HANG:-}}\" == 1 && \"${{1:-}}\" == split-window ]]; then\n  printf '%s\\n' \"$$\" > {hang_pid}\n  trap 'exit 143' HUP INT TERM\n  while :; do sleep 0.1; done\nfi\nif [[ \"${{PD_CREATION_RECORD_PID:-}}\" == 1 && \"${{1:-}}\" == new-window ]]; then\n  printf '%s\\n' \"$$\" > \"${{PD_CREATION_PID_FILE}}\"\nfi\nexec {real} -S {socket} \"$@\"\n",
                 log = shell_quote(&log),
                 hang_pid = shell_quote(&hang_pid),
                 real = shell_quote(Path::new(&real_tmux)),
@@ -169,6 +169,34 @@ impl Harness {
             .collect()
     }
 
+    fn install_blocked_new_window_hook(&self, token: &str) {
+        let hook = format!("wait-for {token}");
+        let output = self.run(["set-hook", "-g", "after-new-window", &hook]);
+        assert!(
+            output.status.success(),
+            "install hook: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn release_wait(&self, token: &str) {
+        let output = self.run(["wait-for", "-S", token]);
+        assert!(
+            output.status.success(),
+            "release wait: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn remove_new_window_hook(&self) {
+        let output = self.run(["set-hook", "-gu", "after-new-window"]);
+        assert!(
+            output.status.success(),
+            "remove hook: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     async fn create(&self, context: CreateContext, draft: CreateDraft) -> Vec<CreationProgress> {
         let request = build_request(context, &draft).expect("valid creation request");
         let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -187,6 +215,29 @@ impl Harness {
             progress.push(event);
         }
         progress
+    }
+}
+
+struct BlockedHookGuard<'a> {
+    harness: &'a Harness,
+    token: String,
+    active: bool,
+}
+
+impl BlockedHookGuard<'_> {
+    fn release(mut self) {
+        self.harness.release_wait(&self.token);
+        self.harness.remove_new_window_hook();
+        self.active = false;
+    }
+}
+
+impl Drop for BlockedHookGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.harness.release_wait(&self.token);
+            self.harness.remove_new_window_hook();
+        }
     }
 }
 
@@ -730,4 +781,91 @@ async fn creation_timeout_kills_and_reaps_a_hung_stage_without_later_stages() {
         }),
         "timeout must not start tag or command stages"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires tmux >= 3.6; serial scratch server"]
+async fn creation_timeout_recovers_real_pane_id_from_blocked_after_new_window() {
+    let _serial = serial_test().await;
+    let harness = Harness::new();
+    let token = format!(
+        "pane-dash-blocked-new-window-{}",
+        NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+    );
+    harness.install_blocked_new_window_hook(&token);
+    let hook_guard = BlockedHookGuard {
+        harness: &harness,
+        token,
+        active: true,
+    };
+    let _record_pid = EnvRestore::set("PD_CREATION_RECORD_PID", "1");
+    let _pid_file = EnvRestore::set(
+        "PD_CREATION_PID_FILE",
+        harness.hang_pid.to_str().expect("UTF-8 PID path"),
+    );
+    let started = Instant::now();
+    let events = harness
+        .create(
+            CreateContext::NewWindow {
+                target: harness.session("base:0.0"),
+            },
+            draft("", harness.dir.path(), "echo must-not-run"),
+        )
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(elapsed >= Duration::from_secs(10));
+    assert!(elapsed < Duration::from_secs(12));
+    assert!(matches!(
+        events.as_slice(),
+        [
+            CreationProgress::Stage {
+                stage: CreateStage::Create,
+                pane_id: None,
+                ..
+            },
+            CreationProgress::Created { pane_id, .. },
+            CreationProgress::Finished {
+                pane_id: finished,
+                resolution: CreationResolution::TimedOut {
+                    stage: CreateStage::Create,
+                },
+                ..
+            },
+        ] if pane_id == finished
+    ));
+    hook_guard.release();
+    let pid = fs::read_to_string(&harness.hang_pid).expect("one-shot tmux client pid");
+    wait_for_pid_exit(pid.trim());
+    let pane_id = created_pane(&events);
+    assert_eq!(
+        harness
+            .text(["display-message", "-p", "-t", &pane_id.0, "#{pane_id}"])
+            .trim(),
+        pane_id.0
+    );
+    assert!(
+        harness
+            .text([
+                "display-message",
+                "-p",
+                "-t",
+                &pane_id.0,
+                "#{@pane_dash_tag}"
+            ])
+            .trim()
+            .is_empty()
+    );
+    assert_eq!(
+        harness
+            .log_entries()
+            .iter()
+            .filter(|argv| argv.first().is_some_and(|arg| arg == "new-window"))
+            .count(),
+        1
+    );
+    assert!(!harness.log_entries().iter().any(|argv| {
+        argv.first()
+            .is_some_and(|arg| arg == "set-option" || arg == "send-keys")
+    }));
 }
