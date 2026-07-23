@@ -6,5 +6,5 @@ expression: "draw(&state, 18, 6)"
 │Keys —          │
 │navigation and  │
 │modes           │
-│?, Esc, q close │
+│j/k scroll | Ctr│
 └────────────────┘

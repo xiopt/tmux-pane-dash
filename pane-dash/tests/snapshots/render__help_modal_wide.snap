@@ -3,21 +3,12 @@ source: tests/render.rs
 expression: wide
 ---
 ▾ dash (6)                                                     1 working│select a pane to preview
-  ● needs_input  2m    1.2  tmp          sonnet  Question               │
-  ◐ working      2m    1.2  tmp          sonnet  Working                │
-  ○ idle         2m    1.2  tmp          sonnet  Idle                   │
-  ✗ error        2m    1.2  tmp          sonnet  Error                  │
-  ? unknown      2m    1.2  tmp          sonnet  Unknown                │
-  ? unknown      2m    1.2  tmp          sonnet  Stale                  │
-                                                                        │
-                                                                        │
-                                                                        │
-                                ┌Help──────────────────────────────────────────────────────────────────────────────────────────┐
-                                │Keys — navigation and modes                    Six statuses and glyphs                        │
-                                │j/k or ↑/↓: move; g/G: first/last.             ● needs_input: waiting for a permission or     │
-                                │h/l or za: collapse/expand session in grouped  question response.                             │
-                                │mode.                                          ◐ working: busy or retrying.                   │
-                                │/: filter; text edits query; Backspace deletes;○ idle: known idle.                            │
+  ● needs_input  2m    1.2  tmp ┌Help──────────────────────────────────────────────────────────────────────────────────────────┐
+  ◐ working      2m    1.2  tmp │Keys — navigation and modes                    Six statuses and glyphs                        │
+  ○ idle         2m    1.2  tmp │j/k or ↑/↓: move; g/G: first/last.             ● needs_input: waiting for a permission or     │
+  ✗ error        2m    1.2  tmp │h/l or za: collapse/expand session in grouped  question response.                             │
+  ? unknown      2m    1.2  tmp │mode.                                          ◐ working: busy or retrying.                   │
+  ? unknown      2m    1.2  tmp │/: filter; text edits query; Backspace deletes;○ idle: known idle.                            │
                                 │Esc returns to navigation and retains query.   ✗ error: agent error latched until work/user   │
                                 │Enter: jump; Ctrl-z: zoom then jump.           activity clears it.                            │
                                 │Ctrl-s: send line; x: kill; n: create.         ? unknown: no companion-plugin status is       │
@@ -40,15 +31,24 @@ expression: wide
                                 │                                               Configuration                                  │
                                 │                                               Path: nonempty                                 │
                                 │                                               $XDG_CONFIG_HOME/tmux-pane-dash/config.toml,   │
-                                │?, Esc, q close help                                                                          │
+                                │                                               otherwise nonempty                             │
+                                │                                               $HOME/.config/tmux-pane-dash/config.toml.      │
+                                │                                               Precedence: @pane-dash-theme built-in -> TOML  │
+                                │                                               theme -> per-slot colors.                      │
+                                │                                               Built-ins: dark, light, terminal-native.       │
+                                │                                               Colors: canonical ANSI names, #RRGGBB, or      │
+                                │                                               ansi:0..255.                                   │
+                                │                                               Slots, in order: text, dim, accent,            │
+                                │                                               needs_input, working, idle, error, unknown,    │
+                                │                                               stale, warning, degrade, border, status_bar,   │
+                                │                                               selection_fg, selection_bg.                    │
+                                │                                               Config is read once per popup; reopen to       │
+                                │                                               reload.                                        │
+                                │                                                                                              │
+                                │                                                                                              │
+                                │                                                                                              │
+                                │                                                                                              │
+                                │                                                                                              │
+                                │j/k scroll | Ctrl-u/d half | PgUp/Dn page | g/G ends | ?, Esc, q close | 1/1                  │
                                 └──────────────────────────────────────────────────────────────────────────────────────────────┘
-                                                                        │
-                                                                        │
-                                                                        │
-                                                                        │
-                                                                        │
-                                                                        │
-                                                                        │
-                                                                        │
-                                                                        │
 needs_input 1  working 1  idle 1  error 1  unknown 2  6 panes  grouped | NAV

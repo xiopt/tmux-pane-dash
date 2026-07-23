@@ -3,26 +3,26 @@ source: tests/render.rs
 expression: "draw(&state, 80, 24)"
 ---
 ┌Help──────────────────────────────────────────────────────────────────────────┐
-│Keys — navigation and modes            Six statuses and glyphs                │
-│j/k or ↑/↓: move; g/G: first/last.     ● needs_input: waiting for a permission│
-│h/l or za: collapse/expand session in  or question response.                  │
-│grouped mode.                          ◐ working: busy or retrying.           │
-│/: filter; text edits query; Backspace ○ idle: known idle.                    │
-│deletes; Esc returns to navigation and ✗ error: agent error latched until     │
-│retains query.                         work/user activity clears it.          │
-│Enter: jump; Ctrl-z: zoom then jump.   ? unknown: no companion-plugin status  │
-│Ctrl-s: send line; x: kill; n: create. is available.                          │
-│Ctrl-u/Ctrl-d: inspect preview         ⊘ stale: plugin heartbeat exceeded the │
-│half-page up/down; Ctrl-r: follow      configured stale threshold.            │
-│bottom.                                Concepts and alerts                    │
-│s: grouped/flat; ?: help; navigation   Grouped mode shows session headers and │
-│q/Esc: close popup.                    supports local collapse; flat mode     │
-│Send: text/Backspace, Enter send, Esc  status-sorts pane rows.                │
-│cancel.                                Filter is live and retained; matching  │
-│Kill: y/Y confirm; any other key       grouped results temporarily expose     │
-│cancels, except inert ?.               collapsed sessions.                    │
-│Create choice: j/k or ↑/↓, Enter, Esc. Inspect pauses only selected-pane      │
-│Create form: text/Backspace, Tab/↓ and preview capture; topology/status       │
-│Shift-Tab/↑, Enter, Esc.               snapshots continue.                    │
-│?, Esc, q close help                                                          │
+│Keys — navigation and modes                                                   │
+│j/k or ↑/↓: move; g/G: first/last.                                            │
+│h/l or za: collapse/expand session in grouped mode.                           │
+│/: filter; text edits query; Backspace deletes; Esc returns to navigation and │
+│retains query.                                                                │
+│Enter: jump; Ctrl-z: zoom then jump.                                          │
+│Ctrl-s: send line; x: kill; n: create.                                        │
+│Ctrl-u/Ctrl-d: inspect preview half-page up/down; Ctrl-r: follow bottom.      │
+│s: grouped/flat; ?: help; navigation q/Esc: close popup.                      │
+│Send: text/Backspace, Enter send, Esc cancel.                                 │
+│Kill: y/Y confirm; any other key cancels, except inert ?.                     │
+│Create choice: j/k or ↑/↓, Enter, Esc.                                        │
+│Create form: text/Backspace, Tab/↓ and Shift-Tab/↑, Enter, Esc.               │
+│Locked create submission: q/Esc closes the popup; all other keys are inert.   │
+│Six statuses and glyphs                                                       │
+│● needs_input: waiting for a permission or question response.                 │
+│◐ working: busy or retrying.                                                  │
+│○ idle: known idle.                                                           │
+│✗ error: agent error latched until work/user activity clears it.              │
+│? unknown: no companion-plugin status is available.                           │
+│⊘ stale: plugin heartbeat exceeded the configured stale threshold.            │
+│j/k scroll | Ctrl-u/d half | PgUp/Dn page | g/G ends | ?, Esc, q close | 1/21 │
 └──────────────────────────────────────────────────────────────────────────────┘

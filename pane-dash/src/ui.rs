@@ -7,7 +7,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    AppState, CreateField, CreateModal, Modal, Mode, PendingCreationState, status_index,
+    AppState, CreateField, CreateModal, HelpState, Modal, Mode, PendingCreationState, status_index,
 };
 use crate::creation::{CreateContext, display_error};
 use crate::model::{Row, Status};
@@ -35,6 +35,40 @@ enum HelpEntry {
     Key(&'static str),
     Text(&'static str),
     Status(Status, &'static str),
+}
+
+struct HelpLayout {
+    modal: Rect,
+    content: Rect,
+    footer: Rect,
+    columns: HelpColumns,
+    page_height: u16,
+    max_offset: usize,
+}
+
+enum HelpColumns {
+    Single(Vec<Line<'static>>),
+    Split {
+        left: Vec<Line<'static>>,
+        right: Vec<Line<'static>>,
+    },
+}
+
+impl HelpColumns {
+    fn max_offset(&self, page_height: u16) -> usize {
+        let document_height = match self {
+            Self::Single(lines) => lines.len(),
+            Self::Split { left, right } => left.len().max(right.len()),
+        };
+        document_height.saturating_sub(usize::from(page_height))
+    }
+}
+
+#[allow(dead_code)] // Task 3 routes these metrics through the pre-draw reducer feedback event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HelpViewportMetrics {
+    pub max_offset: usize,
+    pub page_height: u16,
 }
 
 pub fn dashboard_areas(content: Rect) -> DashboardAreas {
@@ -171,7 +205,9 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
         return;
     }
     match modal {
-        Modal::Help(_) => render_help(frame, centered_modal_rect(area, 96, 30), app.palette()),
+        Modal::Help(help) => {
+            render_help(frame, help_layout(area, app.palette()), help, app.palette())
+        }
         Modal::Send {
             pane_id,
             command,
@@ -238,40 +274,129 @@ fn render_modal(frame: &mut Frame, app: &AppState) {
     }
 }
 
-fn render_help(frame: &mut Frame, area: Rect, palette: &Palette) {
-    frame.render_widget(Clear, area);
-    let block = Block::default()
+fn help_block(palette: &Palette) -> Block<'static> {
+    Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.border))
-        .title(Span::styled("Help", Style::default().fg(palette.accent)));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
+        .title(Span::styled("Help", Style::default().fg(palette.accent)))
+}
 
-    let [content, footer] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
-    let keys = help_keys();
-    let details = help_details();
-    if content.width >= 72 {
+fn help_layout(full_area: Rect, palette: &Palette) -> HelpLayout {
+    let modal = centered_modal_rect(full_area, 96, 48);
+    let inner = help_block(palette).inner(modal);
+    let (content, footer) = if inner.height == 0 {
+        (Rect::default(), Rect::default())
+    } else {
+        (
+            Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(1),
+            ),
+            Rect::new(
+                inner.x,
+                inner.y.saturating_add(inner.height.saturating_sub(1)),
+                inner.width,
+                1,
+            ),
+        )
+    };
+    let page_height = content.height;
+    let columns = if content.width >= 90 {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .areas(content);
-        render_help_entries(frame, left, &keys, palette);
-        render_help_entries(frame, right, &details, palette);
+        HelpColumns::Split {
+            left: help_lines(&help_keys(), left.width, palette),
+            right: help_lines(&help_details(), right.width, palette),
+        }
     } else {
-        let mut entries = keys;
-        entries.extend(details);
-        render_help_entries(frame, content, &entries, palette);
-    }
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            truncate_to_width("?, Esc, q close help", usize::from(footer.width)),
-            Style::default().fg(palette.dim),
-        )),
+        let mut entries = help_keys();
+        entries.extend(help_details());
+        HelpColumns::Single(help_lines(&entries, content.width, palette))
+    };
+    let max_offset = columns.max_offset(page_height);
+    HelpLayout {
+        modal,
+        content,
         footer,
-    );
+        columns,
+        page_height,
+        max_offset,
+    }
+}
+
+#[allow(dead_code)] // Task 3 consumes this pure query from the redraw path.
+pub(crate) fn help_viewport(app: &AppState, full_area: Rect) -> Option<HelpViewportMetrics> {
+    matches!(app.modal, Some(Modal::Help(_))).then(|| {
+        let layout = help_layout(full_area, app.palette());
+        HelpViewportMetrics {
+            max_offset: layout.max_offset,
+            page_height: layout.page_height,
+        }
+    })
+}
+
+fn render_help(frame: &mut Frame, layout: HelpLayout, help: &HelpState, palette: &Palette) {
+    frame.render_widget(Clear, layout.modal);
+    frame.render_widget(help_block(palette), layout.modal);
+    let offset = help.offset.min(layout.max_offset);
+    let page_height = usize::from(layout.page_height);
+
+    match layout.columns {
+        HelpColumns::Single(lines) => {
+            frame.render_widget(
+                Paragraph::new(
+                    lines
+                        .into_iter()
+                        .skip(offset)
+                        .take(page_height)
+                        .collect::<Vec<_>>(),
+                ),
+                layout.content,
+            );
+        }
+        HelpColumns::Split { left, right } => {
+            let [left_area, right_area] =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(layout.content);
+            frame.render_widget(
+                Paragraph::new(
+                    left.into_iter()
+                        .skip(offset)
+                        .take(page_height)
+                        .collect::<Vec<_>>(),
+                ),
+                left_area,
+            );
+            frame.render_widget(
+                Paragraph::new(
+                    right
+                        .into_iter()
+                        .skip(offset)
+                        .take(page_height)
+                        .collect::<Vec<_>>(),
+                ),
+                right_area,
+            );
+        }
+    }
+
+    if layout.footer.width > 0 && layout.footer.height > 0 {
+        let position = offset.saturating_add(1);
+        let positions = layout.max_offset.saturating_add(1);
+        let footer = format!(
+            "j/k scroll | Ctrl-u/d half | PgUp/Dn page | g/G ends | ?, Esc, q close | {position}/{positions}"
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                truncate_to_width(&footer, usize::from(layout.footer.width)),
+                Style::default().fg(palette.dim),
+            )),
+            layout.footer,
+        );
+    }
 }
 
 fn help_keys() -> Vec<HelpEntry> {
@@ -341,40 +466,25 @@ fn help_details() -> Vec<HelpEntry> {
     ]
 }
 
-fn render_help_entries(frame: &mut Frame, area: Rect, entries: &[HelpEntry], palette: &Palette) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let mut lines = Vec::new();
-    for entry in entries {
-        if lines.len() >= usize::from(area.height) {
-            break;
-        }
-        let remaining = usize::from(area.height).saturating_sub(lines.len());
-        lines.extend(help_entry_lines(
-            *entry,
-            usize::from(area.width),
-            palette,
-            remaining,
-        ));
-    }
-    frame.render_widget(Paragraph::new(lines), area);
+fn help_lines(entries: &[HelpEntry], width: u16, palette: &Palette) -> Vec<Line<'static>> {
+    entries
+        .iter()
+        .flat_map(|entry| help_entry_lines(*entry, usize::from(width), palette))
+        .collect()
 }
 
-fn help_entry_lines(
-    entry: HelpEntry,
-    width: usize,
-    palette: &Palette,
-    limit: usize,
-) -> Vec<Line<'static>> {
+fn help_entry_lines(entry: HelpEntry, width: usize, palette: &Palette) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
     let (text, style) = match entry {
         HelpEntry::Heading(text) => (text, Style::default().fg(palette.accent)),
         HelpEntry::Key(text) => (text, Style::default().fg(palette.text)),
         HelpEntry::Text(text) => (text, Style::default().fg(palette.dim)),
         HelpEntry::Status(status, description) => {
             let prefix = format!("{} {}: ", status_glyph(status), status_text(status));
-            let mut descriptions =
-                wrap_help_segments(description, width.saturating_sub(prefix.width()), limit);
+            let descriptions =
+                wrap_help_segments(description, width.saturating_sub(prefix.width()));
             let first_description = descriptions.first().map_or("", String::as_str);
             let mut rendered = vec![Line::from(vec![
                 Span::styled(
@@ -389,27 +499,24 @@ fn help_entry_lines(
                     Style::default().fg(palette.dim),
                 ),
             ])];
-            for description in descriptions.drain(1..) {
-                if rendered.len() == limit {
-                    break;
-                }
+            for description in descriptions.into_iter().skip(1) {
                 rendered.push(Line::styled(description, Style::default().fg(palette.dim)));
             }
             return rendered;
         }
     };
-    wrap_help_text(text, width, style, limit)
+    wrap_help_text(text, width, style)
 }
 
-fn wrap_help_text(text: &str, width: usize, style: Style, limit: usize) -> Vec<Line<'static>> {
-    wrap_help_segments(text, width, limit)
+fn wrap_help_text(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    wrap_help_segments(text, width)
         .into_iter()
         .map(|line| Line::styled(line, style))
         .collect()
 }
 
-fn wrap_help_segments(text: &str, width: usize, limit: usize) -> Vec<String> {
-    if width == 0 || limit == 0 {
+fn wrap_help_segments(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
         return Vec::new();
     }
     let mut lines = Vec::new();
@@ -418,9 +525,6 @@ fn wrap_help_segments(text: &str, width: usize, limit: usize) -> Vec<String> {
         let separator = usize::from(!current.is_empty());
         if current.width() + separator + word.width() > width && !current.is_empty() {
             lines.push(current);
-            if lines.len() == limit {
-                return lines;
-            }
             current = String::new();
         }
         if !current.is_empty() {
@@ -432,7 +536,7 @@ fn wrap_help_segments(text: &str, width: usize, limit: usize) -> Vec<String> {
             current.push_str(word);
         }
     }
-    if !current.is_empty() && lines.len() < limit {
+    if !current.is_empty() {
         lines.push(current);
     }
     lines
@@ -1128,8 +1232,8 @@ fn pad_to_width(value: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{alert_lines, full_layout, render};
-    use crate::app::AppState;
+    use super::{HelpColumns, alert_lines, full_layout, help_layout, help_viewport, render};
+    use crate::app::{AppState, HelpState, Modal};
     use crate::config::LoadedUiConfig;
     use crate::model::{Model, ModelConfig};
     use crate::options::DashConfig;
@@ -1139,6 +1243,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
+    use ratatui::text::Line;
 
     fn state(warnings: &[&str]) -> AppState {
         let record = RawRecord {
@@ -1217,5 +1322,77 @@ mod tests {
         assert_eq!(buffer[(0, 5)].fg, Color::DarkGray);
         assert_eq!(buffer[(0, 0)].fg, Color::Red);
         assert_eq!(buffer[(0, 3)].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn help_layout_switches_at_content_width_ninety_and_materializes_exact_lines() {
+        let palette = Palette::dark();
+
+        let narrow = help_layout(Rect::new(0, 0, 91, 24), &palette);
+        assert_eq!(narrow.content.width, 89);
+        assert_eq!(narrow.page_height, 21);
+        assert_eq!(narrow.max_offset, 18);
+        let HelpColumns::Single(lines) = narrow.columns else {
+            panic!("expected single");
+        };
+        assert_eq!(lines.len(), 39);
+
+        let wide = help_layout(Rect::new(0, 0, 92, 24), &palette);
+        assert_eq!(wide.content.width, 90);
+        assert_eq!(wide.page_height, 21);
+        assert_eq!(wide.max_offset, 20);
+        let HelpColumns::Split { left, right } = wide.columns else {
+            panic!("expected split");
+        };
+        assert_eq!(left.len(), 21);
+        assert_eq!(right.len(), 41);
+    }
+
+    #[test]
+    fn help_layout_max_offset_uses_the_longest_document_and_page_height() {
+        let palette = Palette::dark();
+
+        let zero_page = help_layout(Rect::new(0, 0, 92, 2), &palette);
+        assert_eq!(zero_page.page_height, 0);
+        assert_eq!(zero_page.max_offset, 0);
+
+        let fitting = help_layout(Rect::new(0, 0, 96, 48), &palette);
+        assert_eq!(fitting.max_offset, 0);
+
+        let line = Line::default();
+        assert_eq!(HelpColumns::Single(vec![line.clone(); 5]).max_offset(3), 2);
+        assert_eq!(
+            HelpColumns::Split {
+                left: vec![line.clone(); 2],
+                right: vec![line.clone(); 5],
+            }
+            .max_offset(3),
+            2
+        );
+        assert_eq!(
+            HelpColumns::Split {
+                left: vec![line.clone(); 5],
+                right: vec![line; 2],
+            }
+            .max_offset(3),
+            2
+        );
+    }
+
+    #[test]
+    fn help_viewport_returns_the_exact_layout_metrics_only_while_help_is_open() {
+        let mut app = state(&[]);
+        let area = Rect::new(0, 0, 92, 24);
+        assert_eq!(help_viewport(&app, area), None);
+
+        app.modal = Some(Modal::Help(HelpState::default()));
+        let layout = help_layout(area, app.palette());
+        assert_eq!(
+            help_viewport(&app, area),
+            Some(super::HelpViewportMetrics {
+                max_offset: layout.max_offset,
+                page_height: layout.page_height,
+            })
+        );
     }
 }
