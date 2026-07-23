@@ -224,67 +224,6 @@ fn help_modal_does_not_change_cells_outside_its_clamped_rectangle() {
 }
 
 #[test]
-fn help_renders_the_initial_and_final_canonical_lines_in_both_layout_modes() {
-    for (width, height) in [(92, 24), (80, 24)] {
-        let mut state = app(vec![record("dash", "%1", "working", "Task")]);
-        state.modal = Some(Modal::Help(HelpState::default()));
-        let initial = draw(&state, width, height);
-        assert!(initial.contains("Keys — navigation and modes"));
-        assert!(initial.contains("j/k or ↑/↓: move; g/G: first/last."));
-
-        state.modal = Some(Modal::Help(HelpState {
-            offset: usize::MAX,
-            max_offset: usize::MAX,
-            page_height: 0,
-        }));
-        let bottom = draw(&state, width, height);
-        if width == 92 {
-            assert!(bottom.contains("Config is read once per popup; reopen to"));
-            assert!(bottom.contains("reload."));
-        } else {
-            assert!(bottom.contains("Config is read once per popup; reopen to reload."));
-        }
-    }
-}
-
-#[test]
-fn help_footer_reports_reducer_owned_position_without_wrapping() {
-    let mut state = app(vec![record("dash", "%1", "working", "Task")]);
-    state.modal = Some(Modal::Help(HelpState::default()));
-    assert!(
-        reduce(
-            &mut state,
-            Event::HelpViewport {
-                max_offset: 20,
-                page_height: 21,
-            },
-        )
-        .changed
-    );
-
-    let prefix = "j/k scroll | Ctrl-u/d half | PgUp/Dn page | g/G ends | ?, Esc, q close";
-    assert!(draw(&state, 92, 24).contains(&format!("{prefix} | 1/21")));
-
-    assert!(
-        reduce(
-            &mut state,
-            Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
-        )
-        .changed
-    );
-    assert!(draw(&state, 92, 24).contains(&format!("{prefix} | 2/21")));
-
-    assert!(
-        reduce(
-            &mut state,
-            Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
-        )
-        .changed
-    );
-    assert!(draw(&state, 92, 24).contains(&format!("{prefix} | 21/21")));
-}
-
-#[test]
 fn help_is_safe_at_zero_axis_and_tiny_dimensions() {
     let mut state = app(vec![record("dash", "%1", "working", "Task")]);
     state.modal = Some(Modal::Help(HelpState::default()));

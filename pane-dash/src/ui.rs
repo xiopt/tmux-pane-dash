@@ -1233,15 +1233,17 @@ fn pad_to_width(value: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{HelpColumns, alert_lines, full_layout, help_layout, help_viewport, render};
-    use crate::app::{AppState, HelpState, Modal};
+    use crate::app::{AppState, Event, HelpState, Modal, reduce};
     use crate::config::LoadedUiConfig;
     use crate::model::{Model, ModelConfig};
     use crate::options::DashConfig;
     use crate::palette::Palette;
     use crate::snapshot::RawRecord;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::layout::Rect;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::{Constraint, Layout, Rect};
     use ratatui::style::Color;
     use ratatui::text::Line;
 
@@ -1271,6 +1273,22 @@ mod tests {
             DashConfig::default(),
             LoadedUiConfig::with_test_warnings(Palette::dark(), warnings),
         )
+    }
+
+    fn draw_buffer(app: &AppState, area: Rect) -> Buffer {
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app, 1_000)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buffer: &Buffer, area: Rect) -> String {
+        (area.y..area.y.saturating_add(area.height))
+            .flat_map(|y| {
+                (area.x..area.x.saturating_add(area.width))
+                    .map(move |x| buffer[(x, y)].symbol().to_owned())
+            })
+            .collect()
     }
 
     #[test]
@@ -1393,6 +1411,136 @@ mod tests {
                 max_offset: layout.max_offset,
                 page_height: layout.page_height,
             })
+        );
+    }
+
+    #[test]
+    fn help_viewport_feedback_reaches_the_final_configuration_in_single_and_split_layouts() {
+        for area in [Rect::new(0, 0, 80, 24), Rect::new(0, 0, 92, 13)] {
+            let mut app = state(&[]);
+            app.modal = Some(Modal::Help(HelpState::default()));
+            let metrics = help_viewport(&app, area).expect("open Help has viewport metrics");
+            assert!(
+                reduce(
+                    &mut app,
+                    Event::HelpViewport {
+                        max_offset: metrics.max_offset,
+                        page_height: metrics.page_height,
+                    },
+                )
+                .changed
+            );
+            assert!(
+                reduce(
+                    &mut app,
+                    Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
+                )
+                .changed
+            );
+            let Some(Modal::Help(help)) = &app.modal else {
+                panic!("Help remains open");
+            };
+            assert_eq!(help.offset, metrics.max_offset);
+
+            let rendered = buffer_text(&draw_buffer(&app, area), area);
+            if area.width < 92 {
+                assert!(rendered.contains("Config is read once per popup; reopen to reload."));
+            } else {
+                assert!(rendered.contains("Config is read once per popup; reopen to"));
+                assert!(rendered.contains("reload."));
+            }
+        }
+    }
+
+    #[test]
+    fn split_help_bottom_leaves_the_shorter_left_column_blank_at_the_shared_offset() {
+        let area = Rect::new(0, 0, 92, 13);
+        let mut app = state(&[]);
+        app.modal = Some(Modal::Help(HelpState::default()));
+        let metrics = help_viewport(&app, area).expect("open Help has viewport metrics");
+        let layout = help_layout(area, app.palette());
+        let HelpColumns::Split { left, right } = &layout.columns else {
+            panic!("expected split layout");
+        };
+        assert!(left.len() < metrics.max_offset);
+        assert!(right.len() > metrics.max_offset);
+        assert!(
+            reduce(
+                &mut app,
+                Event::HelpViewport {
+                    max_offset: metrics.max_offset,
+                    page_height: metrics.page_height,
+                },
+            )
+            .changed
+        );
+        assert!(
+            reduce(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
+            )
+            .changed
+        );
+
+        let [left_area, right_area] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(layout.content);
+        let buffer = draw_buffer(&app, area);
+        let left_text = buffer_text(&buffer, left_area);
+        let right_text = buffer_text(&buffer, right_area);
+        assert!(!left_text.contains("Keys — navigation and modes"));
+        assert!(!left_text.contains("j/k or ↑/↓: move; g/G: first/last."));
+        assert!(right_text.contains("Config is read once per popup; reopen to"));
+        assert!(right_text.contains("reload."));
+    }
+
+    #[test]
+    fn help_footer_position_follows_authoritative_viewport_metrics_and_navigation() {
+        let area = Rect::new(0, 0, 92, 24);
+        let mut app = state(&[]);
+        app.modal = Some(Modal::Help(HelpState::default()));
+        let metrics = help_viewport(&app, area).expect("open Help has viewport metrics");
+        assert!(
+            reduce(
+                &mut app,
+                Event::HelpViewport {
+                    max_offset: metrics.max_offset,
+                    page_height: metrics.page_height,
+                },
+            )
+            .changed
+        );
+        let prefix = "j/k scroll | Ctrl-u/d half | PgUp/Dn page | g/G ends | ?, Esc, q close";
+        assert!(
+            buffer_text(&draw_buffer(&app, area), area)
+                .contains(&format!("{prefix} | 1/{}", metrics.max_offset + 1))
+        );
+
+        assert!(
+            reduce(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            )
+            .changed
+        );
+        assert!(
+            buffer_text(&draw_buffer(&app, area), area)
+                .contains(&format!("{prefix} | 2/{}", metrics.max_offset + 1))
+        );
+
+        assert!(
+            reduce(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
+            )
+            .changed
+        );
+        assert!(
+            buffer_text(&draw_buffer(&app, area), area).contains(&format!(
+                "{prefix} | {}/{}",
+                metrics.max_offset + 1,
+                metrics.max_offset + 1
+            ))
         );
     }
 }
