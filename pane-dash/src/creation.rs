@@ -180,7 +180,7 @@ async fn run_creation_until(
         .await
     {
         Ok(output) => output,
-        Err(TmuxCommandError::TimedOut | TmuxCommandError::Cancelled) => {
+        Err(TmuxCommandError::TimedOut { .. } | TmuxCommandError::Cancelled) => {
             send(CreationProgress::TimedOut { id });
             return;
         }
@@ -221,7 +221,7 @@ async fn run_creation_until(
         .await
     {
         Ok(_) => {}
-        Err(TmuxCommandError::TimedOut | TmuxCommandError::Cancelled) => {
+        Err(TmuxCommandError::TimedOut { .. } | TmuxCommandError::Cancelled) => {
             send(CreationProgress::TimedOut { id });
             return;
         }
@@ -260,7 +260,7 @@ async fn run_creation_until(
         .await
     {
         let resolution = match error {
-            TmuxCommandError::TimedOut | TmuxCommandError::Cancelled => {
+            TmuxCommandError::TimedOut { .. } | TmuxCommandError::Cancelled => {
                 send(CreationProgress::TimedOut { id });
                 return;
             }
@@ -292,7 +292,7 @@ async fn run_creation_until(
         .await
     {
         Ok(_) => CreationResolution::Success,
-        Err(TmuxCommandError::TimedOut | TmuxCommandError::Cancelled) => {
+        Err(TmuxCommandError::TimedOut { .. } | TmuxCommandError::Cancelled) => {
             send(CreationProgress::TimedOut { id });
             return;
         }

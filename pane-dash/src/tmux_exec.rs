@@ -1,17 +1,24 @@
 use std::io;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::creation::{CreationError, ValidatedCwd};
 use crate::model::PaneId;
 
 pub const SNAPSHOT_FORMAT: &str = "\x1e#{session_id}\x1f#{session_name}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_dead}\x1f#{@pane_dash_status}\x1f#{@pane_dash_status_since}\x1f#{@pane_dash_heartbeat}\x1f#{@pane_dash_title}\x1f#{@pane_dash_model}\x1f#{@pane_dash_tag}\x1f#{@pane_dash_group}";
+
+const STREAM_CHUNK_BYTES: usize = 8 * 1024;
+const READER_CLEANUP_GRACE: Duration = Duration::from_millis(100);
+type StreamCapture = Arc<Mutex<Vec<u8>>>;
 
 #[derive(Debug, Clone)]
 pub struct TmuxExec {
@@ -43,7 +50,7 @@ pub enum TmuxCommandError {
     #[error("tmux exited {status}: {stderr}")]
     Exit { status: ExitStatus, stderr: String },
     #[error("creation timed out")]
-    TimedOut,
+    TimedOut { stdout: Vec<u8> },
     #[error("creation cancelled")]
     Cancelled,
 }
@@ -164,7 +171,7 @@ impl TmuxExec {
             Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
         }
         if Instant::now() >= deadline {
-            return Err(TmuxCommandError::TimedOut);
+            return Err(TmuxCommandError::TimedOut { stdout: Vec::new() });
         }
         if let Some(cwd) = cwd {
             cwd.revalidate()?;
@@ -190,10 +197,22 @@ impl TmuxExec {
             stream: "stderr",
             source: io::Error::other("stderr was not piped"),
         })?;
-        let stdout_reader = tokio::spawn(read_stream(stdout));
-        let stderr_reader = tokio::spawn(read_stream(stderr));
+        let stdout_capture = Arc::new(Mutex::new(Vec::new()));
+        let stderr_capture = Arc::new(Mutex::new(Vec::new()));
+        let stdout_reader = tokio::spawn(read_stream(stdout, Arc::clone(&stdout_capture)));
+        let stderr_reader = tokio::spawn(read_stream(stderr, Arc::clone(&stderr_capture)));
         let stdout_abort = stdout_reader.abort_handle();
         let stderr_abort = stderr_reader.abort_handle();
+        let mut streams = tokio::spawn({
+            let stdout_capture = Arc::clone(&stdout_capture);
+            let stderr_capture = Arc::clone(&stderr_capture);
+            async move {
+                tokio::join!(
+                    collect_stream(stdout_reader, stdout_capture, "stdout"),
+                    collect_stream(stderr_reader, stderr_capture, "stderr")
+                )
+            }
+        });
         let completion = arbitrate_creation_completion(cancellation, deadline, child.wait()).await;
         if matches!(
             completion,
@@ -201,35 +220,26 @@ impl TmuxExec {
         ) {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            stdout_abort.abort();
-            stderr_abort.abort();
-            let _ = stdout_reader.await;
-            let _ = stderr_reader.await;
+            finish_streams(&mut streams, stdout_abort, stderr_abort).await;
             return Err(match completion {
-                CreationCompletion::TimedOut => TmuxCommandError::TimedOut,
+                CreationCompletion::TimedOut => TmuxCommandError::TimedOut {
+                    stdout: captured(&stdout_capture),
+                },
                 CreationCompletion::Cancelled => TmuxCommandError::Cancelled,
                 CreationCompletion::Exited(_) => unreachable!(),
             });
         }
-        let mut streams = tokio::spawn(async move {
-            tokio::join!(
-                collect_stream(stdout_reader, "stdout"),
-                collect_stream(stderr_reader, "stderr")
-            )
-        });
         let (stdout, stderr) = tokio::select! {
             biased;
             _ = &mut *cancellation => {
-                stdout_abort.abort();
-                stderr_abort.abort();
-                let _ = streams.await;
+                finish_streams(&mut streams, stdout_abort, stderr_abort).await;
                 return Err(TmuxCommandError::Cancelled);
             }
             _ = tokio::time::sleep_until(deadline) => {
-                stdout_abort.abort();
-                stderr_abort.abort();
-                let _ = streams.await;
-                return Err(TmuxCommandError::TimedOut);
+                finish_streams(&mut streams, stdout_abort, stderr_abort).await;
+                return Err(TmuxCommandError::TimedOut {
+                    stdout: captured(&stdout_capture),
+                });
             }
             streams = &mut streams => streams.map_err(|source| TmuxCommandError::ReaderJoin {
                 stream: "collection",
@@ -248,7 +258,9 @@ impl TmuxExec {
                 stream: "child",
                 source,
             }),
-            CreationCompletion::TimedOut => Err(TmuxCommandError::TimedOut),
+            CreationCompletion::TimedOut => Err(TmuxCommandError::TimedOut {
+                stdout: captured(&stdout_capture),
+            }),
             CreationCompletion::Cancelled => Err(TmuxCommandError::Cancelled),
         }
     }
@@ -293,20 +305,55 @@ impl TmuxExec {
     }
 }
 
-async fn read_stream<R: tokio::io::AsyncRead + Unpin>(mut stream: R) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await?;
-    Ok(bytes)
+async fn read_stream<R>(mut stream: R, capture: StreamCapture) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut chunk = [0_u8; STREAM_CHUNK_BYTES];
+    loop {
+        let count = stream.read(&mut chunk).await?;
+        if count == 0 {
+            return Ok(());
+        }
+        capture
+            .lock()
+            .expect("stream capture mutex poisoned")
+            .extend_from_slice(&chunk[..count]);
+    }
+}
+
+fn captured(capture: &StreamCapture) -> Vec<u8> {
+    capture
+        .lock()
+        .expect("stream capture mutex poisoned")
+        .clone()
 }
 
 async fn collect_stream(
-    reader: tokio::task::JoinHandle<io::Result<Vec<u8>>>,
+    reader: JoinHandle<io::Result<()>>,
+    capture: StreamCapture,
     stream: &'static str,
 ) -> std::result::Result<Vec<u8>, TmuxCommandError> {
     reader
         .await
         .map_err(|source| TmuxCommandError::ReaderJoin { stream, source })?
-        .map_err(|source| TmuxCommandError::Read { stream, source })
+        .map_err(|source| TmuxCommandError::Read { stream, source })?;
+    Ok(captured(&capture))
+}
+
+async fn finish_streams<T>(
+    streams: &mut JoinHandle<T>,
+    stdout_abort: tokio::task::AbortHandle,
+    stderr_abort: tokio::task::AbortHandle,
+) {
+    if tokio::time::timeout(READER_CLEANUP_GRACE, &mut *streams)
+        .await
+        .is_err()
+    {
+        stdout_abort.abort();
+        stderr_abort.abort();
+        let _ = streams.await;
+    }
 }
 
 #[cfg(test)]
@@ -316,11 +363,39 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::process::{Command, Stdio};
+    use std::time::Duration;
 
     use crate::model::{Model, ModelConfig};
     use crate::snapshot::parse;
 
     use super::{SNAPSHOT_FORMAT, TmuxCommandError, TmuxExec};
+
+    fn shell_quote(path: &Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
+    }
+
+    fn wait_for_pid_exit(pid: &str) {
+        let started = std::time::Instant::now();
+        while Command::new("kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    async fn wait_for_file(path: &Path) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fake executable must reach its synchronization point");
+    }
 
     #[test]
     fn bin_returns_the_configured_executable_path() {
@@ -356,7 +431,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creation_runner_drains_large_stdout_and_stderr_before_returning_error() {
+    async fn creation_runner_retains_valid_timeout_stdout_drains_large_streams_and_reaps_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("direct-child.pid");
+        let wrote_file = dir.path().join("wrote-output");
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > {pid}\nprintf '%%44\\n'\ndd if=/dev/zero bs=1024 count=256 2>/dev/null\ndd if=/dev/zero bs=1024 count=256 1>&2 2>/dev/null\ntouch {wrote}\ntrap 'exit 143' HUP INT TERM\nwhile :; do sleep 1; done\n",
+                pid = shell_quote(&pid_file),
+                wrote = shell_quote(&wrote_file),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let (_cancel, mut cancellation) = tokio::sync::oneshot::channel();
+
+        let exec = TmuxExec::new(executable);
+        let task = tokio::spawn(async move {
+            exec.run_argv_until(
+                &["anything".into()],
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                &mut cancellation,
+            )
+            .await
+        });
+        wait_for_file(&wrote_file).await;
+
+        let error = task.await.unwrap().unwrap_err();
+
+        assert!(matches!(
+            error,
+            TmuxCommandError::TimedOut { ref stdout }
+                if stdout.len() == 4 + 256 * 1024 && stdout.starts_with(b"%44\n")
+        ));
+        let pid = fs::read_to_string(pid_file).expect("direct child pid");
+        wait_for_pid_exit(pid.trim());
+    }
+
+    #[tokio::test]
+    async fn creation_runner_drains_large_stdout_and_stderr_before_returning_exit_error() {
         let dir = tempfile::tempdir().unwrap();
         let executable = dir.path().join("fake-tmux");
         fs::write(
@@ -371,7 +487,7 @@ mod tests {
             .run_argv_until(
                 &["anything".into()],
                 None,
-                tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+                tokio::time::Instant::now() + Duration::from_secs(1),
                 &mut cancellation,
             )
             .await
@@ -381,7 +497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creation_runner_bounds_retained_descendant_streams_after_child_exit() {
+    async fn creation_runner_retains_timeout_stdout_when_descendant_keeps_pipe_open() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("retained-pipe.pid");
         let executable = dir.path().join("fake-tmux");
@@ -396,6 +512,7 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let (_cancel, mut cancellation) = tokio::sync::oneshot::channel();
 
+        let started = std::time::Instant::now();
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             TmuxExec::new(executable).run_argv_until(
@@ -408,6 +525,7 @@ mod tests {
         .await
         .expect("retained descendant must not hold stream collection open")
         .unwrap_err();
+        assert!(started.elapsed() < Duration::from_millis(500));
 
         let pid = fs::read_to_string(&pid_file)
             .expect("retained pipe descendant pid")
@@ -434,7 +552,10 @@ mod tests {
         .await
         .expect("retained pipe descendant must be reaped after cleanup");
 
-        assert!(matches!(error, TmuxCommandError::TimedOut));
+        assert!(matches!(
+            error,
+            TmuxCommandError::TimedOut { ref stdout } if stdout == b"%44\n"
+        ));
     }
 
     #[tokio::test]
@@ -460,8 +581,81 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, TmuxCommandError::TimedOut));
+        assert!(matches!(
+            error,
+            TmuxCommandError::TimedOut { ref stdout } if stdout.is_empty()
+        ));
         assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn creation_runner_retains_malformed_timeout_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrote_file = dir.path().join("wrote-output");
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%%44\\377'\ntouch {}\nwhile :; do sleep 1; done\n",
+                shell_quote(&wrote_file)
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let (_cancel, mut cancellation) = tokio::sync::oneshot::channel();
+
+        let exec = TmuxExec::new(executable);
+        let task = tokio::spawn(async move {
+            exec.run_argv_until(
+                &["anything".into()],
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                &mut cancellation,
+            )
+            .await
+        });
+        wait_for_file(&wrote_file).await;
+
+        let error = task.await.unwrap().unwrap_err();
+        assert!(matches!(
+            error,
+            TmuxCommandError::TimedOut { ref stdout } if stdout == b"%44\xff"
+        ));
+    }
+
+    #[tokio::test]
+    async fn creation_runner_discards_timeout_stdout_when_cancelled_after_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrote_file = dir.path().join("wrote-output");
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%%44\\n'\ntouch {}\nwhile :; do sleep 1; done\n",
+                shell_quote(&wrote_file)
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let (cancel, mut cancellation) = tokio::sync::oneshot::channel();
+
+        let exec = TmuxExec::new(executable);
+        let task = tokio::spawn(async move {
+            exec.run_argv_until(
+                &["anything".into()],
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                &mut cancellation,
+            )
+            .await
+        });
+        wait_for_file(&wrote_file).await;
+        cancel.send(()).unwrap();
+
+        assert!(matches!(
+            task.await.unwrap().unwrap_err(),
+            TmuxCommandError::Cancelled
+        ));
     }
 
     #[tokio::test]
