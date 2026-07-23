@@ -154,6 +154,7 @@ check_config() {
     '`white`' \
     '`#RRGGBB` with exactly six hexadecimal digits' \
     '`ansi:0` through `ansi:255`' \
+    'pane-dash intentionally does not paint a terminal background. The `light` theme expects a light terminal background. On a dark terminal background, use `dark` or `terminal-native`; selecting `light` may make dark foreground text appear blank or low contrast.' \
     'tmux `@pane-dash-theme` base, then TOML `theme` replacement, then per-slot overrides.' \
     'Config is read once per popup; reopen to reload it.' \
     'reject the whole file' \
@@ -280,6 +281,10 @@ CASES
   cp "$README" "$mutated"
   replace_once "$mutated" 'removed no earlier than v3.0' 'removed in v2.1'
   ! check_engine_policy "$mutated" 3>/dev/null
+
+  cp "$README" "$mutated"
+  replace_once "$mutated" 'pane-dash intentionally does not paint a terminal background. The `light` theme expects a light terminal background. On a dark terminal background, use `dark` or `terminal-native`; selecting `light` may make dark foreground text appear blank or low contrast.' ''
+  ! check_config "$mutated" 3>/dev/null
 }
 
 run_bounded() {
