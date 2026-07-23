@@ -834,9 +834,9 @@ async fn creation_timeout_recovers_real_pane_id_from_blocked_after_new_window() 
             },
         ] if pane_id == finished
     ));
-    hook_guard.release();
     let pid = fs::read_to_string(&harness.hang_pid).expect("one-shot tmux client pid");
     wait_for_pid_exit(pid.trim());
+    hook_guard.release();
     let pane_id = created_pane(&events);
     assert_eq!(
         harness

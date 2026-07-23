@@ -281,3 +281,57 @@ CASES
   replace_once "$mutated" 'removed no earlier than v3.0' 'removed in v2.1'
   ! check_engine_policy "$mutated" 3>/dev/null
 }
+
+run_bounded() {
+  "$@" &
+  local pid=$! deadline=$((SECONDS + 2))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.05
+  done
+  wait "$pid"
+}
+
+run_readme_hook_example() {
+  local hook_line=$1 root socket hook_file status=0
+  root="$(mktemp -d "$BATS_TEST_TMPDIR/readme-hook.XXXXXX")"
+  socket="$root/tmux.sock"
+  hook_file="$root/after-new-window.conf"
+  printf '%s\n' "$hook_line" >"$hook_file"
+
+  scratch_tmux() { command tmux -f /dev/null -S "$socket" "$@"; }
+
+  run_bounded scratch_tmux new-session -d -s base 'exec cat' || status=$?
+  if [ "$status" -eq 0 ]; then
+    run_bounded scratch_tmux source-file "$hook_file" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    run_bounded scratch_tmux new-window -d -P -F '#{pane_id}' -t base >/dev/null || status=$?
+  fi
+
+  run_bounded scratch_tmux set-hook -gu after-new-window >/dev/null 2>&1 || true
+  run_bounded scratch_tmux kill-server >/dev/null 2>&1 || true
+  rm -rf "$root"
+  return "$status"
+}
+
+@test "README client-aware after-new-window hook examples are exact and prompt-free" {
+  local examples="$BATS_TEST_TMPDIR/readme-after-new-window-hooks"
+  local expected="$BATS_TEST_TMPDIR/expected-after-new-window-hooks"
+  local hook_line
+
+  cat >"$expected" <<'EOF'
+set-hook -g after-new-window 'if-shell -F "#{client_tty}" "command-prompt -I \"#{window_name}\" \"rename-window %%\""'
+set-hook -g after-new-window "if-shell -F '#{!=:#{client_tty},}' 'command-prompt -I \"#{window_name}\" \"rename-window %%\"'"
+EOF
+  awk '/^set-hook -g after-new-window / { print }' "$README" >"$examples"
+  diff -u "$expected" "$examples"
+
+  while IFS= read -r hook_line; do
+    run_readme_hook_example "$hook_line"
+  done <"$examples"
+}
