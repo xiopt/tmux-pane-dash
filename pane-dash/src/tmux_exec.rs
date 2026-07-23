@@ -497,7 +497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creation_runner_retains_timeout_stdout_when_descendant_keeps_pipe_open() {
+    async fn creation_runner_bounds_retained_descendant_streams_after_child_exit() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("retained-pipe.pid");
         let executable = dir.path().join("fake-tmux");
@@ -556,6 +556,57 @@ mod tests {
             error,
             TmuxCommandError::TimedOut { ref stdout } if stdout == b"%44\n"
         ));
+    }
+
+    #[tokio::test]
+    async fn creation_runner_bounds_retained_descendant_streams_after_live_child_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let direct_pid_file = dir.path().join("direct-child.pid");
+        let retained_pid_file = dir.path().join("retained-pipe.pid");
+        let wrote_file = dir.path().join("wrote-output");
+        let executable = dir.path().join("fake-tmux");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > {direct_pid}\n(sleep 60) &\nprintf '%s\\n' \"$!\" > {retained_pid}\nprintf '%%44\\n'\ntouch {wrote}\ntrap 'exit 143' HUP INT TERM\nwhile :; do sleep 1; done\n",
+                direct_pid = shell_quote(&direct_pid_file),
+                retained_pid = shell_quote(&retained_pid_file),
+                wrote = shell_quote(&wrote_file),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let (_cancel, mut cancellation) = tokio::sync::oneshot::channel();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        let started = std::time::Instant::now();
+
+        let exec = TmuxExec::new(executable);
+        let task = tokio::spawn(async move {
+            exec.run_argv_until(&["anything".into()], None, deadline, &mut cancellation)
+                .await
+        });
+        wait_for_file(&wrote_file).await;
+
+        let error = task.await.unwrap().unwrap_err();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(matches!(
+            error,
+            TmuxCommandError::TimedOut { ref stdout } if stdout == b"%44\n"
+        ));
+
+        let direct_pid = fs::read_to_string(direct_pid_file).expect("direct child pid");
+        wait_for_pid_exit(direct_pid.trim());
+
+        let retained_pid = fs::read_to_string(retained_pid_file).expect("retained descendant pid");
+        let retained_pid = retained_pid.trim();
+        assert!(
+            Command::new("kill")
+                .args(["-TERM", retained_pid])
+                .status()
+                .expect("terminate retained pipe descendant")
+                .success()
+        );
+        wait_for_pid_exit(retained_pid);
     }
 
     #[tokio::test]
