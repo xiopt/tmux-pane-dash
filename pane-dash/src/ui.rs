@@ -1446,12 +1446,21 @@ mod tests {
             };
             assert_eq!(help.offset, metrics.max_offset);
 
-            let rendered = buffer_text(&draw_buffer(&app, area), area);
+            let buffer = draw_buffer(&app, area);
+            let rendered = buffer_text(&buffer, area);
             if area.width == 40 {
+                let rows = (area.y..area.y.saturating_add(area.height))
+                    .map(|y| {
+                        (area.x..area.x.saturating_add(area.width))
+                            .map(|x| buffer[(x, y)].symbol().to_owned())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>();
                 assert!(
-                    rendered.contains("Config is read once per")
-                        || rendered.contains("reopen to reload")
+                    rows.iter()
+                        .any(|row| row.contains("Config is read once per popup; reopen"))
                 );
+                assert!(rows.iter().any(|row| row.contains("to reload.")));
             } else if area.width < 92 {
                 assert!(rendered.contains("Config is read once per popup; reopen to reload."));
             } else {
