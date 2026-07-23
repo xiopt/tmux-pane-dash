@@ -2027,6 +2027,7 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{
+        layout::Rect,
         style::{Color, Style},
         text::{Line, Span},
     };
@@ -2042,6 +2043,7 @@ mod tests {
     use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, Status, WindowId};
     use crate::preview::{PreviewFrame, parse_preview};
     use crate::snapshot::{ParseOutcome, RawRecord};
+    use crate::ui::help_viewport;
 
     fn record(session: &str, window: &str, pane: &str, pane_index: u32) -> RawRecord {
         RawRecord {
@@ -5040,6 +5042,86 @@ mod tests {
     }
 
     #[test]
+    fn help_viewport_clamps_after_resizing_from_split_bottom_to_single() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        app.modal = Some(Modal::Help(HelpState::default()));
+
+        let split = help_viewport(&app, Rect::new(0, 0, 96, 20)).expect("Help is open");
+        assert!(
+            reduce(
+                &mut app,
+                Event::HelpViewport {
+                    max_offset: split.max_offset,
+                    page_height: split.page_height,
+                },
+            )
+            .changed
+        );
+        assert!(reduce(&mut app, key(KeyCode::Char('G'))).changed);
+
+        let single = help_viewport(&app, Rect::new(0, 0, 80, 48)).expect("Help is open");
+        assert!(split.max_offset > single.max_offset);
+        assert!(
+            reduce(
+                &mut app,
+                Event::HelpViewport {
+                    max_offset: single.max_offset,
+                    page_height: single.page_height,
+                },
+            )
+            .changed
+        );
+        assert_eq!(
+            app.modal,
+            Some(Modal::Help(HelpState {
+                offset: single.max_offset,
+                max_offset: single.max_offset,
+                page_height: single.page_height,
+            }))
+        );
+    }
+
+    #[test]
+    fn help_viewport_clamps_after_resizing_from_single_bottom_to_split() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        app.modal = Some(Modal::Help(HelpState::default()));
+
+        let single = help_viewport(&app, Rect::new(0, 0, 40, 15)).expect("Help is open");
+        assert!(
+            reduce(
+                &mut app,
+                Event::HelpViewport {
+                    max_offset: single.max_offset,
+                    page_height: single.page_height,
+                },
+            )
+            .changed
+        );
+        assert!(reduce(&mut app, key(KeyCode::Char('G'))).changed);
+
+        let split = help_viewport(&app, Rect::new(0, 0, 96, 48)).expect("Help is open");
+        assert!(single.max_offset > split.max_offset);
+        assert!(
+            reduce(
+                &mut app,
+                Event::HelpViewport {
+                    max_offset: split.max_offset,
+                    page_height: split.page_height,
+                },
+            )
+            .changed
+        );
+        assert_eq!(
+            app.modal,
+            Some(Modal::Help(HelpState {
+                offset: split.max_offset,
+                max_offset: split.max_offset,
+                page_height: split.page_height,
+            }))
+        );
+    }
+
+    #[test]
     fn help_navigation_applies_exact_steps_and_strict_modifiers() {
         let accepted = [
             (key(KeyCode::Char('j')), 11),
@@ -5211,6 +5293,30 @@ mod tests {
         ] {
             assert_eq!(reduce(&mut app, key_event), ReduceResult::default());
         }
+    }
+
+    #[test]
+    fn help_navigation_saturates_at_usize_max_offset() {
+        let mut app = state(vec![record("$a", "@a", "%a", 0)]);
+        app.modal = Some(Modal::Help(HelpState {
+            offset: 0,
+            max_offset: usize::MAX,
+            page_height: u16::MAX,
+        }));
+
+        assert!(reduce(&mut app, key(KeyCode::Char('G'))).changed);
+        assert_eq!(
+            app.modal,
+            Some(Modal::Help(HelpState {
+                offset: usize::MAX,
+                max_offset: usize::MAX,
+                page_height: u16::MAX,
+            }))
+        );
+        assert_eq!(
+            reduce(&mut app, control_key(KeyCode::Char('d'))),
+            ReduceResult::default()
+        );
     }
 
     #[test]

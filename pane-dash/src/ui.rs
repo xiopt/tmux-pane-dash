@@ -1416,7 +1416,11 @@ mod tests {
 
     #[test]
     fn help_viewport_feedback_reaches_the_final_configuration_in_single_and_split_layouts() {
-        for area in [Rect::new(0, 0, 80, 24), Rect::new(0, 0, 92, 13)] {
+        for area in [
+            Rect::new(0, 0, 40, 15),
+            Rect::new(0, 0, 80, 24),
+            Rect::new(0, 0, 92, 13),
+        ] {
             let mut app = state(&[]);
             app.modal = Some(Modal::Help(HelpState::default()));
             let metrics = help_viewport(&app, area).expect("open Help has viewport metrics");
@@ -1443,7 +1447,12 @@ mod tests {
             assert_eq!(help.offset, metrics.max_offset);
 
             let rendered = buffer_text(&draw_buffer(&app, area), area);
-            if area.width < 92 {
+            if area.width == 40 {
+                assert!(
+                    rendered.contains("Config is read once per")
+                        || rendered.contains("reopen to reload")
+                );
+            } else if area.width < 92 {
                 assert!(rendered.contains("Config is read once per popup; reopen to reload."));
             } else {
                 assert!(rendered.contains("Config is read once per popup; reopen to"));
