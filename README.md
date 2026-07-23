@@ -163,7 +163,7 @@ Printable unmodified/Shift text edits the query; `Backspace` deletes one Unicode
 | Create choice | `j`/`k` or arrows; `Enter` chooses; `Esc` cancels; `?` is inert |
 | Create form | text/`Backspace`; `Tab`/Down next field; `Shift-Tab`/Up previous; `Enter` submits; `Esc` cancels; `?` is inert |
 | Locked create submission | `q`/`Esc` closes the popup; all other keys are inert |
-| Help | `?`, `Esc`, or unmodified `q` closes help; all other keys are inert |
+| Help | `j`/`k` and unmodified arrows scroll one line; `Ctrl-u`/`Ctrl-d` scroll half a page; unmodified `PageUp`/`PageDown` scroll a page; `g`/`G` jump to top/bottom; `?`, `Esc`, or unmodified `q` closes help |
 
 ## tmux options
 
@@ -221,6 +221,8 @@ warning, degrade, border, status_bar, selection_fg, selection_bg
 ```
 
 Built-in themes are exact lowercase `dark`, `light`, and `terminal-native`. Colors accept canonical lowercase ANSI names (`reset`, `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`, `dark_gray`, `light_red`, `light_green`, `light_yellow`, `light_blue`, `light_magenta`, `light_cyan`, `white`), `#RRGGBB` with exactly six hexadecimal digits, or `ansi:0` through `ansi:255`.
+
+pane-dash intentionally does not paint a terminal background. The `light` theme expects a light terminal background. On a dark terminal background, use `dark` or `terminal-native`; selecting `light` may make dark foreground text appear blank or low contrast.
 
 Precedence is tmux `@pane-dash-theme` base, then TOML `theme` replacement, then per-slot overrides. Arrays, nested tables, malformed files, oversized files, and unreadable files reject the whole file. In a structurally valid file, an unknown theme retains the prior base, each invalid color retains only that slot's prior value, and valid siblings still apply. Unknown flat scalar keys are forward-compatible; a near-known-key typo warns. Warnings are sanitized, deterministic, visible, deduplicated, and capped at four rows (three concrete warnings plus a suppression summary).
 

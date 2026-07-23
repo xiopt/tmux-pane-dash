@@ -116,7 +116,7 @@ check_keys() {
     '| Create choice | `j`/`k` or arrows; `Enter` chooses; `Esc` cancels; `?` is inert |' \
     '| Create form | text/`Backspace`; `Tab`/Down next field; `Shift-Tab`/Up previous; `Enter` submits; `Esc` cancels; `?` is inert |' \
     '| Locked create submission | `q`/`Esc` closes the popup; all other keys are inert |' \
-    '| Help | `?`, `Esc`, or unmodified `q` closes help; all other keys are inert |'; do
+    '| Help | `j`/`k` and unmodified arrows scroll one line; `Ctrl-u`/`Ctrl-d` scroll half a page; unmodified `PageUp`/`PageDown` scroll a page; `g`/`G` jump to top/bottom; `?`, `Esc`, or unmodified `q` closes help |'; do
     require_row "$file" "$row" || return
   done
   require_text "$file" 'Printable unmodified/Shift text edits the query; `Backspace` deletes one Unicode scalar; `Esc` returns to navigation and retains the query. `?` is query text, not help.'

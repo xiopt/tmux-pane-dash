@@ -992,8 +992,18 @@ where
     B: Backend,
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let viewport_height = ui::preview_inner_height(app, terminal.size()?.into());
+    let full_area = terminal.size()?.into();
+    let viewport_height = ui::preview_inner_height(app, full_area);
     reduce(app, Event::PreviewViewport(viewport_height));
+    if let Some(metrics) = ui::help_viewport(app, full_area) {
+        reduce(
+            app,
+            Event::HelpViewport {
+                max_offset: metrics.max_offset,
+                page_height: metrics.page_height,
+            },
+        );
+    }
     let now = now_secs();
     app.prepare_render(now);
     terminal.draw(|frame| ui::render(frame, app, now))?;
@@ -1055,13 +1065,13 @@ mod tests {
         SnapshotInFlight, SnapshotSource, apply_event, bench_config_to_frame_message,
         bench_first_frame_message, classify_connection_message, classify_snapshot_payload,
         cleanup_creation_task, clear_terminated_connection_state, dispatch_directives,
-        next_runtime_timer, parse_args_from, preview_interval, process_action_effects,
+        next_runtime_timer, parse_args_from, preview_interval, process_action_effects, redraw,
         run_runtime_timer_step, snapshot_interval, snapshot_keeps_launch_session,
         source_session_changed_requires_quit, spawn_preview_capture, start_creation,
         start_preview_capture, sync_transport_degraded,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use pane_dash::app::{Action, AppState, Event, reduce};
+    use pane_dash::app::{Action, AppState, Event, HelpState, Modal, reduce};
     use pane_dash::config::LoadedUiConfig;
     use pane_dash::creation::{CreateContext, CreateDraft, CreationProgress, build_request};
     use pane_dash::model::{Model, ModelConfig};
@@ -1118,6 +1128,38 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
         );
         app
+    }
+
+    #[test]
+    fn redraw_routes_help_viewport_before_render_and_clamps_in_the_same_frame() {
+        let mut app = preview_app();
+        app.modal = Some(Modal::Help(HelpState {
+            offset: 99,
+            max_offset: 99,
+            page_height: 1,
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(92, 24)).unwrap();
+
+        redraw(&mut terminal, &mut app).unwrap();
+
+        assert_eq!(
+            app.modal,
+            Some(Modal::Help(HelpState {
+                offset: 20,
+                max_offset: 20,
+                page_height: 21,
+            }))
+        );
+    }
+
+    #[test]
+    fn redraw_does_not_create_help_state_when_help_is_inactive() {
+        let mut app = preview_app();
+        let mut terminal = Terminal::new(TestBackend::new(92, 24)).unwrap();
+
+        redraw(&mut terminal, &mut app).unwrap();
+
+        assert_eq!(app.modal, None);
     }
 
     fn fake_preview_tmux(dir: &TempDir) -> (TmuxExec, std::path::PathBuf) {

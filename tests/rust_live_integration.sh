@@ -399,7 +399,7 @@ phase6_theme_help_isolation() {
   popup_tail_has 0 "$((help_offset + 1))" 'Six statuses and glyphs' || die 'phase6 help missing statuses heading'
   # Terminal diffs can split style runs or omit unchanged spaces, so normalize
   # only control sequences/whitespace before matching canonical help text.
-  ansi_tail_compact_has 0 "$((help_offset + 1))" '?, Esc, q close help' || die 'phase6 help missing close footer'
+  ansi_tail_compact_has 0 "$((help_offset + 1))" 'j/k scroll | Ctrl-u/d half | PgUp/Dn page | g/G ends | ?, Esc, q close' || die 'phase6 help missing scroll footer'
   action_start="$(now)"
   write_bytes 0 $'nx\r\023sj'
   close_help_offset="$(ansi_size 0)"
@@ -408,7 +408,7 @@ phase6_theme_help_isolation() {
   reopened_offset="$(ansi_size 0)"
   write_bytes 0 '?'
   wait_for 'phase6 inert barrier reopens Help' 2 popup_tail_has 0 "$((reopened_offset + 1))" 'Keys — navigation and modes'
-  ansi_tail_compact_has 0 "$((reopened_offset + 1))" '?, Esc, q close help' || die 'phase6 inert barrier lost Help footer'
+  ansi_tail_compact_has 0 "$((reopened_offset + 1))" 'j/k scroll | Ctrl-u/d half | PgUp/Dn page | g/G ends | ?, Esc, q close' || die 'phase6 inert barrier lost Help footer'
   popup_open 0 || die 'phase6 inert barrier closed popup A'
   quiescence_start="$(now)"
   wait_for 'phase6 Help quiescence >=1.1s' 1.3 wait_for_elapsed "$quiescence_start" 1.1

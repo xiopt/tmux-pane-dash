@@ -66,7 +66,7 @@ impl HelpColumns {
 
 #[allow(dead_code)] // Task 3 routes these metrics through the pre-draw reducer feedback event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HelpViewportMetrics {
+pub struct HelpViewportMetrics {
     pub max_offset: usize,
     pub page_height: u16,
 }
@@ -328,7 +328,7 @@ fn help_layout(full_area: Rect, palette: &Palette) -> HelpLayout {
 }
 
 #[allow(dead_code)] // Task 3 consumes this pure query from the redraw path.
-pub(crate) fn help_viewport(app: &AppState, full_area: Rect) -> Option<HelpViewportMetrics> {
+pub fn help_viewport(app: &AppState, full_area: Rect) -> Option<HelpViewportMetrics> {
     matches!(app.modal, Some(Modal::Help(_))).then(|| {
         let layout = help_layout(full_area, app.palette());
         HelpViewportMetrics {
