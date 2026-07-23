@@ -1590,7 +1590,7 @@ fn finish_creation(
     };
     if !matches!(
         (&pending.state, &resolution),
-        (PendingCreationState::Created { pane_id: bound }, CreationResolution::TimedOut { stage: CreateStage::Tag })
+        (PendingCreationState::Created { pane_id: bound }, CreationResolution::TimedOut { stage: CreateStage::Create | CreateStage::Tag })
             | (PendingCreationState::Created { pane_id: bound }, CreationResolution::TagFailed(_))
             | (PendingCreationState::Tagging { pane_id: bound }, CreationResolution::Success)
             | (PendingCreationState::Tagging { pane_id: bound }, CreationResolution::TagFailed(_))
@@ -1836,7 +1836,14 @@ fn reconcile_snapshot_presence(
     let known_dead = records.iter().any(|record| record.pane_dead);
 
     if live {
-        if matches!(resolution, CreationResolution::TagFailed(_))
+        let tag_uncertain = matches!(
+            resolution,
+            CreationResolution::TagFailed(_)
+                | CreationResolution::TimedOut {
+                    stage: CreateStage::Create | CreateStage::Tag,
+                }
+        );
+        if tag_uncertain
             && !records
                 .iter()
                 .any(|record| is_discovered(record, model_config))
@@ -2604,6 +2611,223 @@ mod tests {
         );
         assert!(!wrong.changed);
         assert!(wrong.actions.is_empty());
+    }
+
+    #[test]
+    fn creation_create_timeout_accepts_only_the_bound_created_pane_once() {
+        let mut app = state(Vec::new());
+        reduce(&mut app, key(KeyCode::Char('n')));
+        let id = match reduce(&mut app, key(KeyCode::Enter)).actions.as_slice() {
+            [Action::StartCreation { id, .. }] => *id,
+            actions => panic!("expected start action, got {actions:?}"),
+        };
+        let created = reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::Created {
+                id,
+                pane_id: "%new".into(),
+            }),
+        );
+        assert!(created.changed);
+        assert!(created.actions.is_empty());
+
+        let finished = reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::Finished {
+                id,
+                pane_id: "%new".into(),
+                resolution: CreationResolution::TimedOut {
+                    stage: CreateStage::Create,
+                },
+            }),
+        );
+        assert_eq!(
+            finished.actions,
+            vec![Action::CreationMutation, Action::RefreshNow]
+        );
+        assert!(matches!(
+            app.pending_creation,
+            Some(PendingCreation {
+                state: PendingCreationState::AwaitingSnapshot {
+                    ref pane_id,
+                    resolution: CreationResolution::TimedOut {
+                        stage: CreateStage::Create,
+                    },
+                },
+                ..
+            }) if pane_id == &PaneId::from("%new")
+        ));
+
+        for progress in [
+            CreationProgress::Finished {
+                id,
+                pane_id: "%other".into(),
+                resolution: CreationResolution::TimedOut {
+                    stage: CreateStage::Create,
+                },
+            },
+            CreationProgress::Finished {
+                id: CreationId(id.0 + 1),
+                pane_id: "%new".into(),
+                resolution: CreationResolution::TimedOut {
+                    stage: CreateStage::Create,
+                },
+            },
+            CreationProgress::Finished {
+                id,
+                pane_id: "%new".into(),
+                resolution: CreationResolution::TimedOut {
+                    stage: CreateStage::Create,
+                },
+            },
+        ] {
+            assert!(!reduce(&mut app, Event::CreationProgress(progress)).changed);
+        }
+
+        let mut terminal_before_created = state(Vec::new());
+        terminal_before_created.pending_creation = Some(PendingCreation {
+            id,
+            initiating_session: None,
+            state: PendingCreationState::Creating,
+        });
+        assert!(
+            !reduce(
+                &mut terminal_before_created,
+                Event::CreationProgress(CreationProgress::Finished {
+                    id,
+                    pane_id: "%new".into(),
+                    resolution: CreationResolution::TimedOut {
+                        stage: CreateStage::Create,
+                    },
+                }),
+            )
+            .changed
+        );
+    }
+
+    #[test]
+    fn creation_create_timeout_snapshot_reconciliation_preserves_exact_uncertainty() {
+        let awaiting = |resolution| PendingCreation {
+            id: CreationId(1),
+            initiating_session: Some("$start".into()),
+            state: PendingCreationState::AwaitingSnapshot {
+                pane_id: "%new".into(),
+                resolution,
+            },
+        };
+        let undiscovered = || {
+            let mut pane = record("$start", "@start", "%new", 0);
+            pane.pane_current_command = "shell".into();
+            pane.status.clear();
+            pane.tag.clear();
+            pane
+        };
+
+        let mut create_timeout = state(Vec::new());
+        create_timeout.pending_creation = Some(awaiting(CreationResolution::TimedOut {
+            stage: CreateStage::Create,
+        }));
+        reduce(&mut create_timeout, snapshot(vec![undiscovered()], 11));
+        assert!(create_timeout.pending_creation.is_none());
+        assert!(
+            create_timeout
+                .ephemeral_panes
+                .contains(&PaneId::from("%new"))
+        );
+        assert_eq!(
+            create_timeout.banner.as_deref(),
+            Some("pane %new created, creation timed out")
+        );
+
+        for stage in [CreateStage::SendCommand, CreateStage::SendEnter] {
+            let mut later_timeout = state(Vec::new());
+            later_timeout.pending_creation = Some(awaiting(CreationResolution::TimedOut { stage }));
+            reduce(&mut later_timeout, snapshot(vec![undiscovered()], 11));
+            assert!(
+                !later_timeout
+                    .ephemeral_panes
+                    .contains(&PaneId::from("%new"))
+            );
+        }
+
+        let mut discovered = state(Vec::new());
+        discovered.pending_creation = Some(awaiting(CreationResolution::TimedOut {
+            stage: CreateStage::Create,
+        }));
+        let mut canonical = undiscovered();
+        canonical.tag = "dash-created".into();
+        reduce(&mut discovered, snapshot(vec![canonical], 11));
+        assert!(discovered.ephemeral_panes.is_empty());
+        assert!(discovered.model.panes().contains_key(&PaneId::from("%new")));
+
+        let mut absent = state(Vec::new());
+        absent.pending_creation = Some(awaiting(CreationResolution::TimedOut {
+            stage: CreateStage::Create,
+        }));
+        reduce(&mut absent, snapshot(Vec::new(), 11));
+        assert!(absent.pending_creation.is_none());
+        assert!(absent.ephemeral_panes.is_empty());
+        assert_eq!(
+            absent.banner.as_deref(),
+            Some("pane %new exited before creation")
+        );
+
+        let mut ambiguous = state(Vec::new());
+        ambiguous.pending_creation = Some(awaiting(CreationResolution::TimedOut {
+            stage: CreateStage::Create,
+        }));
+        reduce(
+            &mut ambiguous,
+            Event::Snapshot {
+                outcome: ParseOutcome {
+                    records: Vec::new(),
+                    raw_panes: Default::default(),
+                    ambiguous_panes: HashSet::from(["%new".into()]),
+                    dropped: 1,
+                    unattributable_dropped: 0,
+                },
+                observed_at: 11,
+            },
+        );
+        assert!(ambiguous.pending_creation.is_some());
+        assert!(ambiguous.ephemeral_panes.is_empty());
+
+        let mut prune = create_timeout;
+        let mut naturally_discovered = undiscovered();
+        naturally_discovered.tag = "dash-created".into();
+        reduce(&mut prune, snapshot(vec![naturally_discovered], 12));
+        assert!(prune.ephemeral_panes.is_empty());
+        assert!(prune.model.panes().contains_key(&PaneId::from("%new")));
+        reduce(&mut prune, snapshot(Vec::new(), 13));
+        assert!(!prune.model.panes().contains_key(&PaneId::from("%new")));
+        assert!(!reduce(&mut prune, snapshot(Vec::new(), 14)).changed);
+    }
+
+    #[test]
+    fn creation_tag_timeout_reconciles_live_undiscovered_pane_as_ephemeral() {
+        let mut app = state(Vec::new());
+        app.pending_creation = Some(PendingCreation {
+            id: CreationId(1),
+            initiating_session: Some("$start".into()),
+            state: PendingCreationState::AwaitingSnapshot {
+                pane_id: "%new".into(),
+                resolution: CreationResolution::TimedOut {
+                    stage: CreateStage::Tag,
+                },
+            },
+        });
+        let mut pane = record("$start", "@start", "%new", 0);
+        pane.pane_current_command = "shell".into();
+        pane.status.clear();
+        pane.tag.clear();
+
+        reduce(&mut app, snapshot(vec![pane], 11));
+
+        assert!(app.ephemeral_panes.contains(&PaneId::from("%new")));
+        assert_eq!(
+            app.banner.as_deref(),
+            Some("pane %new created, tagging timed out")
+        );
     }
 
     #[test]

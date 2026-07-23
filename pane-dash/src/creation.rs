@@ -180,7 +180,25 @@ async fn run_creation_until(
         .await
     {
         Ok(output) => output,
-        Err(TmuxCommandError::TimedOut { .. } | TmuxCommandError::Cancelled) => {
+        Err(TmuxCommandError::TimedOut { stdout }) => {
+            let Ok(pane_id) = parse_pane_id(&stdout) else {
+                send(CreationProgress::TimedOut { id });
+                return;
+            };
+            send(CreationProgress::Created {
+                id,
+                pane_id: pane_id.clone(),
+            });
+            send(CreationProgress::Finished {
+                id,
+                pane_id,
+                resolution: CreationResolution::TimedOut {
+                    stage: CreateStage::Create,
+                },
+            });
+            return;
+        }
+        Err(TmuxCommandError::Cancelled) => {
             send(CreationProgress::TimedOut { id });
             return;
         }
@@ -468,13 +486,16 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    use std::time::Duration;
 
     use super::{
-        CreateContext, CreateDraft, CreationError, CreationField, SplitDirection, ValidatedCwd,
-        build_request, display_error, run_creation,
+        CreateContext, CreateDraft, CreateStage, CreationError, CreationField, CreationId,
+        CreationProgress, CreationResolution, SplitDirection, ValidatedCwd, build_request,
+        display_error, run_creation, run_creation_until,
     };
     use crate::model::{PaneId, SessionId};
     use crate::tmux_exec::TmuxExec;
+    use tokio::time::Instant;
 
     fn draft(name: &str, cwd: &str, command: &str) -> CreateDraft {
         CreateDraft {
@@ -536,6 +557,59 @@ mod tests {
         let (_cancel, cancellation) = tokio::sync::oneshot::channel();
         run_creation(tmux, super::CreationId(99), request, tx, cancellation).await;
         std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    async fn run_timed_out_stage_one(
+        payload: &[u8],
+        cancel_after_output: bool,
+    ) -> (Vec<CreationProgress>, Vec<Vec<String>>) {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("argv.log");
+        let marker = dir.path().join("output-written");
+        let executable = dir.path().join("fake-tmux");
+        let escaped_payload = payload
+            .iter()
+            .map(|byte| format!("\\{byte:03o}"))
+            .collect::<String>();
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\t' \"$@\" >> '{log}'\nprintf '\\n' >> '{log}'\nprintf '{escaped_payload}'\ntouch '{marker}'\nwhile :; do sleep 1; done\n",
+                log = log.display(),
+                marker = marker.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let request = build_request(CreateContext::NewSession, &draft("", "", "echo hi")).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cancel, mut cancellation) = tokio::sync::oneshot::channel();
+        let workflow = run_creation_until(
+            TmuxExec::new(executable),
+            CreationId(99),
+            request,
+            tx,
+            Instant::now() + Duration::from_millis(250),
+            &mut cancellation,
+        );
+
+        if cancel_after_output {
+            let cancel_when_output_written = async move {
+                while !marker.exists() {
+                    tokio::task::yield_now().await;
+                }
+                cancel.send(()).unwrap();
+            };
+            tokio::join!(workflow, cancel_when_output_written);
+        } else {
+            workflow.await;
+        }
+
+        (
+            std::iter::from_fn(|| rx.try_recv().ok()).collect(),
+            logged_argv(&log),
+        )
     }
 
     #[test]
@@ -1025,5 +1099,79 @@ mod tests {
                 super::CreationProgress::CreateFailed { .. },
             ]
         ));
+    }
+
+    #[tokio::test]
+    async fn workflow_timeout_promotes_only_parser_proven_stage_one_output() {
+        for payload in [b"%42".as_slice(), b"%42\n".as_slice()] {
+            let (progress, invocations) = run_timed_out_stage_one(payload, false).await;
+
+            assert_eq!(
+                progress,
+                vec![
+                    CreationProgress::Stage {
+                        id: CreationId(99),
+                        stage: CreateStage::Create,
+                        pane_id: None,
+                    },
+                    CreationProgress::Created {
+                        id: CreationId(99),
+                        pane_id: PaneId::from("%42"),
+                    },
+                    CreationProgress::Finished {
+                        id: CreationId(99),
+                        pane_id: PaneId::from("%42"),
+                        resolution: CreationResolution::TimedOut {
+                            stage: CreateStage::Create,
+                        },
+                    },
+                ],
+                "accepted payload: {payload:?}"
+            );
+            assert_eq!(invocations.len(), 1);
+        }
+
+        for payload in [
+            b"".as_slice(),
+            b"%".as_slice(),
+            b"42\n".as_slice(),
+            b"%42\n%43\n".as_slice(),
+            b"%42\nextra".as_slice(),
+            b"%42\xff".as_slice(),
+        ] {
+            let (progress, invocations) = run_timed_out_stage_one(payload, false).await;
+
+            assert_eq!(
+                progress,
+                vec![
+                    CreationProgress::Stage {
+                        id: CreationId(99),
+                        stage: CreateStage::Create,
+                        pane_id: None,
+                    },
+                    CreationProgress::TimedOut { id: CreationId(99) },
+                ],
+                "rejected payload: {payload:?}"
+            );
+            assert_eq!(invocations.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_timeout_cancellation_never_promotes_buffered_stage_one_output() {
+        let (progress, invocations) = run_timed_out_stage_one(b"%42\n", true).await;
+
+        assert_eq!(
+            progress,
+            vec![
+                CreationProgress::Stage {
+                    id: CreationId(99),
+                    stage: CreateStage::Create,
+                    pane_id: None,
+                },
+                CreationProgress::TimedOut { id: CreationId(99) },
+            ]
+        );
+        assert_eq!(invocations.len(), 1);
     }
 }
