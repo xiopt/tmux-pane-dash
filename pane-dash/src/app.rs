@@ -5109,6 +5109,14 @@ mod tests {
         }
         for code in [KeyCode::Char('u'), KeyCode::Char('d')] {
             for modifiers in [
+                KeyModifiers::NONE,
+                KeyModifiers::SHIFT,
+                KeyModifiers::ALT,
+                KeyModifiers::SHIFT | KeyModifiers::ALT,
+            ] {
+                rejected.push(key_with_modifiers(code, modifiers));
+            }
+            for modifiers in [
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT,
                 KeyModifiers::CONTROL | KeyModifiers::ALT,
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
