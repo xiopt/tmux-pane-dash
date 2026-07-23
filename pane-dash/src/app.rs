@@ -4816,6 +4816,15 @@ mod tests {
             shift_key(KeyCode::Char('?')),
             key(KeyCode::Esc),
             control_key(KeyCode::Esc),
+            shift_key(KeyCode::Esc),
+            key_with_modifiers(KeyCode::Esc, KeyModifiers::ALT),
+            key_with_modifiers(KeyCode::Esc, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            key_with_modifiers(KeyCode::Esc, KeyModifiers::CONTROL | KeyModifiers::ALT),
+            key_with_modifiers(KeyCode::Esc, KeyModifiers::SHIFT | KeyModifiers::ALT),
+            key_with_modifiers(
+                KeyCode::Esc,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+            ),
             key(KeyCode::Char('q')),
         ] {
             app.modal = Some(Modal::Help(HelpState::default()));
@@ -4842,8 +4851,36 @@ mod tests {
             control_key(KeyCode::Char('r')),
             control_key(KeyCode::Char('z')),
             control_key(KeyCode::Char('q')),
-            key_with_modifiers(KeyCode::Char('?'), KeyModifiers::CONTROL),
+            key_with_modifiers(KeyCode::Char('q'), KeyModifiers::ALT),
+            key_with_modifiers(
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
             key_with_modifiers(KeyCode::Char('q'), KeyModifiers::SHIFT),
+            key_with_modifiers(KeyCode::Char('q'), KeyModifiers::SHIFT | KeyModifiers::ALT),
+            key_with_modifiers(
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            key_with_modifiers(
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+            ),
+            key_with_modifiers(KeyCode::Char('?'), KeyModifiers::CONTROL),
+            key_with_modifiers(KeyCode::Char('?'), KeyModifiers::ALT),
+            key_with_modifiers(
+                KeyCode::Char('?'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            key_with_modifiers(KeyCode::Char('?'), KeyModifiers::SHIFT | KeyModifiers::ALT),
+            key_with_modifiers(
+                KeyCode::Char('?'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            key_with_modifiers(
+                KeyCode::Char('?'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+            ),
             shift_key(KeyCode::Char('y')),
         ];
         for key_event in action_keys {
@@ -4878,24 +4915,35 @@ mod tests {
                 page_height: 3,
             },
         );
-        let moved = reduce(&mut right, control_key(KeyCode::Char('d')));
-        let closed = reduce(&mut left, key(KeyCode::Esc));
+        let left_moved = reduce(&mut left, key(KeyCode::PageDown));
+        let right_moved = reduce(&mut right, control_key(KeyCode::Char('d')));
+        let left_ended = reduce(&mut left, key(KeyCode::Char('G')));
+        let right_paged = reduce(&mut right, key(KeyCode::PageDown));
 
         assert!(opened.actions.is_empty());
         assert!(right_opened.actions.is_empty());
         assert!(left_viewport.actions.is_empty());
         assert!(right_viewport.actions.is_empty());
-        assert!(closed.actions.is_empty());
-        assert_eq!(left.modal, None);
+        assert!(left_moved.actions.is_empty());
+        assert!(right_moved.actions.is_empty());
+        assert!(left_ended.actions.is_empty());
+        assert!(right_paged.actions.is_empty());
+        assert_eq!(
+            left.modal,
+            Some(Modal::Help(HelpState {
+                offset: 30,
+                max_offset: 30,
+                page_height: 6,
+            }))
+        );
         assert_eq!(
             right.modal,
             Some(Modal::Help(HelpState {
-                offset: 1,
+                offset: 4,
                 max_offset: 8,
                 page_height: 3,
             }))
         );
-        assert!(moved.actions.is_empty());
     }
 
     #[test]
@@ -5027,14 +5075,49 @@ mod tests {
             );
         }
 
-        for key_event in [
-            key_with_modifiers(KeyCode::Down, KeyModifiers::SHIFT),
-            key_with_modifiers(KeyCode::PageDown, KeyModifiers::CONTROL),
-            control_key(KeyCode::Char('j')),
-            shift_key(KeyCode::Char('k')),
-            key_with_modifiers(KeyCode::Char('g'), KeyModifiers::ALT),
-            control_key(KeyCode::Char('G')),
+        let rejected_modifiers = [
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SHIFT | KeyModifiers::CONTROL,
+            KeyModifiers::SHIFT | KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+            KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ];
+        let mut rejected = Vec::new();
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('g'),
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
         ] {
+            rejected.extend(
+                rejected_modifiers
+                    .iter()
+                    .copied()
+                    .map(|modifiers| key_with_modifiers(code, modifiers)),
+            );
+        }
+        for modifiers in rejected_modifiers
+            .into_iter()
+            .filter(|modifiers| *modifiers != KeyModifiers::SHIFT)
+        {
+            rejected.push(key_with_modifiers(KeyCode::Char('G'), modifiers));
+        }
+        for code in [KeyCode::Char('u'), KeyCode::Char('d')] {
+            for modifiers in [
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+            ] {
+                rejected.push(key_with_modifiers(code, modifiers));
+            }
+        }
+
+        for key_event in rejected {
             let mut app = state(vec![record("$a", "@a", "%a", 0)]);
             let help = HelpState {
                 offset: 10,
@@ -5064,17 +5147,29 @@ mod tests {
         ] {
             assert_eq!(reduce(&mut app, key_event), ReduceResult::default());
         }
-        for key_event in [control_key(KeyCode::Char('d')), key(KeyCode::PageDown)] {
-            assert!(reduce(&mut app, key_event).changed);
-        }
-        assert_eq!(
-            app.modal,
-            Some(Modal::Help(HelpState {
+        for (key_event, expected_offset) in [
+            (control_key(KeyCode::Char('d')), 3),
+            (control_key(KeyCode::Char('u')), 1),
+            (key(KeyCode::PageDown), 3),
+            (key(KeyCode::PageUp), 1),
+        ] {
+            app.modal = Some(Modal::Help(HelpState {
                 offset: 2,
                 max_offset: 3,
                 page_height: 0,
-            }))
-        );
+            }));
+            let result = reduce(&mut app, key_event);
+            assert!(result.changed);
+            assert!(result.actions.is_empty());
+            assert_eq!(
+                app.modal,
+                Some(Modal::Help(HelpState {
+                    offset: expected_offset,
+                    max_offset: 3,
+                    page_height: 0,
+                }))
+            );
+        }
 
         app.modal = Some(Modal::Help(HelpState {
             offset: 3,
@@ -5088,6 +5183,23 @@ mod tests {
             control_key(KeyCode::Char('d')),
             key(KeyCode::Char('G')),
             shift_key(KeyCode::Char('G')),
+        ] {
+            assert_eq!(reduce(&mut app, key_event), ReduceResult::default());
+        }
+
+        app.modal = Some(Modal::Help(HelpState::default()));
+        for key_event in [
+            key(KeyCode::Char('j')),
+            key(KeyCode::Down),
+            control_key(KeyCode::Char('d')),
+            key(KeyCode::PageDown),
+            key(KeyCode::Char('G')),
+            shift_key(KeyCode::Char('G')),
+            key(KeyCode::Char('k')),
+            key(KeyCode::Up),
+            control_key(KeyCode::Char('u')),
+            key(KeyCode::PageUp),
+            key(KeyCode::Char('g')),
         ] {
             assert_eq!(reduce(&mut app, key_event), ReduceResult::default());
         }
