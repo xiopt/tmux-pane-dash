@@ -179,8 +179,17 @@ impl Harness {
         );
     }
 
-    fn release_wait(&self, token: &str) {
-        let output = self.run(["wait-for", "-S", token]);
+    fn release_wait(&self, token: &str) -> Option<Output> {
+        Command::new(self.real_tmux())
+            .arg("-S")
+            .arg(&self.socket)
+            .args(["wait-for", "-S", token])
+            .output()
+            .ok()
+    }
+
+    fn assert_release_wait(&self, token: &str) {
+        let output = self.release_wait(token).expect("release wait command");
         assert!(
             output.status.success(),
             "release wait: {}",
@@ -188,8 +197,17 @@ impl Harness {
         );
     }
 
-    fn remove_new_window_hook(&self) {
-        let output = self.run(["set-hook", "-gu", "after-new-window"]);
+    fn remove_new_window_hook(&self) -> Option<Output> {
+        Command::new(self.real_tmux())
+            .arg("-S")
+            .arg(&self.socket)
+            .args(["set-hook", "-gu", "after-new-window"])
+            .output()
+            .ok()
+    }
+
+    fn assert_remove_new_window_hook(&self) {
+        let output = self.remove_new_window_hook().expect("remove hook command");
         assert!(
             output.status.success(),
             "remove hook: {}",
@@ -226,8 +244,8 @@ struct BlockedHookGuard<'a> {
 
 impl BlockedHookGuard<'_> {
     fn release(mut self) {
-        self.harness.release_wait(&self.token);
-        self.harness.remove_new_window_hook();
+        self.harness.assert_release_wait(&self.token);
+        self.harness.assert_remove_new_window_hook();
         self.active = false;
     }
 }
@@ -235,8 +253,8 @@ impl BlockedHookGuard<'_> {
 impl Drop for BlockedHookGuard<'_> {
     fn drop(&mut self) {
         if self.active {
-            self.harness.release_wait(&self.token);
-            self.harness.remove_new_window_hook();
+            let _ = self.harness.release_wait(&self.token);
+            let _ = self.harness.remove_new_window_hook();
         }
     }
 }
@@ -868,4 +886,39 @@ async fn creation_timeout_recovers_real_pane_id_from_blocked_after_new_window() 
         argv.first()
             .is_some_and(|arg| arg == "set-option" || arg == "send-keys")
     }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires tmux >= 3.6; serial scratch server"]
+async fn blocked_hook_guard_drop_is_best_effort_after_panic() {
+    let _serial = serial_test().await;
+    let harness = Harness::new();
+    let token = format!(
+        "pane-dash-blocked-hook-drop-{}",
+        NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        harness.install_blocked_new_window_hook(&token);
+        let _guard = BlockedHookGuard {
+            harness: &harness,
+            token: token.clone(),
+            active: true,
+        };
+        panic!("exercise best-effort blocked-hook cleanup");
+    }));
+
+    assert!(result.is_err());
+    assert!(
+        !harness
+            .text(["show-hooks", "-g"])
+            .lines()
+            .any(|line| line.starts_with("after-new-window[")),
+        "Drop must remove the blocked hook without panicking"
+    );
+    assert_eq!(
+        harness
+            .text(["display-message", "-p", "#{session_name}"])
+            .trim(),
+        "base"
+    );
 }

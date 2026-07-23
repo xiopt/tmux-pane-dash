@@ -296,12 +296,56 @@ run_bounded() {
   wait "$pid"
 }
 
+run_in_pty() {
+  exec python3 -c '
+import os
+import pty
+import select
+import signal
+import subprocess
+import sys
+
+master, slave = pty.openpty()
+child = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave, preexec_fn=os.setsid)
+os.close(slave)
+
+def terminate(signum, _frame):
+    if child.poll() is None:
+        os.killpg(child.pid, signal.SIGTERM)
+    raise SystemExit(128 + signum)
+
+signal.signal(signal.SIGTERM, terminate)
+signal.signal(signal.SIGINT, terminate)
+try:
+    while child.poll() is None:
+        readable, _, _ = select.select([master], [], [], 0.1)
+        if readable:
+            try:
+                os.read(master, 4096)
+            except OSError:
+                pass
+finally:
+    os.close(master)
+
+raise SystemExit(child.wait())
+' "$@"
+}
+
+wait_for_attached_client() {
+  local socket=$1 deadline=$((SECONDS + 2))
+  while ! command tmux -f /dev/null -S "$socket" list-clients -F '#{client_tty}' 2>/dev/null | grep -q .; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.05
+  done
+}
+
 run_readme_hook_example() {
-  local hook_line=$1 root socket hook_file status=0
-  root="$(mktemp -d "$BATS_TEST_TMPDIR/readme-hook.XXXXXX")"
+  local config=$1 root socket hook_file binding attached status=0
+  root="$(mktemp -d /tmp/pane-dash-readme-hook.XXXXXX)"
   socket="$root/tmux.sock"
   hook_file="$root/after-new-window.conf"
-  printf '%s\n' "$hook_line" >"$hook_file"
+  binding="$root/prefix-c"
+  printf '%s\n' "$config" >"$hook_file"
 
   scratch_tmux() { command tmux -f /dev/null -S "$socket" "$@"; }
 
@@ -310,28 +354,73 @@ run_readme_hook_example() {
     run_bounded scratch_tmux source-file "$hook_file" || status=$?
   fi
   if [ "$status" -eq 0 ]; then
-    run_bounded scratch_tmux new-window -d -P -F '#{pane_id}' -t base >/dev/null || status=$?
+    run_bounded scratch_tmux show-hooks -g >"$root/hooks" || status=$?
+    ! grep -Eq '^after-new-window\[[0-9]+\][[:space:]]' "$root/hooks" || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    run_bounded scratch_tmux list-keys -T prefix >"$binding" || status=$?
+    grep -Fq 'new-window' "$binding" && grep -Fq 'command-prompt' "$binding" || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    run_in_pty env TMUX= TERM=xterm tmux -f /dev/null -S "$socket" attach-session -t base >/dev/null 2>&1 &
+    attached=$!
+    wait_for_attached_client "$socket" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    run_bounded run_in_pty env TMUX= tmux -f /dev/null -S "$socket" new-window -d -P -F '#{pane_id}' -t base >/dev/null || status=$?
   fi
 
+  [ -z "${attached:-}" ] || kill "$attached" 2>/dev/null || true
   run_bounded scratch_tmux set-hook -gu after-new-window >/dev/null 2>&1 || true
   run_bounded scratch_tmux kill-server >/dev/null 2>&1 || true
   rm -rf "$root"
   return "$status"
 }
 
-@test "README client-aware after-new-window hook examples are exact and prompt-free" {
-  local examples="$BATS_TEST_TMPDIR/readme-after-new-window-hooks"
-  local expected="$BATS_TEST_TMPDIR/expected-after-new-window-hooks"
-  local hook_line
+run_old_client_tty_fixture() {
+  local root socket hook_file attached status=0
+  root="$(mktemp -d /tmp/pane-dash-readme-unsafe-hook.XXXXXX)"
+  socket="$root/tmux.sock"
+  hook_file="$root/after-new-window.conf"
+  cat >"$hook_file" <<'EOF'
+set-hook -g after-new-window 'if-shell -F "#{client_tty}" "command-prompt -I \"#{window_name}\" \"rename-window %%\""'
+EOF
+
+  scratch_tmux() { command tmux -f /dev/null -S "$socket" "$@"; }
+  run_bounded scratch_tmux new-session -d -s base 'exec cat' || status=$?
+  if [ "$status" -eq 0 ]; then
+    run_bounded scratch_tmux source-file "$hook_file" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    run_in_pty env TMUX= TERM=xterm tmux -f /dev/null -S "$socket" attach-session -t base >/dev/null 2>&1 &
+    attached=$!
+    wait_for_attached_client "$socket" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    if run_bounded run_in_pty env TMUX= tmux -f /dev/null -S "$socket" new-window -d -P -F '#{pane_id}' -t base >/dev/null; then
+      status=1
+    else
+      [ "$?" -eq 124 ] || status=1
+    fi
+  fi
+
+  [ -z "${attached:-}" ] || kill "$attached" 2>/dev/null || true
+  run_bounded scratch_tmux kill-server >/dev/null 2>&1 || true
+  rm -rf "$root"
+  return "$status"
+}
+
+@test "README manual prompt binding is exact, prompt-free for automation, and rejects client predicates" {
+  local examples="$BATS_TEST_TMPDIR/readme-after-new-window-guidance"
+  local expected="$BATS_TEST_TMPDIR/expected-after-new-window-guidance"
 
   cat >"$expected" <<'EOF'
-set-hook -g after-new-window 'if-shell -F "#{client_tty}" "command-prompt -I \"#{window_name}\" \"rename-window %%\""'
-set-hook -g after-new-window "if-shell -F '#{!=:#{client_tty},}' 'command-prompt -I \"#{window_name}\" \"rename-window %%\"'"
+set-hook -gu after-new-window
+bind-key c new-window \; command-prompt -I "#{window_name}" "rename-window %%"
 EOF
-  awk '/^set-hook -g after-new-window / { print }' "$README" >"$examples"
+  awk '/^set-hook -gu after-new-window$|^bind-key c new-window \\; command-prompt -I "#\{window_name\}" "rename-window %%"$/ { print }' "$README" >"$examples"
   diff -u "$expected" "$examples"
 
-  while IFS= read -r hook_line; do
-    run_readme_hook_example "$hook_line"
-  done <"$examples"
+  run_readme_hook_example "$(cat "$examples")"
+  run_old_client_tty_fixture
 }

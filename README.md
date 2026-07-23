@@ -249,24 +249,24 @@ selection_bg = "light_cyan"
 
 Synchronous interactive `after-*` hooks can block a noninteractive one-shot tmux
 client after tmux has already applied the requested mutation and emitted machine
-output. Condition interactive commands such as `command-prompt` on an attached
-client's terminal:
+output. They are therefore incompatible with automation. Do not use
+`client_*` formats to condition them: when an attached client exists, tmux can
+resolve both a PTY-backed one-shot `new-window` and a manual prefix binding to
+that same best attached client.
+
+Move the interactive rename prompt out of the hook and into the manual binding:
 
 ```tmux
-set-hook -g after-new-window 'if-shell -F "#{client_tty}" "command-prompt -I \"#{window_name}\" \"rename-window %%\""'
+set-hook -gu after-new-window
+bind-key c new-window \; command-prompt -I "#{window_name}" "rename-window %%"
 ```
 
-Operators who prefer an explicit nonempty predicate can use:
-
-```tmux
-set-hook -g after-new-window "if-shell -F '#{!=:#{client_tty},}' 'command-prompt -I \"#{window_name}\" \"rename-window %%\"'"
-```
-
-In this use, `#{client_tty}` is nonempty only for an attached interactive
-client. `%%` is the literal percent required by `command-prompt`; the quoting
-must preserve format expansion for tmux rather than the shell. pane-dash does
-not inspect, detect, disable, suppress, or rewrite hooks: the operator owns
-hook policy.
+Adapt `c` if you use a custom new-window key. External dashboard commands now
+create windows without running a prompt. `%%` is the literal percent required
+by `command-prompt`. pane-dash never detects, disables, suppresses, rewrites,
+or restores hooks: the operator owns hook policy. For a temporary smoke test,
+removing and later restoring the original hook requires operator approval.
+`command-prompt -b` can contend with the popup and is not recommended.
 
 If creation times out after parser-proven stage-1 pane output, pane-dash
 preserves and reconciles that real pane when present. Tagging never started, so
