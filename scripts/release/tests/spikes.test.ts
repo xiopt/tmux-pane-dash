@@ -1,11 +1,19 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   type CommandRunner,
+  normalizeOpenCodeVersion,
+  assertOpenCodeRegistryRequests,
+  assertOpenCodeCleanupDelayState,
+  assertNoOwnedTmuxProcess,
+  parseOpenCodePluginSpec,
   requiredSpikeChecks,
+  runOpenCodeVersion,
   runMuslSpike,
+  tmuxWrapperScript,
+  validateTmuxBinaryPath,
 } from "../spikes"
 
 type Invocation = {
@@ -68,6 +76,84 @@ test("requires both musl targets before later spike consumers", () => {
     "x86_64-unknown-linux-musl:elf-static-execution-tmux",
     "opencode-1.17.20:scoped-exact-install-load-status-cleanup",
   ])
+})
+
+test("normalizes only an exact OpenCode v?semver line", () => {
+  expect(normalizeOpenCodeVersion("1.17.20\n")).toBe("1.17.20")
+  expect(normalizeOpenCodeVersion("v1.17.20\n")).toBe("1.17.20")
+  for (const invalid of ["1.17.20", "1.17.20\r\n", "1.17.20\nextra\n", "OpenCode 1.17.20\n", "1.17\n"]) {
+    expect(() => normalizeOpenCodeVersion(invalid)).toThrow("exact v?semver")
+  }
+})
+
+test("reads an absolute OpenCode binary through the bounded process seam", async () => {
+  const invocations: Invocation[] = []
+  const run: CommandRunner = async (argv, options) => {
+    invocations.push({ argv, options })
+    return { code: 0, stdout: "v1.17.20\n", stderr: "" }
+  }
+
+  await expect(runOpenCodeVersion("/opt/opencode", run)).resolves.toBe("1.17.20")
+  expect(invocations).toEqual([{ argv: ["/opt/opencode", "--version"], options: { timeoutMs: 5_000, signal: undefined } }])
+  await expect(runOpenCodeVersion("opencode", run)).rejects.toThrow("absolute")
+})
+
+test("parses only the exact scoped OpenCode plugin registry spec", () => {
+  expect(parseOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.0")).toEqual({
+    name: "@xiopt/pane-dash-opencode",
+    rawSpec: "0.1.0",
+  })
+  for (const invalid of ["pane-dash-opencode@0.1.0", "@xiopt/pane-dash-opencode", "@xiopt/pane-dash-opencode@v0.1.0", "@xiopt/pane-dash-opencode@0.1"]) {
+    expect(() => parseOpenCodePluginSpec(invalid)).toThrow("exact scoped package")
+  }
+})
+
+test("accepts only the local companion and scoped-plugin registry inventory", () => {
+  const origin = "http://127.0.0.1:54321"
+  expect(() => assertOpenCodeRegistryRequests([
+    "/@opencode-ai%2fplugin",
+    "/@xiopt%2fpane-dash-opencode",
+    "/%40opencode-ai%2Fplugin/-/plugin-1.17.20.tgz",
+    "/%40xiopt%2Fpane-dash-opencode/-/pane-dash-opencode-0.1.0.tgz",
+  ], origin)).not.toThrow()
+  expect(() => assertOpenCodeRegistryRequests(["/@xiopt%2fpane-dash-opencode", "/unexpected"], origin)).toThrow("unexpected local registry request")
+})
+
+test("observes a nonempty status and fresh numeric heartbeat while cleanup is blocked", () => {
+  expect(() => assertOpenCodeCleanupDelayState("idle", "1784896896", 1_784_896_900)).not.toThrow()
+  expect(() => assertOpenCodeCleanupDelayState("", "1784896896", 1_784_896_900)).toThrow("status")
+  expect(() => assertOpenCodeCleanupDelayState("idle", "nextHeartbeat", 1_784_896_900)).toThrow("fresh")
+  expect(() => assertOpenCodeCleanupDelayState("idle", "1784896800", 1_784_896_900)).toThrow("fresh")
+})
+
+test("requires the owned tmux server probe to report no process", () => {
+  expect(() => assertNoOwnedTmuxProcess({ code: 1, stdout: "", stderr: "no server running" })).not.toThrow()
+  expect(() => assertNoOwnedTmuxProcess({ code: 0, stdout: "opencode\n", stderr: "" })).toThrow("owned tmux process")
+})
+
+test("requires an absolute tmux binary and embeds it in the cleanup wrapper", () => {
+  expect(() => validateTmuxBinaryPath(undefined)).toThrow("TMUX_BIN required")
+  expect(() => validateTmuxBinaryPath("tmux")).toThrow("absolute")
+  const wrapper = tmuxWrapperScript("/opt/homebrew/bin/tmux", "pd-12345678", "/tmp/calls", "/tmp/done")
+  expect(wrapper).toContain("exec '/opt/homebrew/bin/tmux' -L 'pd-12345678'")
+  expect(wrapper).toContain("/tmp/calls")
+  expect(wrapper).toContain("[ -f '/tmp/done' ]")
+  expect(wrapper).toContain('[ "$#" -eq 5 ] && [ "$1" = set-option ] && [ "$2" = -pu ]')
+})
+
+test("normalizes an OpenCode binary version through the CLI", async () => {
+  const binary = join(root, "opencode")
+  await writeFile(binary, "#!/bin/sh\nprintf 'v1.17.20\\n'\n")
+  await chmod(binary, 0o700)
+  const child = Bun.spawn([process.execPath, join(process.cwd(), "scripts/release/spikes.ts"), "--normalize-opencode-version", binary], {
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+
+  expect(code).toBe(0)
+  expect(stdout).toBe("1.17.20\n")
+  expect(stderr).toBe("")
 })
 
 test("builds x86_64 only with target-derived pinned images and offline network", async () => {

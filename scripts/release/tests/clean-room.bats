@@ -5,6 +5,10 @@ setup() {
   ambient="$BATS_TEST_TMPDIR/ambient"
   mkdir -p "$ambient/home" "$ambient/xdg" "$ambient/cache" "$ambient/npm" "$ambient/bun" "$ambient/tmux"
   printf 'unchanged\n' > "$ambient/home/sentinel"
+  fake_tmux="$BATS_TEST_TMPDIR/tmux"
+  printf '#!/bin/sh\nprintf "tmux 3.7\\n"\n' > "$fake_tmux"
+  chmod +x "$fake_tmux"
+  export TMUX_BIN="$fake_tmux"
 }
 
 @test "requires a command after --" {
@@ -40,6 +44,12 @@ setup() {
   [[ "$output" == *"absolute executable"* ]]
 }
 
+@test "requires an absolute tmux binary for every clean-room command" {
+  run env -u TMUX_BIN "$repo_root/scripts/release/clean-room.sh" -- true
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"TMUX_BIN required"* ]]
+}
+
 @test "preserves only absolute pinned tool paths" {
   fake="$BATS_TEST_TMPDIR/opencode"
   printf '#!/bin/sh\nexit 0\n' > "$fake"
@@ -47,5 +57,10 @@ setup() {
   run env OPENCODE_1_17_20_BIN="$fake" "$repo_root/scripts/release/clean-room.sh" -- sh -c 'test "$OPENCODE_1_17_20_BIN" = "$EXPECTED"'
   [ "$status" -eq 1 ]
   run env EXPECTED="$fake" OPENCODE_1_17_20_BIN="$fake" "$repo_root/scripts/release/clean-room.sh" -- sh -c 'test "$OPENCODE_1_17_20_BIN" = "$EXPECTED"'
+  [ "$status" -eq 0 ]
+}
+
+@test "uses a short unique tmux socket name for macOS unix-socket limits" {
+  run "$repo_root/scripts/release/clean-room.sh" -- sh -c 'case "$PANE_DASH_TMUX_SOCKET" in pd-????????) [ "${#PANE_DASH_TMUX_SOCKET}" -le 11 ] ;; *) exit 1 ;; esac'
   [ "$status" -eq 0 ]
 }
