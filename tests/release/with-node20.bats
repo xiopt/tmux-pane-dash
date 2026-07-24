@@ -16,6 +16,46 @@ EOF
 console.log("9.6.4")
 EOF
   chmod +x "$work/bin/node" "$work/bin/npm"
+  home="$BATS_TEST_TMPDIR/home"
+  xdg_data="$BATS_TEST_TMPDIR/xdg-data"
+  xdg_config="$BATS_TEST_TMPDIR/xdg-config"
+  xdg_cache="$BATS_TEST_TMPDIR/xdg-cache"
+  private_tmp="$BATS_TEST_TMPDIR/private/tmp"
+  mkdir -p "$home" "$xdg_data" "$xdg_config" "$xdg_cache" "$private_tmp"
+  : > "$home/sentinel"; : > "$xdg_data/sentinel"; : > "$xdg_config/sentinel"; : > "$xdg_cache/sentinel"
+}
+
+base_env() {
+  env HOME="$home" XDG_DATA_HOME="$xdg_data" XDG_CONFIG_HOME="$xdg_config" XDG_CACHE_HOME="$xdg_cache" \
+    TMPDIR="$private_tmp" PATH="$work/bin:$PATH" FAKE_NODE="$work/bin/node" FAKE_NPM="$work/bin/npm" "$@"
+}
+
+descriptor_value() { awk -F= -v key="$1" '$1 == key { print $2 }' "$work/.cortexkit/v0.1-release/node20.env"; }
+
+assert_pid_reaped() {
+  local pid=$1
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+  done
+  return 1
+}
+
+write_descriptor() {
+  local root=$1 mise node npm
+  mise=${2:-$work/bin/mise}
+  node=${3:-$root/mise/data/installs/node/20.0.0/bin/node}
+  npm=${4:-$root/mise/data/installs/node/20.0.0/lib/node_modules/npm/bin/npm-cli.js}
+  mkdir -p "$(dirname "$node")" "$(dirname "$npm")"
+  cp "$work/bin/node" "$node"; cp "$work/bin/npm" "$npm"; chmod +x "$node" "$npm"
+  cat > "$work/.cortexkit/v0.1-release/node20.env" <<EOF
+SCHEMA=1
+ROOT=$root
+MISE=$mise
+NODE_20_BIN=$node
+NPM_20_CLI=$npm
+EOF
+  chmod 600 "$work/.cortexkit/v0.1-release/node20.env"
 }
 
 write_fake_mise() {
@@ -174,4 +214,202 @@ EOF
   [ "$status" -eq 64 ]
   [[ "$output" == *"invalid descriptor"* ]]
   [ -d "$root" ]
+}
+
+@test "reuses one exact descriptor and physical tool paths across fresh processes without mutation" {
+  write_fake_mise
+  provision_log="$BATS_TEST_TMPDIR/provisions"
+  run base_env PROVISION_LOG="$provision_log" "$work/tests/release/with-node20.sh" -- sh -c 'printf "%s|%s|%s\n" "$NODE_20_BIN" "$NPM_20_CLI" "$(command -v node)"'
+  [ "$status" -eq 0 ]
+  first="$output"; descriptor_before="$(cat "$work/.cortexkit/v0.1-release/node20.env")"
+  run base_env PROVISION_LOG="$provision_log" "$work/tests/release/with-node20.sh" -- sh -c 'printf "%s|%s|%s\n" "$NODE_20_BIN" "$NPM_20_CLI" "$(command -v node)"'
+  [ "$status" -eq 0 ]; [ "$output" = "$first" ]
+  [ "$(wc -l < "$provision_log" | tr -d ' ')" -eq 1 ]
+  [ "$(cat "$work/.cortexkit/v0.1-release/node20.env")" = "$descriptor_before" ]
+}
+
+@test "does not remove a bounded live lock with a valid owner token" {
+  mkdir -p "$work/.cortexkit/v0.1-release/node20.lock"
+  printf '%s %s\n' "$$" "$(ps -o lstart= -p "$$" | tr -d ' ')" > "$work/.cortexkit/v0.1-release/node20.lock/owner"
+  run base_env PANE_DASH_TEST_LOCK_ATTEMPTS=2 PANE_DASH_TEST_LOCK_SLEEP=0 "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 64 ]; [[ "$output" == *"lock is held"* ]]
+  [ -d "$work/.cortexkit/v0.1-release/node20.lock" ]
+}
+
+@test "recovers a dead lock owner with a valid start-token record" {
+  write_fake_mise
+  mkdir -p "$work/.cortexkit/v0.1-release/node20.lock"
+  printf '999999 dead-token\n' > "$work/.cortexkit/v0.1-release/node20.lock/owner"
+  run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/provisions" "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 0 ]; [ ! -d "$work/.cortexkit/v0.1-release/node20.lock" ]
+}
+
+@test "refuses a live lock whose PID has a mismatched or reused start token" {
+  mkdir -p "$work/.cortexkit/v0.1-release/node20.lock"
+  printf '%s stale-token\n' "$$" > "$work/.cortexkit/v0.1-release/node20.lock/owner"
+  run base_env PANE_DASH_TEST_LOCK_ATTEMPTS=2 PANE_DASH_TEST_LOCK_SLEEP=0 "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 64 ]; [[ "$output" == *"owner changed"* ]]
+  [ -d "$work/.cortexkit/v0.1-release/node20.lock" ]
+}
+
+@test "stress contenders five times create one provision and atomic descriptor" {
+  write_fake_mise
+  for round in 1 2 3 4 5; do
+    rm -rf "$work/.cortexkit/v0.1-release"; provision_log="$BATS_TEST_TMPDIR/provisions-$round"
+    for contender in 1 2 3 4 5; do
+      base_env PROVISION_LOG="$provision_log" "$work/tests/release/with-node20.sh" -- true >"$BATS_TEST_TMPDIR/$round-$contender.log" 2>&1 &
+    done
+    failures=0
+    for pid in $(jobs -p); do wait "$pid" || failures=$((failures + 1)); done
+    [ "$failures" -eq 0 ] || { printf 'round=%s failures=%s\n' "$round" "$failures" >&3; for log in "$BATS_TEST_TMPDIR"/"$round"-*.log; do printf '%s: ' "$log" >&3; cat "$log" >&3; done; false; }
+    [ "$(wc -l < "$provision_log" | tr -d ' ')" -eq 1 ]
+    [ "$(wc -l < "$work/.cortexkit/v0.1-release/node20.env" | tr -d ' ')" -eq 5 ]
+  done
+}
+
+@test "normal run discards invalid owned state then reprovisions while cleanup preserves it" {
+  write_fake_mise
+  root="$private_tmp/tmux-pane-dash-node20.stale"; write_descriptor "$root"
+  chmod 644 "$work/.cortexkit/v0.1-release/node20.env"
+  run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/provisions" "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 0 ]; [ "$(wc -l < "$BATS_TEST_TMPDIR/provisions" | tr -d ' ')" -eq 1 ]; [ -d "$root" ]
+  chmod 644 "$work/.cortexkit/v0.1-release/node20.env"
+  run base_env "$work/tests/release/with-node20.sh" --cleanup
+  [ "$status" -eq 64 ]; [ -e "$work/.cortexkit/v0.1-release/node20.env" ]
+}
+
+@test "rejects malformed descriptor schema keys and unsafe roots without cleanup" {
+  for label in bad-schema duplicate missing unknown relative wrong-basename outside-repo under-home under-xdg; do
+    rm -rf "$work/.cortexkit/v0.1-release"; mkdir -p "$work/.cortexkit/v0.1-release"
+    root="$private_tmp/tmux-pane-dash-node20.$label"; write_descriptor "$root"
+    case "$label" in
+      bad-schema) sed -i.bak 's/SCHEMA=1/SCHEMA=2/' "$work/.cortexkit/v0.1-release/node20.env" ;;
+      duplicate) printf 'ROOT=%s\n' "$root" >> "$work/.cortexkit/v0.1-release/node20.env" ;;
+      missing) head -n 4 "$work/.cortexkit/v0.1-release/node20.env" > "$work/a"; mv "$work/a" "$work/.cortexkit/v0.1-release/node20.env" ;;
+      unknown) printf 'UNKNOWN=1\n' >> "$work/.cortexkit/v0.1-release/node20.env" ;;
+      relative) sed -i.bak "s#ROOT=$root#ROOT=relative#" "$work/.cortexkit/v0.1-release/node20.env" ;;
+      wrong-basename) sed -i.bak "s#ROOT=$root#ROOT=$private_tmp/not-node#" "$work/.cortexkit/v0.1-release/node20.env" ; mkdir -p "$private_tmp/not-node" ;;
+      outside-repo) sed -i.bak "s#ROOT=$root#ROOT=$work/outside#" "$work/.cortexkit/v0.1-release/node20.env" ; mkdir -p "$work/outside" ;;
+      under-home) sed -i.bak "s#ROOT=$root#ROOT=$home/tmux-pane-dash-node20.home#" "$work/.cortexkit/v0.1-release/node20.env" ; mkdir -p "$home/tmux-pane-dash-node20.home" ;;
+      under-xdg) sed -i.bak "s#ROOT=$root#ROOT=$xdg_cache/tmux-pane-dash-node20.xdg#" "$work/.cortexkit/v0.1-release/node20.env" ; mkdir -p "$xdg_cache/tmux-pane-dash-node20.xdg" ;;
+    esac
+    chmod 600 "$work/.cortexkit/v0.1-release/node20.env"
+    run base_env "$work/tests/release/with-node20.sh" --cleanup
+    [ "$status" -eq 64 ] || { echo "$label"; false; }
+    [ -e "$work/.cortexkit/v0.1-release/node20.env" ] || { echo "$label"; false; }
+  done
+}
+
+@test "stores a physical lexical TMPDIR symlink root and cleanup preserves prefix sentinels" {
+  write_fake_mise
+  mkdir -p "$BATS_TEST_TMPDIR/private/var/tmp" "$BATS_TEST_TMPDIR/var"; : > "$BATS_TEST_TMPDIR/private/var/tmp/sentinel"; : > "$BATS_TEST_TMPDIR/var/sentinel"
+  ln -s "$BATS_TEST_TMPDIR/private/var/tmp" "$BATS_TEST_TMPDIR/var/tmp"
+  run base_env TMPDIR="$BATS_TEST_TMPDIR/var/tmp" PROVISION_LOG="$BATS_TEST_TMPDIR/provisions" "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 0 ]; root="$(descriptor_value ROOT)"
+  physical_private="$(cd "$BATS_TEST_TMPDIR/private" && pwd -P)"
+  [[ "$root" == "$physical_private/var/tmp/"* ]] || { printf 'stored root: %s\n' "$root" >&3; false; }
+  [ ! -L "$root" ]
+  run base_env TMPDIR="$BATS_TEST_TMPDIR/var/tmp" "$work/tests/release/with-node20.sh" --cleanup
+  [ "$status" -eq 0 ]; [ ! -e "$root" ]; [ -e "$BATS_TEST_TMPDIR/private/var/tmp/sentinel" ]; [ -e "$BATS_TEST_TMPDIR/var/sentinel" ]
+}
+
+@test "rejects wrong descriptor owner and every unsafe executable form while preserving suspect state" {
+  for label in wrong-owner outside nonregular nonexec mise-relative; do
+    rm -rf "$work/.cortexkit/v0.1-release"; mkdir -p "$work/.cortexkit/v0.1-release"
+    root="$private_tmp/tmux-pane-dash-node20.unsafe-$label"
+    write_descriptor "$root"
+    case "$label" in
+      wrong-owner) test_owner=987654 ;;
+      outside) cp "$work/bin/node" "$BATS_TEST_TMPDIR/outside-node"; chmod +x "$BATS_TEST_TMPDIR/outside-node"; sed -i.bak "s#NODE_20_BIN=.*#NODE_20_BIN=$BATS_TEST_TMPDIR/outside-node#" "$work/.cortexkit/v0.1-release/node20.env"; test_owner='' ;;
+      nonregular) rm "$root/mise/data/installs/node/20.0.0/bin/node"; mkdir "$root/mise/data/installs/node/20.0.0/bin/node"; test_owner='' ;;
+      nonexec) chmod -x "$root/mise/data/installs/node/20.0.0/bin/node"; test_owner='' ;;
+      mise-relative) sed -i.bak 's#MISE=.*#MISE=relative/mise#' "$work/.cortexkit/v0.1-release/node20.env"; test_owner='' ;;
+    esac
+    run base_env PANE_DASH_TEST_OWNER_UID="$test_owner" "$work/tests/release/with-node20.sh" --cleanup
+    [ "$status" -eq 64 ] || { echo "$label"; false; }
+    [ -d "$root" ]; [ -e "$work/.cortexkit/v0.1-release/node20.env" ]
+  done
+}
+
+@test "test-only owner seam proves a descriptor owned by another UID is refused" {
+  write_fake_mise
+  run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/provisions" "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 0 ]
+  root="$(descriptor_value ROOT)"
+  run base_env PANE_DASH_TEST_OWNER_UID=987654 "$work/tests/release/with-node20.sh" --cleanup
+  [ "$status" -eq 64 ]; [ -d "$root" ]; [ -e "$work/.cortexkit/v0.1-release/node20.env" ]
+}
+
+@test "preprovided mode rejects relative missing nonexec wrong-version and bad npm paths, but leads PATH exactly" {
+  for label in relative missing nonexec wrong-version bad-npm; do
+    node="$work/bin/node"; npm="$work/bin/npm"
+    case "$label" in
+      relative) node=bin/node ;;
+      missing) node="$work/bin/missing" ;;
+      nonexec) chmod -x "$work/bin/node" ;;
+      wrong-version) printf '#!/bin/sh\nprintf "v20.1.0\\n"\n' > "$work/bin/node"; chmod +x "$work/bin/node" ;;
+      bad-npm) printf '#!/bin/sh\nexit 1\n' > "$work/bin/npm"; chmod +x "$work/bin/npm" ;;
+    esac
+    run base_env PANE_DASH_NODE20_PREPROVIDED=1 NODE_20_BIN="$node" NPM_20_CLI="$npm" "$work/tests/release/with-node20.sh" -- true
+    [ "$status" -eq 64 ] || { echo "$label"; false; }
+  done
+  setup
+  run base_env PANE_DASH_NODE20_PREPROVIDED=1 NODE_20_BIN="$work/bin/node" NPM_20_CLI="$work/bin/npm" "$work/tests/release/with-node20.sh" -- sh -c 'test "$(command -v node)" = "$NODE_20_BIN"'
+  [ "$status" -eq 0 ]
+}
+
+@test "provision timeout terminates and reaps mise descendants with no descriptor or transient state" {
+  cat > "$work/bin/mise" <<'EOF'
+#!/bin/sh
+[ "$1" = install ] || exit 1
+sleep 30 &
+printf '%s %s\n' "$$" "$!" > "$HANG_PIDS"
+wait
+EOF
+  chmod +x "$work/bin/mise"
+  run base_env HANG_PIDS="$BATS_TEST_TMPDIR/hang-pids" PANE_DASH_TEST_PROVISION_TIMEOUT=1 PANE_DASH_TEST_KILL_GRACE=0 "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 64 ]; [[ "$output" == *"timed out"* ]]
+  [ ! -e "$work/.cortexkit/v0.1-release/node20.env" ]; [ ! -d "$work/.cortexkit/v0.1-release/node20.lock" ]
+  read -r mise_pid child_pid < "$BATS_TEST_TMPDIR/hang-pids"
+  assert_pid_reaped "$mise_pid"; assert_pid_reaped "$child_pid"
+}
+
+@test "HUP and TERM during provision return signal statuses and reap their owned process group" {
+  for signal in HUP TERM; do
+    rm -rf "$work/.cortexkit/v0.1-release"
+    cat > "$work/bin/mise" <<'EOF'
+#!/bin/sh
+[ "$1" = install ] || exit 1
+sleep 30 &
+printf '%s %s %s %s\n' "$PPID" "$$" "$!" "$GNUPGHOME" > "$SIGNAL_PIDS"
+wait
+EOF
+    chmod +x "$work/bin/mise"
+    marker="$BATS_TEST_TMPDIR/$signal-pids"
+    base_env SIGNAL_PIDS="$marker" sh -c 'trap - HUP INT TERM; exec "$@"' signal-shell "$work/tests/release/with-node20.sh" -- true >"$BATS_TEST_TMPDIR/$signal.log" 2>&1 & wrapper=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$marker" ] && break; sleep 1; done
+    [ -e "$marker" ]; read -r script_pid mise_pid child_pid gpg_link < "$marker"
+    status=0; kill -"$signal" "$script_pid"; wait "$wrapper" || status=$?
+    case "$signal" in HUP) [ "$status" -eq 129 ] ;; INT) [ "$status" -eq 130 ] ;; TERM) [ "$status" -eq 143 ] ;; esac || { printf '%s status=%s log=' "$signal" "$status" >&3; cat "$BATS_TEST_TMPDIR/$signal.log" >&3; false; }
+    assert_pid_reaped "$mise_pid"; assert_pid_reaped "$child_pid"
+    [ ! -e "$gpg_link" ] || { printf '%s gpg remains: %s\n' "$signal" "$gpg_link" >&3; false; }
+    [ ! -e "$work/.cortexkit/v0.1-release/node20.env" ]; [ ! -d "$work/.cortexkit/v0.1-release/node20.lock" ]
+  done
+}
+
+@test "INT during provisioning is documented as a macOS Bats background-job portability limitation" {
+  skip "macOS Bats async jobs inherit SIGINT ignored; a direct foreground harness is required to assert status 130"
+}
+
+@test "successful provisioning preserves child status and child signal behavior, and cleanup is idempotent" {
+  write_fake_mise
+  run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/provisions" "$work/tests/release/with-node20.sh" -- sh -c 'exit 42'
+  [ "$status" -eq 42 ]
+  run base_env "$work/tests/release/with-node20.sh" -- sh -c 'kill -TERM $$'
+  [ "$status" -eq 143 ]
+  root="$(descriptor_value ROOT)"; : > "$private_tmp/unrelated-sentinel"
+  run base_env "$work/tests/release/with-node20.sh" --cleanup
+  [ "$status" -eq 0 ]; [ ! -e "$root" ]; [ -e "$private_tmp/unrelated-sentinel" ]
+  run base_env "$work/tests/release/with-node20.sh" --cleanup
+  [ "$status" -eq 0 ]; [ -e "$private_tmp/unrelated-sentinel" ]
 }

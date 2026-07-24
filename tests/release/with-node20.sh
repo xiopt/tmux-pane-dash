@@ -11,7 +11,14 @@ fail() { printf 'with-node20: %s\n' "$*" >&2; exit 64; }
 canonical_dir() { (cd "$1" && pwd -P); }
 stat_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
 stat_uid() { stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1"; }
-owner_uid() { id -u; }
+owner_uid() {
+  if [ -n "${PANE_DASH_TEST_OWNER_UID:-}" ]; then
+    [[ "$PANE_DASH_TEST_OWNER_UID" =~ ^[0-9]+$ ]] || fail 'invalid test owner UID'
+    printf '%s\n' "$PANE_DASH_TEST_OWNER_UID"
+  else
+    id -u
+  fi
+}
 
 temp_prefix=$(canonical_dir "${TMPDIR:-/tmp}") || fail 'TMPDIR must name an existing directory'
 
@@ -103,7 +110,9 @@ validate_descriptor() {
 
 pid_start_token() { ps -o lstart= -p "$1" 2>/dev/null | tr -d ' '; }
 acquire_lock() {
-  local tries=0 owner_pid owner_token current_token
+  local tries=0 owner_pid owner_token current_token lock_attempt_limit=${PANE_DASH_TEST_LOCK_ATTEMPTS:-600} lock_sleep=${PANE_DASH_TEST_LOCK_SLEEP:-1}
+  [[ "$lock_attempt_limit" =~ ^[1-9][0-9]*$ ]] || fail 'invalid test lock attempt limit'
+  [[ "$lock_sleep" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail 'invalid test lock sleep'
   mkdir -p "$state_dir"
   while ! mkdir "$lock" 2>/dev/null; do
     owner_pid='' owner_token=''
@@ -112,11 +121,11 @@ acquire_lock() {
     fi
     if [ -z "$owner_pid" ] && [ -z "$owner_token" ]; then
       tries=$((tries + 1))
-      if [ "$tries" -ge 5 ]; then
+      if [ "$tries" -ge "$lock_attempt_limit" ]; then
         rm -rf -- "$lock"
         tries=0
       else
-        sleep 1
+        sleep "$lock_sleep"
       fi
       continue
     elif [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
@@ -127,8 +136,8 @@ acquire_lock() {
       continue
     fi
     tries=$((tries + 1))
-    [ "$tries" -lt 5 ] || fail 'Node 20 provisioning lock is held'
-    sleep 1
+    [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning lock is held'
+    sleep "$lock_sleep"
   done
   printf '%s %s\n' "$$" "$(pid_start_token "$$")" > "$lock/owner"
 }
@@ -172,7 +181,8 @@ write_descriptor() {
 }
 
 provision() {
-  local mise root node npm gpg_link install_pid elapsed=0
+  local mise root node npm gpg_link install_pid elapsed=0 provision_timeout=${PANE_DASH_TEST_PROVISION_TIMEOUT:-600}
+  [[ "$provision_timeout" =~ ^[1-9][0-9]*$ ]] || fail 'invalid test provision timeout'
   mise=$(command -v mise || true)
   case "$mise" in /*) [ -x "$mise" ] || fail 'mise is not executable' ;; *) fail 'mise is required to provision Node 20.0.0' ;; esac
   root=$(mktemp -d "${TMPDIR:-/tmp}/tmux-pane-dash-node20.XXXXXX")
@@ -193,7 +203,7 @@ provision() {
   set -m; "$mise" install node@20.0.0 & install_pid=$!; set +m
   install_pgid=$install_pid
   while kill -0 "$install_pid" 2>/dev/null; do
-    [ "$elapsed" -lt 600 ] || { stop_incomplete_provision; fail 'Node provision timed out'; }
+    [ "$elapsed" -lt "$provision_timeout" ] || { stop_incomplete_provision; fail 'Node provision timed out'; }
     sleep 1; elapsed=$((elapsed + 1))
   done
   wait "$install_pid" || { stop_incomplete_provision; fail 'mise failed to install Node 20.0.0'; }
