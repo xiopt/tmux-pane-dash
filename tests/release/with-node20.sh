@@ -5,8 +5,6 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 state_dir="$repo_root/.cortexkit/v0.1-release"
 descriptor="$state_dir/node20.env"
-lock="$state_dir/node20.lock"
-recovery_lock="$state_dir/node20.recovery.lock"
 
 fail() { printf 'with-node20: %s\n' "$*" >&2; exit 64; }
 canonical_dir() { (cd "$1" && pwd -P); }
@@ -131,174 +129,18 @@ parse_safe_discard_root() {
 
 pid_start_token() { ps -o lstart= -p "$1" 2>/dev/null | tr -d ' '; }
 
-lock_owned=0
-lock_token=''
-recovery_lock_owned=0
-recovery_lock_token=''
-recovery_lock_temp=''
-recovery_owner_pid=''
-recovery_owner_token=''
-read_complete_lock_owner() {
-  local owner_pid owner_token extra
-  [ -f "$lock/owner" ] || return 1
-  owner_pid='' owner_token='' extra=''
-  IFS=' ' read -r owner_pid owner_token extra < "$lock/owner" || true
-  [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && [ -n "$owner_token" ] && [ -z "$extra" ]
-}
-
-read_complete_recovery_owner() {
-  local extra
-  [ -f "$recovery_lock" ] && [ ! -L "$recovery_lock" ] || return 1
-  recovery_owner_pid='' recovery_owner_token='' extra=''
-  IFS=' ' read -r recovery_owner_pid recovery_owner_token extra < "$recovery_lock" || true
-  [[ "$recovery_owner_pid" =~ ^[1-9][0-9]*$ ]] && [ -n "$recovery_owner_token" ] && [ -z "$extra" ]
-}
-
-lock_owner_is_dead() {
-  local owner_pid=$1 owner_token=$2
-  [ -n "$owner_token" ] && ! kill -0 "$owner_pid" 2>/dev/null
-}
-
-wait_for_recovery_lock() {
-  local tries=0 owner_pid owner_token current_token lock_attempt_limit=${PANE_DASH_TEST_LOCK_ATTEMPTS:-600} lock_sleep=${PANE_DASH_TEST_LOCK_SLEEP:-1}
-  while [ -e "$recovery_lock" ] || [ -L "$recovery_lock" ]; do
-    if ! read_complete_recovery_owner; then
-      [ -e "$recovery_lock" ] || [ -L "$recovery_lock" ] || continue
-      tries=$((tries + 1))
-      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner record is incomplete'
-      sleep "$lock_sleep"
-      continue
-    fi
-    owner_pid=$recovery_owner_pid owner_token=$recovery_owner_token
-    if lock_owner_is_dead "$owner_pid" "$owner_token"; then
-      tries=$((tries + 1))
-      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner is stale'
-      sleep "$lock_sleep"
-      continue
-    fi
-    current_token=$(pid_start_token "$owner_pid")
-    if [ "$current_token" != "$owner_token" ]; then
-      tries=$((tries + 1))
-      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner changed'
-      sleep "$lock_sleep"
-      continue
-    fi
-    tries=$((tries + 1))
-    [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock is held'
-    sleep "$lock_sleep"
-  done
-}
-
-acquire_recovery_lock() {
-  local tries=0 owner_pid owner_token current_token lock_attempt_limit=${PANE_DASH_TEST_LOCK_ATTEMPTS:-600} lock_sleep=${PANE_DASH_TEST_LOCK_SLEEP:-1}
-  recovery_lock_token=$(pid_start_token "$$")
-  [ -n "$recovery_lock_token" ] || fail 'cannot identify Node 20 provisioning recovery lock owner'
-  recovery_lock_temp="$state_dir/node20.recovery.owner.$$.${recovery_lock_token}"
-  (umask 077; printf '%s %s\n' "$$" "$recovery_lock_token" > "$recovery_lock_temp")
-  while ! ln "$recovery_lock_temp" "$recovery_lock" 2>/dev/null; do
-    if ! read_complete_recovery_owner; then
-      [ -e "$recovery_lock" ] || [ -L "$recovery_lock" ] || continue
-      tries=$((tries + 1))
-      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner record is incomplete'
-      sleep "$lock_sleep"
-      continue
-    fi
-    owner_pid=$recovery_owner_pid owner_token=$recovery_owner_token
-    if lock_owner_is_dead "$owner_pid" "$owner_token"; then
-      tries=$((tries + 1))
-      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner is stale'
-      sleep "$lock_sleep"
-      continue
-    fi
-    current_token=$(pid_start_token "$owner_pid")
-    if [ "$current_token" != "$owner_token" ]; then
-      tries=$((tries + 1))
-      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner changed'
-      sleep "$lock_sleep"
-      continue
-    fi
-    tries=$((tries + 1))
-    [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock is held'
-    sleep "$lock_sleep"
-  done
-  recovery_lock_owned=1
-  rm -f -- "$recovery_lock_temp"
-  recovery_lock_temp=''
-}
-
-release_recovery_lock() {
-  local owner_pid owner_token
-  rm -f -- "$recovery_lock_temp"
-  recovery_lock_temp=''
-  [ "$recovery_lock_owned" -eq 1 ] || return 0
-  owner_pid='' owner_token=''
-  if read_complete_recovery_owner; then
-    owner_pid=$recovery_owner_pid owner_token=$recovery_owner_token
-    [ "$owner_pid" = "$$" ] && [ "$owner_token" = "$recovery_lock_token" ] && rm -f -- "$recovery_lock"
-  fi
-  recovery_lock_owned=0
-}
-
 acquire_lock() {
-  local tries=0 owner_pid owner_token current_token observed_owner lock_attempt_limit=${PANE_DASH_TEST_LOCK_ATTEMPTS:-600} lock_sleep=${PANE_DASH_TEST_LOCK_SLEEP:-1}
-  [[ "$lock_attempt_limit" =~ ^[1-9][0-9]*$ ]] || fail 'invalid test lock attempt limit'
-  [[ "$lock_sleep" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail 'invalid test lock sleep'
-  mkdir -p "$state_dir"
-  while true; do
-    wait_for_recovery_lock
-    if mkdir "$lock" 2>/dev/null; then
-      if [ -e "$recovery_lock" ]; then
-        rm -rf -- "$lock"
-        continue
-      fi
-      break
-    fi
-    if read_complete_lock_owner; then
-      IFS=' ' read -r owner_pid owner_token < "$lock/owner" || true
-      if lock_owner_is_dead "$owner_pid" "$owner_token"; then
-        observed_owner="$owner_pid $owner_token"
-        acquire_recovery_lock
-        if read_complete_lock_owner; then
-          IFS=' ' read -r owner_pid owner_token < "$lock/owner" || true
-          if [ "$owner_pid $owner_token" = "$observed_owner" ] && lock_owner_is_dead "$owner_pid" "$owner_token"; then
-            rm -rf -- "$lock"
-          fi
-        fi
-        release_recovery_lock
-        continue
-      fi
-      current_token=$(pid_start_token "$owner_pid")
-      [ -n "$owner_token" ] && [ "$current_token" = "$owner_token" ] || fail 'Node 20 provisioning lock owner changed'
-    fi
-    tries=$((tries + 1))
-    if [ "$tries" -ge "$lock_attempt_limit" ]; then
-      if read_complete_lock_owner; then
-        fail 'Node 20 provisioning lock is held'
-      fi
-      fail 'Node 20 provisioning lock owner record is incomplete'
-    fi
-    sleep "$lock_sleep"
-  done
-  lock_owned=1
-  lock_token=$(pid_start_token "$$")
-  [ -n "$lock_token" ] || fail 'cannot identify Node 20 provisioning lock owner'
-  printf '%s %s\n' "$$" "$lock_token" > "$lock/owner"
+  :
 }
 release_lock() {
-  local owner_pid owner_token
-  [ "$lock_owned" -eq 1 ] || return 0
-  owner_pid='' owner_token=''
-  if read_complete_lock_owner; then
-    IFS=' ' read -r owner_pid owner_token < "$lock/owner" || true
-    [ "$owner_pid" = "$$" ] && [ "$owner_token" = "$lock_token" ] && rm -rf -- "$lock"
-  fi
-  lock_owned=0
+  :
 }
 
 incomplete_root=''
 incomplete_gpg_link=''
 incomplete_descriptor_temp=''
 install_pgid=''
+guard_fd=''
 
 record_fault_resource() {
   [ -n "${PANE_DASH_TEST_FAULT_LOG:-}" ] || return 0
@@ -336,7 +178,6 @@ finish_owned_provision() {
   local status=$?
   trap - EXIT HUP INT TERM
   stop_incomplete_provision
-  release_recovery_lock
   release_lock
   exit "$status"
 }
@@ -358,6 +199,7 @@ write_descriptor() {
 
 provision() {
   local mise root node npm gpg_link install_pid elapsed=0 provision_timeout=${PANE_DASH_TEST_PROVISION_TIMEOUT:-600}
+  local isolated_home isolated_xdg_data isolated_xdg_config isolated_xdg_cache mise_data mise_cache mise_config
   [[ "$provision_timeout" =~ ^[1-9][0-9]*$ ]] || fail 'invalid test provision timeout'
   mise=$(command -v mise || true)
   case "$mise" in /*) [ -x "$mise" ] || fail 'mise is not executable' ;; *) fail 'mise is required to provision Node 20.0.0' ;; esac
@@ -366,11 +208,9 @@ provision() {
   incomplete_root=$root
   record_fault_resource root "$root"
   validate_root "$root" || { rm -rf -- "$root"; fail 'unsafe Node root'; }
-  export HOME="$root/home" XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME="$root/cache"
-  export MISE_DATA_DIR="$root/mise/data" MISE_CACHE_DIR="$root/mise/cache" MISE_CONFIG_DIR="$root/mise/config"
-  export MISE_GLOBAL_CONFIG_FILE="$root/mise/config/global.toml" MISE_SYSTEM_CONFIG_FILE="$root/mise/config/system.toml"
-  export MISE_DEFAULT_CONFIG_FILENAME="$root/mise/config/default-packages"
-  mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$MISE_DATA_DIR" "$MISE_CACHE_DIR" "$MISE_CONFIG_DIR" "$root/gnupg"
+  isolated_home="$root/home"; isolated_xdg_data="$root/data"; isolated_xdg_config="$root/config"; isolated_xdg_cache="$root/cache"
+  mise_data="$root/mise/data"; mise_cache="$root/mise/cache"; mise_config="$root/mise/config"
+  mkdir -p "$isolated_home" "$isolated_xdg_data" "$isolated_xdg_config" "$isolated_xdg_cache" "$mise_data" "$mise_cache" "$mise_config" "$root/gnupg"
   fault_after root-mkdir
   chmod 700 "$root/gnupg"
   gpg_link=$(mktemp -d /tmp/tmux-pane-dash-node20-gpg.XXXXXX)
@@ -379,8 +219,15 @@ provision() {
   incomplete_gpg_link=$gpg_link
   record_fault_resource gpg-link "$gpg_link"
   fault_after gpg-link
-  export GNUPGHOME="$gpg_link"
-  set -m; "$mise" install node@20.0.0 & install_pid=$!; set +m
+  set -m
+  (
+    exec /usr/bin/perl -e 'use POSIX (); my $fd = shift @ARGV; POSIX::close($fd) or die "close guard fd: $!\n"; exec @ARGV or die "exec mise: $!\n"' "$guard_fd" env HOME="$isolated_home" XDG_DATA_HOME="$isolated_xdg_data" XDG_CONFIG_HOME="$isolated_xdg_config" XDG_CACHE_HOME="$isolated_xdg_cache" \
+      MISE_DATA_DIR="$mise_data" MISE_CACHE_DIR="$mise_cache" MISE_CONFIG_DIR="$mise_config" \
+      MISE_GLOBAL_CONFIG_FILE="$mise_config/global.toml" MISE_SYSTEM_CONFIG_FILE="$mise_config/system.toml" \
+      MISE_DEFAULT_CONFIG_FILENAME="$mise_config/default-packages" GNUPGHOME="$gpg_link" \
+      "$mise" install node@20.0.0
+  ) & install_pid=$!
+  set +m
   install_pgid=$install_pid
   while kill -0 "$install_pid" 2>/dev/null; do
     [ "$elapsed" -lt "$provision_timeout" ] || { stop_incomplete_provision; fail 'Node provision timed out'; }
@@ -391,61 +238,157 @@ provision() {
   install_pgid=''
   rm -f -- "$gpg_link"
   incomplete_gpg_link=''
-  unset GNUPGHOME
-  node="$MISE_DATA_DIR/installs/node/20.0.0/bin/node"
-  npm="$MISE_DATA_DIR/installs/node/20.0.0/lib/node_modules/npm/bin/npm-cli.js"
+  node="$mise_data/installs/node/20.0.0/bin/node"
+  npm="$mise_data/installs/node/20.0.0/lib/node_modules/npm/bin/npm-cli.js"
   validate_tools "$node" "$npm" || { stop_incomplete_provision; fail 'mise did not provide exact Node 20.0.0 and npm'; }
   write_descriptor "$root" "$mise" "$node" "$npm"
   incomplete_root=''
 }
 
+result_node=''
+result_npm=''
+result_cleanup=''
+parse_result() {
+  local line key value count=0 result=$1
+  result_node='' result_npm=''
+  [ -f "$result" ] && [ ! -L "$result" ] || return 1
+  [ "$(stat_mode "$result")" = 600 ] && [ "$(stat_uid "$result")" = "$(owner_uid)" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    key=${line%%=*}; value=${line#*=}; [ "$key" != "$line" ] && [ -n "$value" ] || return 1
+    count=$((count + 1))
+    case "$key" in
+      SCHEMA) [ "$value" = 1 ] || return 1 ;;
+      NODE_20_BIN) [ -z "$result_node" ] || return 1; result_node=$value ;;
+      NPM_20_CLI) [ -z "$result_npm" ] || return 1; result_npm=$value ;;
+      *) return 1 ;;
+    esac
+  done < "$result"
+  [ "$count" -eq 3 ] && validate_tools "$result_node" "$result_npm"
+}
+
+write_result() {
+  local result=$1 temporary
+  temporary="$result.$$.tmp"
+  (umask 077; printf 'SCHEMA=1\nNODE_20_BIN=%s\nNPM_20_CLI=%s\n' "$descriptor_node" "$descriptor_npm" > "$temporary")
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$result"
+}
+
+run_guarded_prepare() {
+  local result status attempts=${PANE_DASH_TEST_LOCK_ATTEMPTS:-600} lock_sleep=${PANE_DASH_TEST_LOCK_SLEEP:-1}
+  local perl=/usr/bin/perl script_path
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || fail 'invalid test lock attempt limit'
+  [[ "$lock_sleep" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail 'invalid test lock sleep'
+  [ -x "$perl" ] || fail 'required /usr/bin/perl is unavailable'
+  [ "${PANE_DASH_TEST_PERL_UNSUPPORTED:-}" != 1 ] || fail 'required Perl flock capability is unavailable'
+  "$perl" -MFcntl=:flock -e 'exit((defined(&LOCK_EX) && defined(&LOCK_NB)) ? 0 : 1)' || fail 'required Perl flock capability is unavailable'
+  mkdir -p "$state_dir"
+  script_path="$(canonical_dir "$(dirname "${BASH_SOURCE[0]}")")/$(basename "${BASH_SOURCE[0]}")"
+  result=$(mktemp "$state_dir/.node20.result.XXXXXX") || fail 'cannot create Node result handshake'
+  chmod 600 "$result"
+  result_cleanup=$result
+  trap 'rm -f -- "${result_cleanup:-}"' EXIT HUP INT TERM
+  # shellcheck disable=SC2016 # Perl source intentionally contains $ expressions.
+  "$perl" -e '
+    use strict; use warnings; use Fcntl qw(:flock F_SETFD);
+    my ($path, $attempts, $sleep, $script, @command) = @ARGV;
+    open my $lock, q{<}, $path or die "with-node20: cannot open script lock: $!\n";
+    for (my $try = 0; $try < $attempts; ++$try) {
+      if (flock($lock, LOCK_EX | LOCK_NB)) {
+        fcntl($lock, F_SETFD, 0) or die "with-node20: cannot inherit script lock: $!\n";
+        $SIG{INT} = q{DEFAULT}; $SIG{HUP} = q{DEFAULT}; $SIG{TERM} = q{DEFAULT};
+        exec {$script} $script, q{--private-guard}, fileno($lock), @command;
+        die "with-node20: cannot exec guarded script: $!\n";
+      }
+      select undef, undef, undef, $sleep;
+    }
+    die "with-node20: Node 20 provisioning lock is held\n";
+  ' "$script_path" "$attempts" "$lock_sleep" "$script_path" prepare "$result"
+  status=$?
+  [ "$status" -eq 0 ] || exit "$status"
+  parse_result "$result" || fail 'invalid Node result handshake'
+  rm -f -- "$result"
+  result_cleanup=''
+  trap - EXIT HUP INT TERM
+}
+
+run_guarded_cleanup() {
+  local attempts=${PANE_DASH_TEST_LOCK_ATTEMPTS:-600} lock_sleep=${PANE_DASH_TEST_LOCK_SLEEP:-1}
+  local perl=/usr/bin/perl script_path
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || fail 'invalid test lock attempt limit'
+  [[ "$lock_sleep" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail 'invalid test lock sleep'
+  [ -x "$perl" ] || fail 'required /usr/bin/perl is unavailable'
+  [ "${PANE_DASH_TEST_PERL_UNSUPPORTED:-}" != 1 ] || fail 'required Perl flock capability is unavailable'
+  "$perl" -MFcntl=:flock -e 'exit((defined(&LOCK_EX) && defined(&LOCK_NB)) ? 0 : 1)' || fail 'required Perl flock capability is unavailable'
+  mkdir -p "$state_dir"
+  script_path="$(canonical_dir "$(dirname "${BASH_SOURCE[0]}")")/$(basename "${BASH_SOURCE[0]}")"
+  # shellcheck disable=SC2016 # Perl source intentionally contains $ expressions.
+  "$perl" -e '
+    use strict; use warnings; use Fcntl qw(:flock F_SETFD);
+    my ($path, $attempts, $sleep, $script, @command) = @ARGV;
+    open my $lock, q{<}, $path or die "with-node20: cannot open script lock: $!\n";
+    for (my $try = 0; $try < $attempts; ++$try) {
+      if (flock($lock, LOCK_EX | LOCK_NB)) {
+        fcntl($lock, F_SETFD, 0) or die "with-node20: cannot inherit script lock: $!\n";
+        $SIG{INT} = q{DEFAULT}; $SIG{HUP} = q{DEFAULT}; $SIG{TERM} = q{DEFAULT};
+        exec {$script} $script, q{--private-guard}, fileno($lock), @command;
+        die "with-node20: cannot exec guarded script: $!\n";
+      }
+      select undef, undef, undef, $sleep;
+    }
+    die "with-node20: Node 20 provisioning lock is held\n";
+  ' "$script_path" "$attempts" "$lock_sleep" "$script_path" cleanup
+}
+
+if [ "${1:-}" = '--private-guard' ]; then
+  guard_fd=${2:-}
+  action=${3:-}
+  [[ "$guard_fd" =~ ^[3-9][0-9]*$|^[3-9]$ ]] || fail 'invalid private guard invocation'
+  case "$action:$#" in prepare:4|cleanup:3) ;; *) fail 'invalid private guard invocation' ;; esac
+  trap finish_owned_provision EXIT
+  trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+  if [ "$action" = cleanup ]; then
+    if [ -e "$descriptor" ]; then
+      validate_descriptor || fail 'invalid descriptor refuses cleanup'
+      rm -rf -- "$descriptor_root"; rm -f -- "$descriptor"
+    fi
+    rmdir "$state_dir" 2>/dev/null || true
+  else
+    result=$4
+    if ! validate_descriptor; then
+      if [ -e "$descriptor" ] || [ -L "$descriptor" ]; then
+        parse_safe_discard_root || fail 'invalid descriptor refuses replacement'
+        rm -rf -- "$safe_discard_root"; rm -f -- "$descriptor"
+      fi
+      provision
+      validate_descriptor || fail 'new Node descriptor failed validation'
+    fi
+    write_result "$result"
+  fi
+  trap - EXIT HUP INT TERM
+  exit 0
+fi
+
 if [ "${1:-}" = '--cleanup' ]; then
   [ "$#" -eq 1 ] || fail 'usage: with-node20.sh --cleanup'
   [ -d "$state_dir" ] || exit 0
-  trap finish_owned_provision EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  acquire_lock
-  if [ -e "$descriptor" ]; then
-    validate_descriptor || fail 'invalid descriptor refuses cleanup'
-    rm -rf -- "$descriptor_root"
-    rm -f -- "$descriptor"
-  fi
-  release_lock
-  trap - EXIT HUP INT TERM
-  rmdir "$state_dir" 2>/dev/null || true
+  run_guarded_cleanup
   exit 0
 fi
+
 [ "${1:-}" = '--' ] && [ "$#" -gt 1 ] || fail 'usage: with-node20.sh -- command [arg ...]'
 shift
-
 if [ "${PANE_DASH_NODE20_PREPROVIDED:-}" = 1 ]; then
   validate_tools "${NODE_20_BIN:-}" "${NPM_20_CLI:-}" || fail 'preprovided Node must be exact v20.0.0 with executable npm'
   node_directory=$(dirname "$NODE_20_BIN")
+  unset MISE_DATA_DIR MISE_CACHE_DIR MISE_CONFIG_DIR MISE_GLOBAL_CONFIG_FILE MISE_SYSTEM_CONFIG_FILE MISE_DEFAULT_CONFIG_FILENAME GNUPGHOME
   export PATH="$node_directory:$PATH"
   [ "$(command -v node)" = "$NODE_20_BIN" ] || fail 'preprovided Node must lead PATH'
   exec "$@"
 fi
 
-trap finish_owned_provision EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-acquire_lock
-if ! validate_descriptor; then
-  if [ -e "$descriptor" ] || [ -L "$descriptor" ]; then
-    parse_safe_discard_root || fail 'invalid descriptor refuses replacement'
-    rm -rf -- "$safe_discard_root"
-    rm -f -- "$descriptor"
-  fi
-  provision
-  validate_descriptor || fail 'new Node descriptor failed validation'
-fi
-node=$descriptor_node
-npm=$descriptor_npm
-release_lock
-trap - EXIT HUP INT TERM
-node_directory=$(dirname "$node")
-export NODE_20_BIN="$node" NPM_20_CLI="$npm" PATH="$node_directory:$PATH"
+run_guarded_prepare
+node_directory=$(dirname "$result_node")
+unset MISE_DATA_DIR MISE_CACHE_DIR MISE_CONFIG_DIR MISE_GLOBAL_CONFIG_FILE MISE_SYSTEM_CONFIG_FILE MISE_DEFAULT_CONFIG_FILENAME GNUPGHOME
+export NODE_20_BIN="$result_node" NPM_20_CLI="$result_npm" PATH="$node_directory:$PATH"
 exec "$@"

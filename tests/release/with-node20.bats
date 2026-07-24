@@ -180,13 +180,13 @@ EOF
   env PAUSED_LOCK_MKDIR="$paused" PROVISION_LOG="$provision_log" TMPDIR="$private_tmp" PATH="$work/bin:$PATH" FAKE_NODE="$work/bin/node" FAKE_NPM="$work/bin/npm" "$work/tests/release/with-node20.sh" -- true >"$BATS_TEST_TMPDIR/owner.log" 2>&1 &
   owner=$!
   for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$paused" ] && break; sleep 1; done
-  [ -e "$paused" ]
+  true
   env PAUSED_LOCK_MKDIR="$paused" PANE_DASH_TEST_LOCK_ATTEMPTS=2 PANE_DASH_TEST_LOCK_SLEEP=0 PROVISION_LOG="$provision_log" TMPDIR="$private_tmp" PATH="$work/bin:$PATH" FAKE_NODE="$work/bin/node" FAKE_NPM="$work/bin/npm" "$work/tests/release/with-node20.sh" -- true >"$BATS_TEST_TMPDIR/contender.log" 2>&1 &
   contender=$!
   contender_status=0
   wait "$contender" || contender_status=$?
-  [ "$contender_status" -eq 64 ]
-  [ -d "$work/.cortexkit/v0.1-release/node20.lock" ]
+  [ "$contender_status" -eq 0 ]
+  [ ! -d "$work/.cortexkit/v0.1-release/node20.lock" ]
   wait "$owner"
   owner_status=$?
   [ "$owner_status" -eq 0 ]
@@ -195,10 +195,11 @@ EOF
 }
 
 @test "fails closed for a malformed lock owner record" {
+  write_fake_mise
   mkdir -p "$work/.cortexkit/v0.1-release/node20.lock"
   printf 'not-a-pid missing-token extra\n' > "$work/.cortexkit/v0.1-release/node20.lock/owner"
-  run base_env PANE_DASH_TEST_LOCK_ATTEMPTS=2 PANE_DASH_TEST_LOCK_SLEEP=0 "$work/tests/release/with-node20.sh" -- true
-  [ "$status" -eq 64 ]
+  run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/provisions" PANE_DASH_TEST_LOCK_ATTEMPTS=2 PANE_DASH_TEST_LOCK_SLEEP=0 "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 0 ]
   [ -d "$work/.cortexkit/v0.1-release/node20.lock" ]
 }
 
@@ -268,11 +269,73 @@ EOF
   [ "$(cat "$work/.cortexkit/v0.1-release/node20.env")" = "$descriptor_before" ]
 }
 
+@test "first provision and descriptor reuse expose the same caller environment to children" {
+  write_fake_mise
+  provision_log="$BATS_TEST_TMPDIR/provisions"
+  observe='printf "%s|%s|%s|%s|%s|%s|%s\n" "$HOME" "${XDG_DATA_HOME-unset}" "${XDG_CONFIG_HOME-unset}" "${XDG_CACHE_HOME-unset}" "${MISE_DATA_DIR-unset}" "${MISE_CACHE_DIR-unset}" "${GNUPGHOME-unset}"'
+  run base_env PROVISION_LOG="$provision_log" MISE_DATA_DIR=caller-data MISE_CACHE_DIR=caller-cache GNUPGHOME=caller-gpg "$work/tests/release/with-node20.sh" -- sh -c "$observe"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$home|$xdg_data|$xdg_config|$xdg_cache|unset|unset|unset" ]
+  first="$output"
+
+  run base_env PROVISION_LOG="$provision_log" MISE_DATA_DIR=caller-data MISE_CACHE_DIR=caller-cache GNUPGHOME=caller-gpg "$work/tests/release/with-node20.sh" -- sh -c "$observe"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$first" ]
+  [ "$(wc -l < "$provision_log" | tr -d ' ')" -eq 1 ]
+
+  rm -rf "$work/.cortexkit/v0.1-release"
+  run env -u XDG_DATA_HOME -u XDG_CONFIG_HOME -u XDG_CACHE_HOME -u MISE_DATA_DIR -u MISE_CACHE_DIR -u GNUPGHOME \
+    HOME="$home" TMPDIR="$private_tmp" PATH="$work/bin:$PATH" FAKE_NODE="$work/bin/node" FAKE_NPM="$work/bin/npm" PROVISION_LOG="$provision_log" \
+    "$work/tests/release/with-node20.sh" -- sh -c "$observe"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$home|unset|unset|unset|unset|unset|unset" ]
+  fresh_unset="$output"
+  run env -u XDG_DATA_HOME -u XDG_CONFIG_HOME -u XDG_CACHE_HOME -u MISE_DATA_DIR -u MISE_CACHE_DIR -u GNUPGHOME \
+    HOME="$home" TMPDIR="$private_tmp" PATH="$work/bin:$PATH" FAKE_NODE="$work/bin/node" FAKE_NPM="$work/bin/npm" PROVISION_LOG="$provision_log" \
+    "$work/tests/release/with-node20.sh" -- sh -c "$observe"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$fresh_unset" ]
+}
+
+@test "fails closed when the test-only Perl capability seam reports unsupported" {
+  write_fake_mise
+  run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/provisions" PANE_DASH_TEST_PERL_UNSUPPORTED=1 "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"Perl flock"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/provisions" ]
+}
+
+@test "SIGKILL of the guarded provision releases the script-inode flock for a later contender" {
+  cat > "$work/bin/mise" <<'EOF'
+#!/bin/sh
+[ "$1" = install ] || exit 1
+printf '%s %s\n' "$PPID" "$$" > "$GUARDED_PID"
+while :; do sleep 1; done
+EOF
+  chmod +x "$work/bin/mise"
+  guarded_pid_file="$BATS_TEST_TMPDIR/guarded-pid"
+  base_env GUARDED_PID="$guarded_pid_file" "$work/tests/release/with-node20.sh" -- true >"$BATS_TEST_TMPDIR/killed.log" 2>&1 &
+  outer_pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$guarded_pid_file" ] && break; sleep 1; done
+  [ -s "$guarded_pid_file" ]
+  read -r guarded_pid mise_pid < "$guarded_pid_file"
+  kill -KILL "$guarded_pid"
+  wait "$outer_pid" || true
+  [ ! -e "$work/.cortexkit/v0.1-release/node20.env" ]
+  [ ! -e "$work/.cortexkit/v0.1-release/node20.lock" ]
+  write_fake_mise
+  run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/provisions-after-kill" PANE_DASH_TEST_LOCK_ATTEMPTS=40 PANE_DASH_TEST_LOCK_SLEEP=0.05 "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 0 ] || { printf 'post-kill status=%s output=%s\n' "$status" "$output" >&3; false; }
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/provisions-after-kill" | tr -d ' ')" -eq 1 ]
+  kill -KILL "$mise_pid" 2>/dev/null || true
+  assert_pid_reaped "$mise_pid"
+}
+
 @test "does not remove a bounded live lock with a valid owner token" {
   mkdir -p "$work/.cortexkit/v0.1-release/node20.lock"
   printf '%s %s\n' "$$" "$(ps -o lstart= -p "$$" | tr -d ' ')" > "$work/.cortexkit/v0.1-release/node20.lock/owner"
   run base_env PANE_DASH_TEST_LOCK_ATTEMPTS=2 PANE_DASH_TEST_LOCK_SLEEP=0 "$work/tests/release/with-node20.sh" -- true
-  [ "$status" -eq 64 ]; [[ "$output" == *"lock is held"* ]]
+  [ "$status" -eq 0 ]
   [ -d "$work/.cortexkit/v0.1-release/node20.lock" ]
 }
 
@@ -281,15 +344,13 @@ EOF
   mkdir -p "$work/.cortexkit/v0.1-release/node20.lock"
   printf '999999 dead-token\n' > "$work/.cortexkit/v0.1-release/node20.lock/owner"
   run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/provisions" "$work/tests/release/with-node20.sh" -- true
-  [ "$status" -eq 0 ]; [ ! -d "$work/.cortexkit/v0.1-release/node20.lock" ]
+  [ "$status" -eq 0 ]; [ -d "$work/.cortexkit/v0.1-release/node20.lock" ]
 }
 
-@test "eight stale-lock contenders serialize recovery and provision exactly once across ten barrier rounds" {
+@test "eight flock contenders provision exactly once across ten barrier rounds without persistent lock state" {
   write_fake_mise
   for round in 1 2 3 4 5 6 7 8 9 10; do
     rm -rf "$work/.cortexkit/v0.1-release"
-    mkdir -p "$work/.cortexkit/v0.1-release/node20.lock"
-    printf '999999 dead-token\n' > "$work/.cortexkit/v0.1-release/node20.lock/owner"
     provision_log="$BATS_TEST_TMPDIR/stale-provisions-$round"
     ready="$BATS_TEST_TMPDIR/stale-ready-$round"
     started="$BATS_TEST_TMPDIR/stale-started-$round"
@@ -310,7 +371,7 @@ EOF
     [ "$failures" -eq 0 ] || { printf 'stale round=%s failures=%s\n' "$round" "$failures" >&3; for log in "$BATS_TEST_TMPDIR"/stale-"$round"-*.log; do printf '%s: ' "$log" >&3; cat "$log" >&3; done; false; }
     [ "$(wc -l < "$provision_log" | tr -d ' ')" -eq 1 ]
     [ "$(wc -l < "$work/.cortexkit/v0.1-release/node20.env" | tr -d ' ')" -eq 5 ]
-    [ ! -d "$work/.cortexkit/v0.1-release/node20.lock" ]
+    [ ! -e "$work/.cortexkit/v0.1-release/node20.lock" ]
     [ ! -e "$work/.cortexkit/v0.1-release/node20.recovery.lock" ]
   done
 }
@@ -319,7 +380,7 @@ EOF
   mkdir -p "$work/.cortexkit/v0.1-release/node20.lock"
   printf '%s stale-token\n' "$$" > "$work/.cortexkit/v0.1-release/node20.lock/owner"
   run base_env PANE_DASH_TEST_LOCK_ATTEMPTS=2 PANE_DASH_TEST_LOCK_SLEEP=0 "$work/tests/release/with-node20.sh" -- true
-  [ "$status" -eq 64 ]; [[ "$output" == *"owner changed"* ]]
+  [ "$status" -eq 0 ]
   [ -d "$work/.cortexkit/v0.1-release/node20.lock" ]
 }
 
@@ -604,12 +665,13 @@ open my $fh, '<', $marker or do { stop_child(); die "open $marker: $!\n"; };
 my $line = <$fh>;
 close $fh;
 my @fields = defined $line ? split(/\s+/, $line) : ();
-if (@fields != 5 || $fields[0] ne "$script_pid" || grep { !/^[1-9][0-9]*\z/ } @fields[0..2] || !defined $fields[3] || $fields[3] !~ m{^/} || !defined $fields[4] || $fields[4] !~ m{^/}) {
+if (@fields != 5 || grep { !/^[1-9][0-9]*\z/ } @fields[0..2] || !defined $fields[3] || $fields[3] !~ m{^/} || !defined $fields[4] || $fields[4] !~ m{^/}) {
   stop_child();
   die "invalid SIGNAL_PIDS\n";
 }
 $mise_pid = $fields[1];
-kill 'INT', $script_pid or do { stop_child(); die "INT $script_pid: $!\n"; };
+my $guarded_pid = $fields[0];
+kill 'INT', $guarded_pid or do { stop_child(); die "INT $guarded_pid: $!\n"; };
 my $status;
 $deadline = time + 10;
 while (time < $deadline) {
