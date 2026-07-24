@@ -161,7 +161,7 @@ EOF
   [ ! -e "$gpg_home" ]
 }
 
-@test "does not steal an ownerless new lock before its owner records identity" {
+@test "fails closed while a live creator has not yet recorded its lock identity" {
   write_fake_mise
   real_mkdir="$(command -v mkdir)"
   cat > "$work/bin/mkdir" <<EOF
@@ -181,16 +181,56 @@ EOF
   owner=$!
   for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$paused" ] && break; sleep 1; done
   [ -e "$paused" ]
-  env PAUSED_LOCK_MKDIR="$paused" PROVISION_LOG="$provision_log" TMPDIR="$private_tmp" PATH="$work/bin:$PATH" FAKE_NODE="$work/bin/node" FAKE_NPM="$work/bin/npm" "$work/tests/release/with-node20.sh" -- true >"$BATS_TEST_TMPDIR/contender.log" 2>&1 &
+  env PAUSED_LOCK_MKDIR="$paused" PANE_DASH_TEST_LOCK_ATTEMPTS=2 PANE_DASH_TEST_LOCK_SLEEP=0 PROVISION_LOG="$provision_log" TMPDIR="$private_tmp" PATH="$work/bin:$PATH" FAKE_NODE="$work/bin/node" FAKE_NPM="$work/bin/npm" "$work/tests/release/with-node20.sh" -- true >"$BATS_TEST_TMPDIR/contender.log" 2>&1 &
   contender=$!
-  wait "$contender"
-  contender_status=$?
+  contender_status=0
+  wait "$contender" || contender_status=$?
+  [ "$contender_status" -eq 64 ]
+  [ -d "$work/.cortexkit/v0.1-release/node20.lock" ]
   wait "$owner"
   owner_status=$?
   [ "$owner_status" -eq 0 ]
-  [ "$contender_status" -eq 0 ]
   [ "$(wc -l < "$provision_log" | tr -d ' ')" -eq 1 ]
   [ "$(wc -l < "$work/.cortexkit/v0.1-release/node20.env" | tr -d ' ')" -eq 5 ]
+}
+
+@test "fails closed for a malformed lock owner record" {
+  mkdir -p "$work/.cortexkit/v0.1-release/node20.lock"
+  printf 'not-a-pid missing-token extra\n' > "$work/.cortexkit/v0.1-release/node20.lock/owner"
+  run base_env PANE_DASH_TEST_LOCK_ATTEMPTS=2 PANE_DASH_TEST_LOCK_SLEEP=0 "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 64 ]
+  [ -d "$work/.cortexkit/v0.1-release/node20.lock" ]
+}
+
+@test "runs under the system Bash 3.2 without associative arrays" {
+  run /bin/bash -n "$work/tests/release/with-node20.sh"
+  [ "$status" -eq 0 ]
+  run /bin/bash -n "$repo_root/scripts/release/clean-room.sh"
+  [ "$status" -eq 0 ]
+  run /bin/bash -c '! grep -Eq "declare[[:space:]]+-A|declare[[:space:]]+--[[:space:]]+.*-A" "$1" "$2"' bash "$work/tests/release/with-node20.sh" "$repo_root/scripts/release/clean-room.sh"
+  [ "$status" -eq 0 ]
+  run base_env PANE_DASH_NODE20_PREPROVIDED=1 NODE_20_BIN="$work/bin/node" NPM_20_CLI="$work/bin/npm" /bin/bash "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 0 ]
+}
+
+@test "cleans every tracked provision resource after post-creation failures" {
+  write_fake_mise
+  for round in 1 2 3 4 5; do
+    for step in root-mkdir gpg-link descriptor-write descriptor-chmod descriptor-mv; do
+      rm -rf "$work/.cortexkit/v0.1-release"
+      fault_log="$BATS_TEST_TMPDIR/fault-$round-$step"
+      run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/provisions-$round-$step" PANE_DASH_TEST_FAULT_STEP="$step" PANE_DASH_TEST_FAULT_LOG="$fault_log" "$work/tests/release/with-node20.sh" -- true
+      [ "$status" -eq 64 ] || { printf 'round=%s step=%s output=%s\n' "$round" "$step" "$output" >&3; false; }
+      [ ! -e "$work/.cortexkit/v0.1-release/node20.env" ]
+      [ ! -d "$work/.cortexkit/v0.1-release/node20.lock" ]
+      [ -f "$fault_log" ]
+      while IFS='=' read -r kind path; do
+        [ -z "$path" ] && continue
+        [ ! -e "$path" ] || { printf 'round=%s step=%s leaked %s=%s\n' "$round" "$step" "$kind" "$path" >&3; false; }
+      done < "$fault_log"
+      ! compgen -G "$private_tmp/tmux-pane-dash-node20.*" >/dev/null
+    done
+  done
 }
 
 @test "rejects descriptor node traversal and symlink escapes" {

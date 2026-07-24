@@ -96,3 +96,18 @@ setup() {
   for _ in 1 2 3 4 5; do ! kill -0 "$descendant_pid" 2>/dev/null && break; sleep 1; done
   ! kill -0 "$descendant_pid" 2>/dev/null
 }
+
+@test "kills a TERM-ignoring descendant after its leader exits before cleanup" {
+  for round in 1 2 3 4 5; do
+    descendant="$BATS_TEST_TMPDIR/fast-exit-descendant-pid-$round"
+    run env DESCENDANT="$descendant" "$repo_root/scripts/release/clean-room.sh" -- sh -c '
+      sh -c '\''trap "" TERM; printf "%s\\n" "$$" > "$DESCENDANT"; while :; do sleep 1; done'\'' &
+      while [ ! -s "$DESCENDANT" ]; do sleep 0.01; done
+      exit 37
+    '
+    [ "$status" -eq 37 ]
+    descendant_pid="$(cat "$descendant")"
+    for _ in 1 2 3 4 5 6; do ! kill -0 "$descendant_pid" 2>/dev/null && break; sleep 1; done
+    ! kill -0 "$descendant_pid" || { printf 'round=%s leaked descendant=%s\n' "$round" "$descendant_pid" >&3; false; }
+  done
+}

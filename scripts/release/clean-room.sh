@@ -12,22 +12,24 @@ shift
 [ "$#" -gt 0 ] || { printf '%s\n' 'clean-room: command required' >&2; exit 64; }
 
 tool_names=(NODE_20_BIN NPM_20_CLI OPENCODE_1_17_20_BIN OPENCODE_LATEST_BIN TMUX_BIN)
-declare -A tools=()
+tool_values=()
+tmux_bin=''
 if [ -z "${TMUX_BIN:-}" ]; then
   printf '%s\n' 'clean-room: TMUX_BIN required' >&2
   exit 64
 fi
 for tool in "${tool_names[@]}"; do
   value=${!tool:-}
+  tool_values+=("$value")
   [ -z "$value" ] && continue
   case "$value" in
     /*) [ -x "$value" ] || { printf 'clean-room: %s is not executable: %s\n' "$tool" "$value" >&2; exit 64; } ;;
     *) printf 'clean-room: %s must be an absolute executable path\n' "$tool" >&2; exit 64 ;;
   esac
-  tools["$tool"]=$value
+  [ "$tool" = TMUX_BIN ] && tmux_bin=$value
 done
 
-tmux_version=$("${tools[TMUX_BIN]}" -V 2>/dev/null || true)
+tmux_version=$("$tmux_bin" -V 2>/dev/null || true)
 if [[ ! "$tmux_version" =~ ^tmux\ 3\.([6-9]|[1-9][0-9])([^0-9].*)?$ ]]; then
   printf 'clean-room: TMUX_BIN must be tmux >= 3.6: %s\n' "$tmux_version" >&2
   exit 64
@@ -73,8 +75,8 @@ cleanup() {
     group_is_alive && terminate_group KILL
   fi
   [ -n "$child_pid" ] && wait "$child_pid" 2>/dev/null || true
-  if [ -n "${tools[TMUX_BIN]:-}" ]; then
-    TMUX='' TMUX_PANE='' TMUX_TMPDIR="$tmux_root" "${tools[TMUX_BIN]}" -L "$socket" kill-server 2>/dev/null || true
+  if [ -n "$tmux_bin" ]; then
+    TMUX='' TMUX_PANE='' TMUX_TMPDIR="$tmux_root" "$tmux_bin" -L "$socket" kill-server 2>/dev/null || true
   fi
   rm -rf -- "$tmux_root"
   rm -rf -- "$tmp_root"
@@ -92,7 +94,11 @@ unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY
 unset npm_config_userconfig npm_config_globalconfig npm_config_prefix npm_config_cache
 unset BUN_INSTALL BUN_INSTALL_CACHE_DIR
 for tool in "${tool_names[@]}"; do unset "$tool"; done
-for tool in "${!tools[@]}"; do export "$tool=${tools[$tool]}"; done
+for index in "${!tool_names[@]}"; do
+  tool=${tool_names[$index]}
+  value=${tool_values[$index]}
+  [ -n "$value" ] && export "$tool=$value"
+done
 
 if [ -z "${RUSTUP_HOME:-}" ] && [[ "$ambient_home" = /* ]] && [ -d "$ambient_home/.rustup" ]; then
   export RUSTUP_HOME="$ambient_home/.rustup"
@@ -117,7 +123,9 @@ mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$npm_con
 set -m
 "$@" &
 child_pid=$!
-child_pgid=$(ps -o pgid= -p "$child_pid" 2>/dev/null | tr -d ' ')
+# Under monitor mode, a simple asynchronous job is led by its PID.  Record it
+# before the leader can exit; querying ps here races a fast-exiting leader.
+child_pgid=$child_pid
 set +m
 set +e
 wait "$child_pid"

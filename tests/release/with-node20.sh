@@ -109,43 +109,71 @@ validate_descriptor() {
 }
 
 pid_start_token() { ps -o lstart= -p "$1" 2>/dev/null | tr -d ' '; }
+
+lock_owned=0
+lock_token=''
+read_complete_lock_owner() {
+  local owner_pid owner_token extra
+  [ -f "$lock/owner" ] || return 1
+  owner_pid='' owner_token='' extra=''
+  IFS=' ' read -r owner_pid owner_token extra < "$lock/owner" || true
+  [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && [ -n "$owner_token" ] && [ -z "$extra" ]
+}
+
 acquire_lock() {
   local tries=0 owner_pid owner_token current_token lock_attempt_limit=${PANE_DASH_TEST_LOCK_ATTEMPTS:-600} lock_sleep=${PANE_DASH_TEST_LOCK_SLEEP:-1}
   [[ "$lock_attempt_limit" =~ ^[1-9][0-9]*$ ]] || fail 'invalid test lock attempt limit'
   [[ "$lock_sleep" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail 'invalid test lock sleep'
   mkdir -p "$state_dir"
   while ! mkdir "$lock" 2>/dev/null; do
-    owner_pid='' owner_token=''
-    if [ -f "$lock/owner" ]; then
+    if read_complete_lock_owner; then
       IFS=' ' read -r owner_pid owner_token < "$lock/owner" || true
-    fi
-    if [ -z "$owner_pid" ] && [ -z "$owner_token" ]; then
-      tries=$((tries + 1))
-      if [ "$tries" -ge "$lock_attempt_limit" ]; then
+      if ! kill -0 "$owner_pid" 2>/dev/null; then
         rm -rf -- "$lock"
-        tries=0
-      else
-        sleep "$lock_sleep"
+        continue
       fi
-      continue
-    elif [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
       current_token=$(pid_start_token "$owner_pid")
       [ -n "$owner_token" ] && [ "$current_token" = "$owner_token" ] || fail 'Node 20 provisioning lock owner changed'
-    else
-      rm -rf -- "$lock"
-      continue
     fi
     tries=$((tries + 1))
-    [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning lock is held'
+    if [ "$tries" -ge "$lock_attempt_limit" ]; then
+      if read_complete_lock_owner; then
+        fail 'Node 20 provisioning lock is held'
+      fi
+      fail 'Node 20 provisioning lock owner record is incomplete'
+    fi
     sleep "$lock_sleep"
   done
-  printf '%s %s\n' "$$" "$(pid_start_token "$$")" > "$lock/owner"
+  lock_owned=1
+  lock_token=$(pid_start_token "$$")
+  [ -n "$lock_token" ] || fail 'cannot identify Node 20 provisioning lock owner'
+  printf '%s %s\n' "$$" "$lock_token" > "$lock/owner"
 }
-release_lock() { rm -rf -- "$lock"; }
+release_lock() {
+  local owner_pid owner_token
+  [ "$lock_owned" -eq 1 ] || return 0
+  owner_pid='' owner_token=''
+  if read_complete_lock_owner; then
+    IFS=' ' read -r owner_pid owner_token < "$lock/owner" || true
+    [ "$owner_pid" = "$$" ] && [ "$owner_token" = "$lock_token" ] && rm -rf -- "$lock"
+  fi
+  lock_owned=0
+}
 
 incomplete_root=''
 incomplete_gpg_link=''
+incomplete_descriptor_temp=''
 install_pgid=''
+
+record_fault_resource() {
+  [ -n "${PANE_DASH_TEST_FAULT_LOG:-}" ] || return 0
+  printf '%s=%s\n' "$1" "$2" >> "$PANE_DASH_TEST_FAULT_LOG"
+}
+
+fault_after() {
+  [ "${PANE_DASH_TEST_FAULT_STEP:-}" = "$1" ] || return 0
+  fail "injected failure after $1"
+}
 
 stop_incomplete_provision() {
   local _
@@ -158,13 +186,14 @@ stop_incomplete_provision() {
     kill -KILL -- "-$install_pgid" 2>/dev/null || true
     wait "$install_pgid" 2>/dev/null || true
   fi
+  rm -f -- "$incomplete_descriptor_temp"
   rm -f -- "$incomplete_gpg_link"
   rm -rf -- "$incomplete_root"
-  incomplete_gpg_link='' incomplete_root='' install_pgid=''
+  incomplete_descriptor_temp='' incomplete_gpg_link='' incomplete_root='' install_pgid=''
 }
 
-release_on_signal() {
-  local status=$1
+finish_owned_provision() {
+  local status=$?
   trap - EXIT HUP INT TERM
   stop_incomplete_provision
   release_lock
@@ -174,10 +203,16 @@ release_on_signal() {
 write_descriptor() {
   local root=$1 mise=$2 node=$3 npm=$4 temporary
   temporary="$state_dir/node20.env.$$"
+  incomplete_descriptor_temp=$temporary
+  record_fault_resource descriptor-temp "$temporary"
   (umask 077; printf 'SCHEMA=1\nROOT=%s\nMISE=%s\nNODE_20_BIN=%s\nNPM_20_CLI=%s\n' "$root" "$mise" "$node" "$npm" > "$temporary")
+  fault_after descriptor-write
   chmod 600 "$temporary"
+  fault_after descriptor-chmod
   sync "$temporary" 2>/dev/null || true
+  fault_after descriptor-mv
   mv -f "$temporary" "$descriptor"
+  incomplete_descriptor_temp=''
 }
 
 provision() {
@@ -188,17 +223,21 @@ provision() {
   root=$(mktemp -d "${TMPDIR:-/tmp}/tmux-pane-dash-node20.XXXXXX")
   root=$(canonical_dir "$root") || fail 'cannot canonicalize Node root'
   incomplete_root=$root
+  record_fault_resource root "$root"
   validate_root "$root" || { rm -rf -- "$root"; fail 'unsafe Node root'; }
   export HOME="$root/home" XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME="$root/cache"
   export MISE_DATA_DIR="$root/mise/data" MISE_CACHE_DIR="$root/mise/cache" MISE_CONFIG_DIR="$root/mise/config"
   export MISE_GLOBAL_CONFIG_FILE="$root/mise/config/global.toml" MISE_SYSTEM_CONFIG_FILE="$root/mise/config/system.toml"
   export MISE_DEFAULT_CONFIG_FILENAME="$root/mise/config/default-packages"
   mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$MISE_DATA_DIR" "$MISE_CACHE_DIR" "$MISE_CONFIG_DIR" "$root/gnupg"
+  fault_after root-mkdir
   chmod 700 "$root/gnupg"
   gpg_link=$(mktemp -d /tmp/tmux-pane-dash-node20-gpg.XXXXXX)
   rmdir "$gpg_link"
   ln -s "$root/gnupg" "$gpg_link"
   incomplete_gpg_link=$gpg_link
+  record_fault_resource gpg-link "$gpg_link"
+  fault_after gpg-link
   export GNUPGHOME="$gpg_link"
   set -m; "$mise" install node@20.0.0 & install_pid=$!; set +m
   install_pgid=$install_pid
@@ -222,10 +261,10 @@ if [ "${1:-}" = '--cleanup' ]; then
   [ "$#" -eq 1 ] || fail 'usage: with-node20.sh --cleanup'
   [ -d "$state_dir" ] || exit 0
   acquire_lock
-  trap release_lock EXIT
-  trap 'release_on_signal 129' HUP
-  trap 'release_on_signal 130' INT
-  trap 'release_on_signal 143' TERM
+  trap finish_owned_provision EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   if [ -e "$descriptor" ]; then
     validate_descriptor || fail 'invalid descriptor refuses cleanup'
     rm -rf -- "$descriptor_root"
@@ -248,10 +287,10 @@ if [ "${PANE_DASH_NODE20_PREPROVIDED:-}" = 1 ]; then
 fi
 
 acquire_lock
-trap release_lock EXIT
-trap 'release_on_signal 129' HUP
-trap 'release_on_signal 130' INT
-trap 'release_on_signal 143' TERM
+trap finish_owned_provision EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 if ! validate_descriptor; then
   rm -f -- "$descriptor"
   provision
