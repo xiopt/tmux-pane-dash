@@ -2,7 +2,7 @@ import { chmod, copyFile, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFil
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { basename, isAbsolute, join, resolve } from "node:path"
-import { DEBIAN_PLATFORM_MANIFESTS, RUST_ALPINE_BUILDERS, TMUX_RUNTIME } from "./contracts"
+import { DEBIAN_PLATFORM_MANIFESTS, OPENCODE_PACKAGE_FILES, RUST_ALPINE_BUILDERS, TMUX_RUNTIME } from "./contracts"
 import { startLocalRegistry, type LocalPackage } from "./local-registry"
 
 export type MuslTarget = "aarch64-unknown-linux-musl" | "x86_64-unknown-linux-musl"
@@ -79,6 +79,7 @@ const COMMAND_TERM_GRACE_MS = 300
 const COMMAND_REAP_TIMEOUT_MS = 500
 const COMMAND_PIPE_TIMEOUT_MS = 500
 const DOCKER_CLEANUP_TIMEOUT_MS = 30_000
+const CLEANUP_PANE_OPTIONS = ["@pane_dash_status", "@pane_dash_status_since", "@pane_dash_heartbeat", "@pane_dash_title", "@pane_dash_model"] as const
 
 const targetInfo = (target: MuslTarget) => target === "x86_64-unknown-linux-musl"
   ? { architecture: "x86-64", builderArch: "amd64" as const, platform: "linux/amd64" as const, uname: "x86_64" }
@@ -139,10 +140,15 @@ export function validateTmuxBinaryPath(value: string | undefined): string {
   return value
 }
 
-export function tmuxWrapperScript(tmux: string, socket: string, calls: string, permit: string): string {
+export function tmuxWrapperScript(tmux: string, socket: string, calls: string, permit: string, cleanupEntered: string): string {
   return `#!/bin/sh
 printf '%s\\n' "-L ${socket} $*" >> ${shellQuote(calls)}
-if [ "$#" -eq 5 ] && [ "$1" = set-option ] && [ "$2" = -pu ]; then
+if [ "$#" -eq 5 ] && [ "$1" = set-option ] && [ "$2" = -pu ] && [ "$3" = -t ] && [ -n "\${TMUX_PANE:-}" ] && [ "$4" = "$TMUX_PANE" ]; then
+  case "$5" in
+    @pane_dash_status|@pane_dash_status_since|@pane_dash_heartbeat|@pane_dash_title|@pane_dash_model) printf cleanup-entered > ${shellQuote(cleanupEntered)} ;;
+  esac
+fi
+if [ -f ${shellQuote(cleanupEntered)} ]; then
   for _ in $(seq 1 300); do [ -f ${shellQuote(permit)} ] && break; sleep 0.1; done
   [ -f ${shellQuote(permit)} ] || exit 1
 fi
@@ -305,9 +311,9 @@ async function packOpenCodePlugin(sourceRoot: string, packageRoot: string): Prom
     // Task 2 owns the repository's publishable legal text. The spike still verifies
     // npm's required package shape without inventing a project-wide license claim.
     writeFile(join(packageRoot, "LICENSE"), "UNLICENSED\n"),
-    writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "@xiopt/pane-dash-opencode", version: "0.1.0", type: "module", exports: { ".": "./dist/index.js", "./server": "./dist/index.js" }, files: ["dist", "README.md", "LICENSE"] }, null, 2) + "\n"),
+    writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "@xiopt/pane-dash-opencode", version: "0.1.0", type: "module", main: "./dist/index.js", engines: { opencode: ">=1.17.20" }, exports: { ".": "./dist/index.js", "./server": "./dist/index.js" }, files: ["dist/index.js", "README.md", "LICENSE"] }, null, 2) + "\n"),
   ])
-  return packPackage(packageRoot, "@xiopt/pane-dash-opencode", "0.1.0")
+  return packPackage(packageRoot, "@xiopt/pane-dash-opencode", "0.1.0", "opencode")
 }
 
 async function packCompanionPlugin(root: string): Promise<LocalPackage> {
@@ -316,15 +322,31 @@ async function packCompanionPlugin(root: string): Promise<LocalPackage> {
     writeFile(join(root, "package.json"), JSON.stringify({ name: "@opencode-ai/plugin", version: "1.17.20", type: "module", exports: { ".": "./index.js" }, files: ["index.js"] }) + "\n"),
     writeFile(join(root, "index.js"), "export {}\n"),
   ])
-  return packPackage(root, "@opencode-ai/plugin", "1.17.20")
+  return packPackage(root, "@opencode-ai/plugin", "1.17.20", "companion")
 }
 
-async function packPackage(root: string, name: string, version: string): Promise<LocalPackage> {
+type PackageFixture = "opencode" | "companion"
+
+export function assertExactPackageFixture(packageJson: unknown, inventory: readonly string[], fixture: PackageFixture): void {
+  const expected = fixture === "opencode"
+    ? { name: "@xiopt/pane-dash-opencode", version: "0.1.0", type: "module", main: "./dist/index.js", engines: { opencode: ">=1.17.20" }, exports: { ".": "./dist/index.js", "./server": "./dist/index.js" }, files: ["dist/index.js", "README.md", "LICENSE"] }
+    : { name: "@opencode-ai/plugin", version: "1.17.20", type: "module", exports: { ".": "./index.js" }, files: ["index.js"] }
+  const expectedInventory = fixture === "opencode" ? OPENCODE_PACKAGE_FILES : ["package/package.json", "package/index.js"]
+  if (JSON.stringify(packageJson) !== JSON.stringify(expected)) throw new Error(`${fixture} package.json is not the exact required fixture`)
+  if (JSON.stringify([...inventory].sort()) !== JSON.stringify([...expectedInventory].sort())) throw new Error(`${fixture} tarball inventory is not exact`)
+}
+
+async function packPackage(root: string, name: string, version: string, fixture?: PackageFixture): Promise<LocalPackage> {
   const packCache = join(root, ".pack-cache")
   await mkdir(packCache)
   const packed = await localCommand(["npm", "pack", "--ignore-scripts", "--json", "--pack-destination", root], 30_000, root, false, { ...process.env, npm_config_cache: packCache })
-  const file = (JSON.parse(packed.stdout) as Array<{ filename: string }>)[0]?.filename
+  const metadata = (JSON.parse(packed.stdout) as Array<{ filename: string; files?: Array<{ path: string }> }>)[0]
+  const file = metadata?.filename
   if (!file) throw new Error(`npm pack did not return ${name}`)
+  if (fixture) {
+    const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"))
+    assertExactPackageFixture(packageJson, metadata.files?.map(file => `package/${file.path}`) ?? [], fixture)
+  }
   const tarball = await readFile(join(root, file))
   return { name, version, tarball, integrity: `sha512-${createHash("sha512").update(tarball).digest("base64")}` }
 }
@@ -335,9 +357,10 @@ async function startThenStopOpenCode(tmux: string, socket: string, binary: strin
   const wrapper = join(root, `${session}-bin`)
   const calls = join(root, `${session}-cleanup.log`)
   const permit = join(root, `${session}-cleanup-permit`)
+  const cleanupEntered = join(root, `${session}-cleanup-entered`)
   const marker = join(root, `${session}-complete`)
   await mkdir(wrapper)
-  await writeFile(join(wrapper, "tmux"), tmuxWrapperScript(tmux, socket, calls, permit))
+  await writeFile(join(wrapper, "tmux"), tmuxWrapperScript(tmux, socket, calls, permit, cleanupEntered))
   await chmod(join(wrapper, "tmux"), 0o700)
   await writeFile(script, `#!/bin/sh\nPATH=${shellQuote(wrapper)}:$PATH /usr/bin/sandbox-exec -f ${shellQuote(isolation.profilePath)} ${shellQuote(binary)} run --command noop --print-logs --log-level DEBUG || true\nprintf complete > ${shellQuote(marker)}\nexec cat\n`)
   await chmod(script, 0o700)
@@ -355,20 +378,22 @@ async function startThenStopOpenCode(tmux: string, socket: string, binary: strin
   assertOpenCodeCleanupDelayState(status, heartbeat)
   const paneId = (await localCommand([tmux, "-L", socket, "display-message", "-p", "-t", target, "#{pane_id}"], 5_000)).stdout.trim()
   if (!/^%\d+$/.test(paneId)) throw new Error(`invalid OpenCode pane id: ${paneId}`)
-  await waitForFile(calls, OPENCODE_STARTUP_TIMEOUT_MS)
+  await waitForFile(cleanupEntered, OPENCODE_STARTUP_TIMEOUT_MS)
   assertOpenCodeCleanupDelayState(
     await paneOption(tmux, socket, target, "@pane_dash_status"),
     await paneOption(tmux, socket, target, "@pane_dash_heartbeat"),
   )
   await writeFile(permit, "continue\n")
   await waitForFile(marker, OPENCODE_STARTUP_TIMEOUT_MS)
-  for (const option of ["@pane_dash_status", "@pane_dash_status_since", "@pane_dash_heartbeat", "@pane_dash_title", "@pane_dash_model"]) {
+  for (const option of CLEANUP_PANE_OPTIONS) {
     const value = await paneOption(tmux, socket, target, option)
     if (value) throw new Error(`OpenCode cleanup left ${option}`)
   }
   const cleanupCalls = (await readFile(calls, "utf8")).trim().split("\n")
   const defaultTmuxUses = assertTmuxWrapperCallLines(cleanupCalls, socket)
-  for (const option of ["@pane_dash_status", "@pane_dash_status_since", "@pane_dash_heartbeat", "@pane_dash_title", "@pane_dash_model"]) {
+  const cleanupOnly = cleanupCalls.filter(call => call.startsWith(`-L ${socket} set-option -pu -t ${paneId} `))
+  if (cleanupOnly.length !== CLEANUP_PANE_OPTIONS.length) throw new Error(`unexpected direct cleanup calls: ${cleanupOnly.join(" | ")}`)
+  for (const option of CLEANUP_PANE_OPTIONS) {
     if (cleanupCalls.filter((call) => call === `-L ${socket} set-option -pu -t ${paneId} ${option}`).length !== 1) throw new Error(`missing direct cleanup call for ${option}`)
   }
   await localCommand([tmux, "-L", socket, "kill-session", "-t", session], 10_000)
@@ -555,14 +580,24 @@ export async function runMuslSpike(input: MuslSpikeInput): Promise<MuslSpikeResu
   let runtimeImageId = ""
 
   const cleanup = async (): Promise<unknown[]> => {
-    const results = await Promise.allSettled([
-      cleanupDockerCommand(run, ["docker", "volume", "rm", "-f", registryVolume]),
-      cleanupDockerCommand(run, ["docker", "volume", "rm", "-f", targetVolume]),
-      cleanupDockerCommand(run, ["docker", "image", "rm", "-f", runtimeTag]),
-      ...ownedContainers.map(name => cleanupDockerCommand(run, ["docker", "rm", "-f", name])),
-      rm(buildContext, { recursive: true, force: true }),
-    ])
-    return results.filter((result): result is PromiseRejectedResult => result.status === "rejected").map(result => result.reason)
+    const failures: unknown[] = []
+    const record = async (operation: () => Promise<void>) => {
+      try { await operation() } catch (error) { failures.push(error) }
+    }
+    for (const name of ownedContainers) await record(() => removeOwnedContainer(run, name))
+    const containersAbsent = await containersAreAbsent(run, ownedContainers).catch(error => {
+      failures.push(error)
+      return false
+    })
+    if (containersAbsent) {
+      await record(() => removeOwnedVolume(run, registryVolume, ownedContainers))
+      await record(() => removeOwnedVolume(run, targetVolume, ownedContainers))
+    } else {
+      failures.push(new Error("refusing volume cleanup until owned containers are absent"))
+    }
+    await record(() => removeOwnedImage(run, runtimeTag))
+    await record(async () => { await rm(buildContext, { recursive: true, force: true }) })
+    return failures
   }
 
   let primaryError: unknown
@@ -687,10 +722,55 @@ async function execute(run: CommandRunner, argv: readonly string[], signal: Abor
   return result
 }
 
-async function cleanupDockerCommand(run: CommandRunner, argv: readonly string[]): Promise<void> {
+async function cleanupDockerCommand(run: CommandRunner, argv: readonly string[]): Promise<CommandResult> {
   const result = await within(run(argv, { timeoutMs: DOCKER_CLEANUP_TIMEOUT_MS }), DOCKER_CLEANUP_TIMEOUT_MS)
   if (!result) throw new Error(`cleanup command exceeded ${DOCKER_CLEANUP_TIMEOUT_MS}ms: ${argv.join(" ")}`)
-  if (result.code !== 0) throw new Error(`cleanup command failed (${result.code}): ${argv.join(" ")}: ${result.stderr.trim()}`)
+  return result
+}
+
+function isDockerResourceAbsent(result: CommandResult): boolean {
+  return result.code !== 0 && /(?:no such (?:container|volume|image)|not found)/i.test(`${result.stdout}\n${result.stderr}`)
+}
+
+function assertDockerCleanupSucceeded(result: CommandResult, argv: readonly string[]): void {
+  if (result.code !== 0 && !isDockerResourceAbsent(result)) throw new Error(`cleanup command failed (${result.code}): ${argv.join(" ")}: ${result.stderr.trim()}`)
+}
+
+async function removeOwnedContainer(run: CommandRunner, name: string): Promise<void> {
+  const argv = ["docker", "rm", "-f", name]
+  assertDockerCleanupSucceeded(await cleanupDockerCommand(run, argv), argv)
+  if (!await containersAreAbsent(run, [name])) throw new Error(`owned container remained after cleanup: ${name}`)
+}
+
+async function containersAreAbsent(run: CommandRunner, names: readonly string[]): Promise<boolean> {
+  const deadline = Date.now() + DOCKER_CLEANUP_TIMEOUT_MS
+  do {
+    const inspections = await Promise.all(names.map(name => cleanupDockerCommand(run, ["docker", "container", "inspect", name])))
+    if (inspections.every(result => result.code !== 0)) return true
+    if (Date.now() >= deadline) return false
+    await delay(100)
+  } while (true)
+}
+
+async function removeOwnedVolume(run: CommandRunner, name: string, ownedContainers: readonly string[]): Promise<void> {
+  const argv = ["docker", "volume", "rm", "-f", name]
+  const deadline = Date.now() + DOCKER_CLEANUP_TIMEOUT_MS
+  do {
+    const result = await cleanupDockerCommand(run, argv)
+    if (result.code === 0 || isDockerResourceAbsent(result)) return
+    if (!/volume is in use/i.test(`${result.stdout}\n${result.stderr}`)) {
+      assertDockerCleanupSucceeded(result, argv)
+      return
+    }
+    if (!await containersAreAbsent(run, ownedContainers)) throw new Error(`owned containers remained while removing volume: ${name}`)
+    if (Date.now() >= deadline) throw new Error(`volume remained in use after owned containers were absent: ${name}`)
+    await delay(100)
+  } while (true)
+}
+
+async function removeOwnedImage(run: CommandRunner, tag: string): Promise<void> {
+  const argv = ["docker", "image", "rm", "-f", tag]
+  assertDockerCleanupSucceeded(await cleanupDockerCommand(run, argv), argv)
 }
 
 async function dockerRunner(argv: readonly string[], options: { readonly timeoutMs: number; readonly signal?: AbortSignal }): Promise<CommandResult> {

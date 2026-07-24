@@ -11,6 +11,7 @@ import {
   assertOpenCodeCleanupDelayState,
   assertNoOwnedTmuxProcess,
   assertIsolationObservations,
+  assertExactPackageFixture,
   formatOpenCodePassSummary,
   parseOpenCodePluginSpec,
   requiredSpikeChecks,
@@ -49,6 +50,7 @@ function runner(overrides: Readonly<Record<string, string>> = {}): { runner: Com
     runner: async (argv, options) => {
       invocations.push({ argv, options })
       const command = argv.join(" ")
+      if (command.includes("docker container inspect")) return { code: 1, stdout: "", stderr: "No such container" }
       const stdout = Object.entries(overrides).find(([needle]) => command.includes(needle))?.[1] ?? defaultStdout(argv)
       return { code: 0, stdout, stderr: "" }
     },
@@ -140,12 +142,67 @@ test("requires the owned tmux server probe to report no process", () => {
 test("requires an absolute tmux binary and embeds it in the cleanup wrapper", () => {
   expect(() => validateTmuxBinaryPath(undefined)).toThrow("TMUX_BIN required")
   expect(() => validateTmuxBinaryPath("tmux")).toThrow("absolute")
-  const wrapper = tmuxWrapperScript("/opt/homebrew/bin/tmux", "pd-12345678", "/tmp/calls", "/tmp/done")
+  const wrapper = tmuxWrapperScript("/opt/homebrew/bin/tmux", "pd-12345678", "/tmp/calls", "/tmp/done", "/tmp/cleanup-entered")
   expect(wrapper).toContain("exec '/opt/homebrew/bin/tmux' -L 'pd-12345678'")
   expect(wrapper).toContain('"-L pd-12345678 $*" >> \'/tmp/calls\'')
   expect(wrapper).toContain("/tmp/calls")
   expect(wrapper).toContain("[ -f '/tmp/done' ]")
   expect(wrapper).toContain('[ "$#" -eq 5 ] && [ "$1" = set-option ] && [ "$2" = -pu ]')
+  expect(wrapper).toContain('[ "$4" = "$TMUX_PANE" ]')
+})
+
+test("requires the exact normative OpenCode fixture metadata and tarball inventory", () => {
+  const packageJson = {
+    name: "@xiopt/pane-dash-opencode",
+    version: "0.1.0",
+    type: "module",
+    main: "./dist/index.js",
+    engines: { opencode: ">=1.17.20" },
+    exports: { ".": "./dist/index.js", "./server": "./dist/index.js" },
+    files: ["dist/index.js", "README.md", "LICENSE"],
+  }
+  const inventory = ["package/package.json", "package/README.md", "package/LICENSE", "package/dist/index.js"]
+  expect(() => assertExactPackageFixture(packageJson, inventory, "opencode")).not.toThrow()
+  for (const [field, value] of Object.entries({
+    main: "./index.js",
+    engines: { node: ">=20" },
+    exports: { ".": "./dist/index.js" },
+    type: "commonjs",
+    files: ["dist"],
+    dependencies: { "left-pad": "1.3.0" },
+    scripts: { test: "true" },
+  })) {
+    expect(() => assertExactPackageFixture({ ...packageJson, [field]: value }, inventory, "opencode")).toThrow()
+  }
+  for (const inventoryMutation of [
+    inventory.filter(path => path !== "package/LICENSE"),
+    [...inventory, "package/src/pane-dash.ts"],
+    [...inventory, "package/dist/index.js.map"],
+  ]) expect(() => assertExactPackageFixture(packageJson, inventoryMutation, "opencode")).toThrow()
+})
+
+test("only an exact cleanup call for the observed pane enters the wrapper cleanup gate", async () => {
+  const calls = join(root, "calls")
+  const permit = join(root, "permit")
+  const entered = join(root, "entered")
+  const fakeTmux = join(root, "tmux")
+  const wrapper = join(root, "wrapper")
+  await writeFile(fakeTmux, "#!/bin/sh\nexit 0\n")
+  await chmod(fakeTmux, 0o700)
+  await writeFile(wrapper, tmuxWrapperScript(fakeTmux, "pd-12345678", calls, permit, entered))
+  await chmod(wrapper, 0o700)
+
+  const environment = { ...process.env, TMUX_PANE: "%42" }
+  const generic = Bun.spawn([wrapper, "set-option", "-pt", "%42", "@pane_dash_status", "idle"], { stdout: "pipe", stderr: "pipe", env: environment })
+  expect(await generic.exited).toBe(0)
+  expect(await Bun.file(entered).exists()).toBe(false)
+
+  const cleanup = Bun.spawn([wrapper, "set-option", "-pu", "-t", "%42", "@pane_dash_heartbeat"], { stdout: "pipe", stderr: "pipe", env: environment })
+  for (let attempt = 0; attempt < 20 && !(await Bun.file(entered).exists()); attempt++) await Bun.sleep(10)
+  expect(await Bun.file(entered).exists()).toBe(true)
+  await expect(Promise.race([cleanup.exited, Bun.sleep(25).then(() => "waiting")])).resolves.toBe("waiting")
+  await writeFile(permit, "continue\n")
+  expect(await cleanup.exited).toBe(0)
 })
 
 test("uses a Darwin isolation platform through its runner seam and fails closed elsewhere", async () => {
@@ -287,6 +344,42 @@ test("force-removes every named Docker container after compile, build, or runtim
     expect(removed).toEqual(expect.arrayContaining(names))
     expect(fake.invocations.some(({ argv }) => argv[0] === "docker" && argv[1] === "image" && argv[2] === "rm" && argv[3] === "-f")).toBe(true)
   }
+})
+
+test("removes owned Docker resources in dependency order when volumes reject live containers", async () => {
+  const invocations: Invocation[] = []
+  const liveContainers = new Set<string>()
+  const volumeAttempts = new Map<string, number>()
+  const stateful: CommandRunner = async (argv, options) => {
+    invocations.push({ argv, options })
+    const command = argv.join(" ")
+    if (argv[0] === "docker" && argv[1] === "run") liveContainers.add(argv[argv.indexOf("--name") + 1]!)
+    if (argv[0] === "docker" && argv[1] === "rm") {
+      await Bun.sleep(10)
+      liveContainers.delete(argv[3]!)
+      return { code: 0, stdout: "", stderr: "" }
+    }
+    if (argv[0] === "docker" && argv[1] === "container" && argv[2] === "inspect") {
+      return { code: liveContainers.has(argv[3]!) ? 0 : 1, stdout: "", stderr: "No such container" }
+    }
+    if (argv[0] === "docker" && argv[1] === "volume" && argv[2] === "rm") {
+      const attempts = (volumeAttempts.get(argv[4]!) ?? 0) + 1
+      volumeAttempts.set(argv[4]!, attempts)
+      if (liveContainers.size > 0 || attempts === 1) return { code: 1, stdout: "", stderr: "volume is in use" }
+      return { code: 0, stdout: "", stderr: "" }
+    }
+    return { code: 0, stdout: defaultStdout(argv), stderr: "" }
+  }
+
+  await expect(runMuslSpike({ target: "x86_64-unknown-linux-musl", sourceRoot: root, runner: stateful })).resolves.toMatchObject({
+    provenance: { platform: "linux/amd64" },
+  })
+  const firstVolumeRemoval = invocations.findIndex(({ argv }) => argv[0] === "docker" && argv[1] === "volume" && argv[2] === "rm")
+  const lastContainerRemoval = invocations.reduce((latest, { argv }, index) => argv[0] === "docker" && argv[1] === "rm" ? index : latest, -1)
+  expect(lastContainerRemoval).toBeGreaterThan(-1)
+  expect(firstVolumeRemoval).toBeGreaterThan(lastContainerRemoval)
+  expect(invocations.slice(lastContainerRemoval + 1, firstVolumeRemoval).some(({ argv }) => argv[0] === "docker" && argv[1] === "container" && argv[2] === "inspect")).toBe(true)
+  expect(invocations.filter(({ argv }) => argv[0] === "docker" && argv[1] === "image" && argv[2] === "rm").pop()?.argv[3]).toBe("-f")
 })
 
 test("builds x86_64 only with target-derived pinned images and offline network", async () => {
