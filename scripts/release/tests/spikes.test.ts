@@ -267,6 +267,34 @@ test("classifies only Seatbelt permission errors as non-loopback policy denials"
   }
 })
 
+test("uses the kernel nc boundary for loopback and exact Seatbelt network denials", async () => {
+  const module = await import("../spikes") as Record<string, unknown>
+  const runCanary = module.runNetworkIsolationCanary
+  if (typeof runCanary !== "function") {
+    expect(typeof runCanary).toBe("function")
+    return
+  }
+  const invocations: Invocation[] = []
+  const platform = {
+    platform: "darwin" as const,
+    run: async (argv: readonly string[], _profile: string, timeoutMs: number) => {
+      invocations.push({ argv, options: { timeoutMs } })
+      return argv[2]?.includes("exec /usr/bin/nc -v -z -w 1 '127.0.0.1' '54321'")
+        ? { code: 0, stdout: "", stderr: "" }
+        : { code: 1, stdout: "", stderr: "nc: connectx to 1.1.1.1 port 443 (tcp) failed: Operation not permitted\n" }
+    },
+  }
+
+  await expect(runCanary(platform, "/tmp/profile", "127.0.0.1", "54321")).resolves.toEqual({ outcome: "succeeded" })
+  await expect(runCanary(platform, "/tmp/profile", "1.1.1.1", "443")).resolves.toEqual({ outcome: "denied-by-policy", errno: "EPERM" })
+  expect(invocations).toEqual([
+    { argv: ["/bin/sh", "-ceu", expect.stringMatching(/^exec \/usr\/bin\/nc -v -z -w 1 '127\.0\.0\.1' '54321' 2>'/)], options: { timeoutMs: 5_000 } },
+    { argv: ["/bin/sh", "-ceu", expect.stringMatching(/^exec \/usr\/bin\/nc -v -z -w 1 '1\.1\.1\.1' '443' 2>'/)], options: { timeoutMs: 5_000 } },
+  ])
+  const unexpectedPlatform = { ...platform, run: async () => ({ code: 1, stdout: "", stderr: "nc: connectx to 1.1.1.1 port 443 (tcp) failed: Connection refused\n" }) }
+  await expect(runCanary(unexpectedPlatform, "/tmp/profile", "1.1.1.1", "443")).resolves.toEqual({ outcome: "unexpected:nc: connectx to 1.1.1.1 port 443 (tcp) failed: Connection refused" })
+})
+
 test("redacts the pinned OpenCode binary location from partial Task 1 evidence", async () => {
   const evidence = await Bun.file(new URL("../../../spike/results/v0.1-task1-opencode.md", import.meta.url)).text()
   expect(evidence).toContain("path=<pinned-opencode-1.17.20>")

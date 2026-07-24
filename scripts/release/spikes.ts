@@ -256,9 +256,11 @@ async function runOpenCodeSpike(input: { readonly sourceRoot: string; readonly b
 type DarwinIsolation = { readonly observations: IsolationObservations; readonly profilePath: string }
 
 async function establishDarwinIsolation(input: { readonly root: string; readonly registryHost: "127.0.0.1" | "::1"; readonly registryPort: string }): Promise<DarwinIsolation> {
-  const platform = seatbeltIsolationPlatform(process.platform, (argv, options) => localCommand(argv, options.timeoutMs, undefined, false))
+  const platform = seatbeltIsolationPlatform(process.platform, (argv, options) => localCommand(argv, options.timeoutMs, undefined, true))
   if (process.platform !== "darwin") throw new Error(`Darwin Seatbelt isolation unavailable on ${process.platform}`)
   if (!(await stat("/usr/bin/sandbox-exec")).isFile()) throw new Error("Darwin Seatbelt isolation unavailable: sandbox-exec missing")
+  const netcat = await stat("/usr/bin/nc")
+  if (!netcat.isFile() || (netcat.mode & 0o111) === 0) throw new Error("Darwin Seatbelt isolation unavailable: /usr/bin/nc missing or not executable")
   const policyRoot = await realpath(input.root)
   const writable = await Promise.all([process.env.HOME, process.env.XDG_DATA_HOME, process.env.XDG_CONFIG_HOME, process.env.XDG_CACHE_HOME, process.env.npm_config_cache, process.env.BUN_INSTALL_CACHE_DIR, process.env.TMPDIR, process.env.TMUX_TMPDIR].map(async (path) => {
     if (!path) throw new Error("clean-room writable roots required")
@@ -269,13 +271,13 @@ async function establishDarwinIsolation(input: { readonly root: string; readonly
   await writeFile(profilePath, profile, { mode: 0o600 })
   const policySha256 = createHash("sha256").update(profile).digest("hex")
   const forbidden = join(resolve(policyRoot, "..", ".."), `pane-dash-forbidden-${crypto.randomUUID()}`)
-  const loopback = await runIsolationCanary(platform, profilePath, "network", input.registryHost, input.registryPort)
+  const loopback = await runNetworkIsolationCanary(platform, profilePath, input.registryHost, input.registryPort)
   if (loopback.outcome !== "succeeded") throw new Error(`loopback registry canary failed: ${loopback.outcome}`)
-  const nonLoopback = await runIsolationCanary(platform, profilePath, "network", "1.1.1.1", "443")
+  const nonLoopback = await runNetworkIsolationCanary(platform, profilePath, "1.1.1.1", "443")
   if (nonLoopback.outcome !== "denied-by-policy" || !nonLoopback.errno) throw new Error(`non-loopback canary was not denied by policy: ${nonLoopback.outcome}`)
-  const allowed = await runIsolationCanary(platform, profilePath, "write", join(policyRoot, "canary-write"))
+  const allowed = await runIsolationCanary(platform, profilePath, join(policyRoot, "canary-write"))
   if (allowed.outcome !== "succeeded") throw new Error(`synthetic-root write canary failed: ${allowed.outcome}`)
-  const denied = await runIsolationCanary(platform, profilePath, "write", forbidden)
+  const denied = await runIsolationCanary(platform, profilePath, forbidden)
   if (denied.outcome !== "denied-by-policy") throw new Error(`forbidden write canary was not denied by policy: ${denied.outcome}`)
   return { profilePath, observations: { platform: "darwin", policySha256, nonLoopbackConnect: "denied-by-policy", nonLoopbackConnectErrno: nonLoopback.errno, loopbackRegistryConnect: "succeeded", allowedSyntheticWrite: "succeeded", forbiddenWrite: "denied-by-policy", publicNetworkRequests: 0, realHomeWrites: 0, defaultTmuxUses: 0 } }
 }
@@ -313,17 +315,26 @@ export function classifySeatbeltNetworkDenial(error: { readonly code?: unknown; 
   return { outcome: `unexpected:${code || message}` }
 }
 
-async function runIsolationCanary(platform: IsolationPlatform, profile: string, mode: "network" | "write", first: string, second?: string): Promise<IsolationCanaryResult> {
-  const script = mode === "network"
-    ? `import net from "node:net"; const socket=net.connect({host:${JSON.stringify(first)},port:${JSON.stringify(Number(second))}}); const done=(v)=>{console.log(JSON.stringify(v));socket.destroy();process.exit(0)}; socket.once("connect",()=>done({outcome:"succeeded"})); socket.once("error",(e)=>done({code:e.code,message:String(e.message)})); setTimeout(()=>done({code:"ETIMEDOUT",message:"timeout"}),1500);`
-    : `import {writeFile} from "node:fs/promises"; try { await writeFile(${JSON.stringify(first)},"canary\\n"); console.log("succeeded") } catch (e) { console.log(["EPERM","EACCES","Operation not permitted"].some((x)=>String(e.code||e.message).includes(x))?"denied-by-policy":"unexpected:"+(e.code||e.message)) }`
+export async function runNetworkIsolationCanary(platform: IsolationPlatform, profile: string, host: string, port: string): Promise<SeatbeltNetworkClassification | { readonly outcome: "succeeded" }> {
+  const captureRoot = await mkdtemp(join(process.env.TMPDIR || tmpdir(), "pane-dash-seatbelt-nc-"))
+  const stderrPath = join(captureRoot, "stderr")
+  try {
+    const command = `exec /usr/bin/nc -v -z -w 1 ${shellQuote(host)} ${shellQuote(port)} 2>${shellQuote(stderrPath)}`
+    const result = await platform.run(["/bin/sh", "-ceu", command], profile, 5_000)
+    if (result.code === 0) return { outcome: "succeeded" }
+    const message = (await readFile(stderrPath, "utf8").catch(() => result.stderr)).trim()
+    const match = /^nc: connectx to .+ failed: (Operation not permitted|Permission denied)$/.exec(message)
+    return classifySeatbeltNetworkDenial({ message: match?.[1] ?? message })
+  } finally {
+    await rm(captureRoot, { recursive: true, force: true })
+  }
+}
+
+async function runIsolationCanary(platform: IsolationPlatform, profile: string, first: string): Promise<IsolationCanaryResult> {
+  const script = `import {writeFile} from "node:fs/promises"; try { await writeFile(${JSON.stringify(first)},"canary\\n"); console.log("succeeded") } catch (e) { console.log(["EPERM","EACCES","Operation not permitted"].some((x)=>String(e.code||e.message).includes(x))?"denied-by-policy":"unexpected:"+(e.code||e.message)) }`
   const result = await platform.run([process.execPath, "-e", script], profile, 5_000)
-  if (result.code !== 0) throw new Error(`isolation ${mode} canary failed (${result.code}): ${result.stderr.trim()}`)
-  if (mode === "write") return { outcome: result.stdout.trim() as "succeeded" | "denied-by-policy" }
-  const parsed: unknown = JSON.parse(result.stdout)
-  if (!parsed || typeof parsed !== "object") return { outcome: "unexpected:invalid-canary-output" }
-  const value = parsed as { readonly outcome?: unknown; readonly code?: unknown; readonly message?: unknown }
-  return value.outcome === "succeeded" ? { outcome: "succeeded" } : classifySeatbeltNetworkDenial(value)
+  if (result.code !== 0) throw new Error(`isolation write canary failed (${result.code}): ${result.stderr.trim()}`)
+  return { outcome: result.stdout.trim() as "succeeded" | "denied-by-policy" }
 }
 
 async function packOpenCodePlugin(sourceRoot: string, packageRoot: string): Promise<LocalPackage> {
