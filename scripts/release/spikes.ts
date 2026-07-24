@@ -10,6 +10,20 @@ export type MuslTarget = "aarch64-unknown-linux-musl" | "x86_64-unknown-linux-mu
 type CommandResult = { readonly code: number; readonly stdout: string; readonly stderr: string }
 export type CommandRunner = (argv: readonly string[], options: { readonly timeoutMs: number; readonly signal?: AbortSignal }) => Promise<CommandResult>
 
+export class CommandTimeoutError extends Error {
+  constructor(readonly argv: readonly string[], readonly stdout: string, readonly stderr: string) {
+    super(`timed out after running ${basename(argv[0] ?? "command")}`)
+    this.name = "CommandTimeoutError"
+  }
+}
+
+export class CommandAbortedError extends Error {
+  constructor(readonly argv: readonly string[], readonly stdout: string, readonly stderr: string) {
+    super(`aborted while running ${basename(argv[0] ?? "command")}`)
+    this.name = "CommandAbortedError"
+  }
+}
+
 export type IsolationObservations = {
   readonly platform: "darwin"
   readonly policySha256: string
@@ -60,6 +74,11 @@ const SMOKE_TIMEOUT_MS = 45_000
 const OPENCODE_VERSION_TIMEOUT_MS = 5_000
 const OPENCODE_STARTUP_TIMEOUT_MS = 30_000
 const OPENCODE_PLUGIN_SPEC = "@xiopt/pane-dash-opencode@0.1.0"
+const COMMAND_OUTPUT_CAP_BYTES = 1_000_000
+const COMMAND_TERM_GRACE_MS = 300
+const COMMAND_REAP_TIMEOUT_MS = 500
+const COMMAND_PIPE_TIMEOUT_MS = 500
+const DOCKER_CLEANUP_TIMEOUT_MS = 30_000
 
 const targetInfo = (target: MuslTarget) => target === "x86_64-unknown-linux-musl"
   ? { architecture: "x86-64", builderArch: "amd64" as const, platform: "linux/amd64" as const, uname: "x86_64" }
@@ -402,14 +421,115 @@ async function paneOption(tmux: string, socket: string, target: string, option: 
   return result.stdout.trim()
 }
 
-async function localCommand(argv: readonly string[], timeoutMs: number, cwd?: string, allowFailure = false, env = process.env): Promise<CommandResult> {
-  const child = Bun.spawn(argv, { cwd, env, stdout: "pipe", stderr: "pipe" })
-  const timeout = setTimeout(() => child.kill(), timeoutMs)
+export async function localCommand(argv: readonly string[], timeoutMs: number, cwd?: string, allowFailure = false, env = process.env, signal?: AbortSignal): Promise<CommandResult> {
+  const result = await superviseCommand(argv, { timeoutMs, signal, cwd, env })
+  if (!allowFailure && result.code !== 0) throw new Error(`${basename(argv[0] ?? "command")} failed (${result.code}): ${result.stderr.trim()}`)
+  return result
+}
+
+type SupervisedCommandOptions = {
+  readonly timeoutMs: number
+  readonly signal?: AbortSignal
+  readonly cwd?: string
+  readonly env?: Record<string, string | undefined>
+}
+
+function collectBoundedOutput(stream: ReadableStream<Uint8Array>): { readonly result: Promise<string>; cancel(): Promise<void> } {
+  const reader = stream.getReader()
+  let captured = ""
+  let bytes = 0
+  let truncated = false
+  const decoder = new TextDecoder()
+  const result = (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const permitted = Math.max(0, COMMAND_OUTPUT_CAP_BYTES - bytes)
+        bytes += value.byteLength
+        if (permitted > 0) captured += decoder.decode(value.subarray(0, permitted), { stream: true })
+        if (value.byteLength > permitted) truncated = true
+      }
+      captured += decoder.decode()
+      return `${captured}${truncated ? "\n[output truncated]" : ""}`
+    } finally {
+      reader.releaseLock()
+    }
+  })()
+  return { result, cancel: async () => { await reader.cancel().catch(() => undefined) } }
+}
+
+function delay(ms: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, ms)) }
+
+async function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+  return await new Promise<T | undefined>((resolve, reject) => {
+    const timer = setTimeout(() => resolve(undefined), timeoutMs)
+    promise.then(
+      value => { clearTimeout(timer); resolve(value) },
+      error => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
+
+function signalOwnedGroup(groupId: number, signal: "SIGTERM" | "SIGKILL"): void {
+  // `detached` gives the leader a fresh PGID equal to its PID. A live pipe proves
+  // this group still has one of our descendants, so its PGID cannot be reused.
+  try { process.kill(-groupId, signal) } catch (error) {
+    if (!(error instanceof Error) || !/ESRCH/.test(error.message)) throw error
+  }
+}
+
+async function stopOwnedGroup(groupId: number): Promise<void> {
+  signalOwnedGroup(groupId, "SIGTERM")
+  await delay(COMMAND_TERM_GRACE_MS)
+  signalOwnedGroup(groupId, "SIGKILL")
+}
+
+async function superviseCommand(argv: readonly string[], options: SupervisedCommandOptions): Promise<CommandResult> {
+  if (options.signal?.aborted) throw new CommandAbortedError(argv, "", "")
+  const child = Bun.spawn(argv, { cwd: options.cwd, env: options.env, stdout: "pipe", stderr: "pipe", detached: true })
+  const stdout = collectBoundedOutput(child.stdout)
+  const stderr = collectBoundedOutput(child.stderr)
+  let pipesClosed = false
+  const pipes = Promise.all([stdout.result, stderr.result]).then(([out, err]) => {
+    pipesClosed = true
+    return { stdout: out, stderr: err }
+  })
+  let abort: (() => void) | undefined
+  const aborted = new Promise<"aborted">(resolve => {
+    abort = () => resolve("aborted")
+    options.signal?.addEventListener("abort", abort, { once: true })
+  })
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const timer = new Promise<"timed-out">(resolve => { timeout = setTimeout(() => resolve("timed-out"), options.timeoutMs) })
+
   try {
-    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
-    if (!allowFailure && code !== 0) throw new Error(`${basename(argv[0] ?? "command")} failed (${code}): ${stderr.trim()}`)
-    return { code, stdout, stderr }
-  } finally { clearTimeout(timeout) }
+    const outcome = await Promise.race([
+      child.exited.then(code => ({ kind: "exited" as const, code })),
+      timer.then(kind => ({ kind })),
+      aborted.then(kind => ({ kind })),
+    ])
+    if (outcome.kind === "exited") {
+      const output = await within(pipes, COMMAND_PIPE_TIMEOUT_MS)
+      if (output) return { code: outcome.code, ...output }
+      await stopOwnedGroup(child.pid)
+      const stoppedOutput = await within(pipes, COMMAND_PIPE_TIMEOUT_MS)
+      if (stoppedOutput) return { code: outcome.code, ...stoppedOutput }
+      await Promise.all([stdout.cancel(), stderr.cancel()])
+      return { code: outcome.code, stdout: "[output pipe did not close]", stderr: "[output pipe did not close]" }
+    }
+
+    await stopOwnedGroup(child.pid)
+    await within(child.exited, COMMAND_REAP_TIMEOUT_MS)
+    const output = await within(pipes, COMMAND_PIPE_TIMEOUT_MS)
+    if (!output) await Promise.all([stdout.cancel(), stderr.cancel()])
+    const captured = output ?? { stdout: "[output pipe did not close]", stderr: "[output pipe did not close]" }
+    if (outcome.kind === "timed-out") throw new CommandTimeoutError(argv, captured.stdout, captured.stderr)
+    throw new CommandAbortedError(argv, captured.stdout, captured.stderr)
+  } finally {
+    clearTimeout(timeout)
+    options.signal?.removeEventListener("abort", abort!)
+  }
 }
 
 function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'` }
@@ -424,46 +544,55 @@ export async function runMuslSpike(input: MuslSpikeInput): Promise<MuslSpikeResu
   const registryVolume = `pane-dash-musl-registry-${suffix}`
   const targetVolume = `pane-dash-musl-target-${suffix}`
   const runtimeTag = `pane-dash-musl-runtime-${suffix}`
+  const ownedContainers: string[] = []
+  const docker = (image: string, args: readonly string[]) => {
+    const name = `pane-dash-musl-${suffix}-${ownedContainers.length}`
+    ownedContainers.push(name)
+    return dockerRun(info.platform, image, args, name)
+  }
   const buildContext = await mkdtemp(join(tmpdir(), "pane-dash-musl-runtime-"))
   const dockerfile = join(sourceRoot, "scripts/release/tmux-runtime.Dockerfile")
   let runtimeImageId = ""
 
-  const cleanup = async () => {
-    await Promise.allSettled([
-      execute(run, ["docker", "volume", "rm", "-f", registryVolume], input.signal, 30_000),
-      execute(run, ["docker", "volume", "rm", "-f", targetVolume], input.signal, 30_000),
-      execute(run, ["docker", "image", "rm", "-f", runtimeTag], input.signal, 30_000),
+  const cleanup = async (): Promise<unknown[]> => {
+    const results = await Promise.allSettled([
+      cleanupDockerCommand(run, ["docker", "volume", "rm", "-f", registryVolume]),
+      cleanupDockerCommand(run, ["docker", "volume", "rm", "-f", targetVolume]),
+      cleanupDockerCommand(run, ["docker", "image", "rm", "-f", runtimeTag]),
+      ...ownedContainers.map(name => cleanupDockerCommand(run, ["docker", "rm", "-f", name])),
+      rm(buildContext, { recursive: true, force: true }),
     ])
-    await rm(buildContext, { recursive: true, force: true })
+    return results.filter((result): result is PromiseRejectedResult => result.status === "rejected").map(result => result.reason)
   }
 
+  let primaryError: unknown
   try {
     await copyFile(dockerfile, join(buildContext, "tmux-runtime.Dockerfile"))
     const builderRepoDigest = await ensureExactImage(run, image, info.platform, input.signal)
     const runtimeImage = runtimeManifest(info.builderArch)
     await ensureExactImage(run, runtimeImage, info.platform, input.signal, true)
-    await verifyBuilder(run, image, info.platform, input.target, input.signal)
+    await verifyBuilder(run, image, info.platform, input.target, input.signal, docker)
     await execute(run, ["docker", "volume", "create", registryVolume], input.signal, 30_000)
     await execute(run, ["docker", "volume", "create", targetVolume], input.signal, 30_000)
 
     // Bootstrap may fetch locked dependencies. The compile itself is separately offline.
-    await execute(run, dockerRun(info.platform, image, [
+    await execute(run, docker(image, [
       "--network", "bridge", "-v", `${sourceRoot}:/source:ro`, "-v", `${registryVolume}:/cargo`, "-v", `${targetVolume}:/target`,
       "-e", "CARGO_HOME=/cargo", "-e", "CARGO_TARGET_DIR=/target", "-w", "/source/pane-dash",
       "sh", "-ceu", "cargo fetch --locked",
     ]), input.signal, DOCKER_TIMEOUT_MS)
-    await execute(run, dockerRun(info.platform, image, [
+    await execute(run, docker(image, [
       "--network", "none", "-v", `${sourceRoot}:/source:ro`, "-v", `${registryVolume}:/cargo`, "-v", `${targetVolume}:/target`,
       "-e", "CARGO_HOME=/cargo", "-e", "CARGO_TARGET_DIR=/target", "-w", "/source/pane-dash",
       "sh", "-ceu", `cargo build --locked --offline --release --target ${input.target}`,
     ]), input.signal, DOCKER_TIMEOUT_MS)
 
-    await execute(run, ["docker", "build", "--platform", info.platform, "--network", "default", "--build-arg", `DEBIAN_BASE=${runtimeImage}`, "-f", join(buildContext, "tmux-runtime.Dockerfile"), "-t", runtimeTag, buildContext], input.signal, DOCKER_TIMEOUT_MS)
+    await execute(run, ["docker", "build", "--rm", "--force-rm", "--platform", info.platform, "--network", "default", "--build-arg", `DEBIAN_BASE=${runtimeImage}`, "-f", join(buildContext, "tmux-runtime.Dockerfile"), "-t", runtimeTag, buildContext], input.signal, DOCKER_TIMEOUT_MS)
     runtimeImageId = (await execute(run, ["docker", "image", "inspect", "--format", "{{.Id}}", runtimeTag], input.signal, 30_000)).stdout.trim()
     if (!runtimeImageId) throw new Error("runtime image ID missing")
 
     const binary = `/work/${input.target}/release/pane-dash`
-    const runtime = (command: string, timeoutMs = 30_000) => execute(run, dockerRun(info.platform, runtimeTag, [
+    const runtime = (command: string, timeoutMs = 30_000) => execute(run, docker(runtimeTag, [
       "--network", "none", "--entrypoint", "/bin/sh", "-v", `${targetVolume}:/work:ro`, "-ceu", command,
     ]), input.signal, timeoutMs)
     const runtimeUname = (await runtime("uname -m")).stdout.trim()
@@ -489,12 +618,22 @@ export async function runMuslSpike(input: MuslSpikeInput): Promise<MuslSpikeResu
       tmuxOutput,
       provenance: { target: input.target, platform: info.platform, builderDigest: `sha256:${RUST_ALPINE_BUILDERS[info.builderArch]}`, builderImage: image, runtimeImageId, runtimeBaseDigest: TMUX_RUNTIME.debianDigest, runtimeManifest: runtimeImage, tmuxVersion: tmuxOutput.trim(), runtimeUname },
     }
+  } catch (error) {
+    primaryError = error
+    throw error
   } finally {
-    await cleanup()
+    const cleanupFailures = await cleanup()
+    if (cleanupFailures.length > 0 && primaryError !== undefined) {
+      if (typeof primaryError === "object" && primaryError) {
+        Object.defineProperty(primaryError, "cleanupFailures", { value: cleanupFailures, enumerable: false })
+      }
+    } else if (cleanupFailures.length > 0) {
+      throw new AggregateError(cleanupFailures, "Docker resource cleanup failed")
+    }
   }
 }
 
-function dockerRun(platform: string, image: string, args: readonly string[]): string[] {
+function dockerRun(platform: string, image: string, args: readonly string[], name: string): string[] {
   const options: string[] = []
   let cursor = 0
   while (cursor < args.length) {
@@ -505,7 +644,7 @@ function dockerRun(platform: string, image: string, args: readonly string[]): st
     options.push(option, value)
     cursor += 2
   }
-  return ["docker", "run", "--rm", "--platform", platform, ...options, image, ...args.slice(cursor)]
+  return ["docker", "run", "--rm", "--name", name, "--platform", platform, ...options, image, ...args.slice(cursor)]
 }
 
 async function ensureExactImage(run: CommandRunner, image: string, platform: string, signal?: AbortSignal, allowIndexAlias = false): Promise<string> {
@@ -533,12 +672,12 @@ async function ensureExactImage(run: CommandRunner, image: string, platform: str
   return digest
 }
 
-async function verifyBuilder(run: CommandRunner, image: string, platform: string, target: MuslTarget, signal?: AbortSignal): Promise<void> {
-  const host = (await execute(run, dockerRun(platform, image, ["--network", "none", "rustc", "-vV"]), signal, 30_000)).stdout
+async function verifyBuilder(run: CommandRunner, image: string, platform: string, target: MuslTarget, signal: AbortSignal | undefined, docker: (image: string, args: readonly string[]) => string[]): Promise<void> {
+  const host = (await execute(run, docker(image, ["--network", "none", "rustc", "-vV"]), signal, 30_000)).stdout
   if (!host.includes(`host: ${target}`)) throw new Error(`Rust host expected ${target}, got ${host.trim()}`)
-  const cargo = await run(dockerRun(platform, image, ["--network", "none", "cargo", "--version"]), { timeoutMs: 30_000, signal })
+  const cargo = await run(docker(image, ["--network", "none", "cargo", "--version"]), { timeoutMs: 30_000, signal })
   if (cargo.code !== 0 || !/^cargo \d+\.\d+\.\d+/m.test(cargo.stdout)) throw new Error("cargo unavailable in pinned builder")
-  const installed = (await execute(run, dockerRun(platform, image, ["--network", "none", "rustup", "target", "list", "--installed"]), signal, 30_000)).stdout
+  const installed = (await execute(run, docker(image, ["--network", "none", "rustup", "target", "list", "--installed"]), signal, 30_000)).stdout
   if (!installed.split(/\r?\n/).includes(target)) throw new Error(`Rust target ${target} is not installed`)
 }
 
@@ -548,18 +687,14 @@ async function execute(run: CommandRunner, argv: readonly string[], signal: Abor
   return result
 }
 
+async function cleanupDockerCommand(run: CommandRunner, argv: readonly string[]): Promise<void> {
+  const result = await within(run(argv, { timeoutMs: DOCKER_CLEANUP_TIMEOUT_MS }), DOCKER_CLEANUP_TIMEOUT_MS)
+  if (!result) throw new Error(`cleanup command exceeded ${DOCKER_CLEANUP_TIMEOUT_MS}ms: ${argv.join(" ")}`)
+  if (result.code !== 0) throw new Error(`cleanup command failed (${result.code}): ${argv.join(" ")}: ${result.stderr.trim()}`)
+}
+
 async function dockerRunner(argv: readonly string[], options: { readonly timeoutMs: number; readonly signal?: AbortSignal }): Promise<CommandResult> {
-  const child = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" })
-  const timeout = setTimeout(() => child.kill(), options.timeoutMs)
-  const abort = () => child.kill()
-  options.signal?.addEventListener("abort", abort, { once: true })
-  try {
-    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
-    return { code, stdout, stderr }
-  } finally {
-    clearTimeout(timeout)
-    options.signal?.removeEventListener("abort", abort)
-  }
+  return await superviseCommand(argv, options)
 }
 
 function smokeScript(binary: string): string {

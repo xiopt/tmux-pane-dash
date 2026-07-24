@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
-import { chmod, mkdtemp, mkdir, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   type CommandRunner,
+  CommandAbortedError,
+  CommandTimeoutError,
   normalizeOpenCodeVersion,
   assertOpenCodeRegistryRequests,
   assertOpenCodeCleanupDelayState,
@@ -17,6 +19,7 @@ import {
   seatbeltIsolationPlatform,
   tmuxWrapperScript,
   validateTmuxBinaryPath,
+  localCommand,
 } from "../spikes"
 
 type Invocation = {
@@ -202,6 +205,90 @@ test("normalizes an OpenCode binary version through the CLI", async () => {
   expect(stderr).toBe("")
 })
 
+test("bounds a TERM-ignoring local process group whose descendant holds both pipes open", async () => {
+  const pids = join(root, "pids")
+  const script = [
+    "trap '' TERM",
+    "echo \"$$\" > \"$1\"",
+    "( trap '' TERM; while :; do printf x >&1; printf y >&2; done ) &",
+    "echo \"$!\" >> \"$1\"",
+    "while :; do sleep 1; done",
+  ].join("\n")
+  const started = performance.now()
+
+  try {
+    const error = await localCommand(["/bin/sh", "-ceu", script, "sh", pids], 100).catch(error => error)
+    expect(error).toBeInstanceOf(CommandTimeoutError)
+    expect((error as CommandTimeoutError).stdout.length).toBeLessThanOrEqual(1_000_100)
+    expect((error as CommandTimeoutError).stderr.length).toBeLessThanOrEqual(1_000_100)
+    expect(performance.now() - started).toBeLessThan(1_500)
+    const [leader, descendant] = (await readFile(pids, "utf8")).trim().split("\n")
+    await expect(localCommand(["/bin/kill", "-0", leader!], 500, undefined, true)).resolves.toMatchObject({ code: 1 })
+    await expect(localCommand(["/bin/kill", "-0", descendant!], 500, undefined, true)).resolves.toMatchObject({ code: 1 })
+  } finally {
+    const pidsText = await readFile(pids, "utf8").catch(() => "")
+    for (const pid of pidsText.trim().split("\n")) if (pid) Bun.spawnSync(["/bin/kill", "-KILL", pid])
+  }
+})
+
+test("aborts a TERM-ignoring local process group and reaps its pipe holder", async () => {
+  const pids = join(root, "abort-pids")
+  const controller = new AbortController()
+  const script = "trap '' TERM\necho \"$$\" > \"$1\"\n( trap '' TERM; while :; do printf x; printf y >&2; sleep 0.01; done ) &\necho \"$!\" >> \"$1\"\nwhile :; do sleep 1; done"
+  const command = localCommand(["/bin/sh", "-ceu", script, "sh", pids], 5_000, undefined, false, process.env, controller.signal)
+  try {
+    for (let attempt = 0; attempt < 20 && !(await Bun.file(pids).exists()); attempt++) await Bun.sleep(10)
+    controller.abort()
+    await expect(command).rejects.toBeInstanceOf(CommandAbortedError)
+    const [leader, descendant] = (await readFile(pids, "utf8")).trim().split("\n")
+    await expect(localCommand(["/bin/kill", "-0", leader!], 500, undefined, true)).resolves.toMatchObject({ code: 1 })
+    await expect(localCommand(["/bin/kill", "-0", descendant!], 500, undefined, true)).resolves.toMatchObject({ code: 1 })
+  } finally {
+    controller.abort()
+    const pidsText = await readFile(pids, "utf8").catch(() => "")
+    for (const pid of pidsText.trim().split("\n")) if (pid) Bun.spawnSync(["/bin/kill", "-KILL", pid])
+    await command.catch(() => undefined)
+  }
+})
+
+test("cleans a descendant pipe holder after its leader exits successfully", async () => {
+  const pids = join(root, "fast-pids")
+  const script = "echo \"$$\" > \"$1\"\n( trap '' TERM; while :; do printf x; printf y >&2; sleep 0.01; done ) &\necho \"$!\" >> \"$1\"\nexit 0"
+  const started = performance.now()
+  try {
+    await expect(localCommand(["/bin/sh", "-ceu", script, "sh", pids], 5_000)).resolves.toMatchObject({ code: 0 })
+    expect(performance.now() - started).toBeLessThan(1_500)
+    const [, descendant] = (await readFile(pids, "utf8")).trim().split("\n")
+    await expect(localCommand(["/bin/kill", "-0", descendant!], 500, undefined, true)).resolves.toMatchObject({ code: 1 })
+  } finally {
+    const pidsText = await readFile(pids, "utf8").catch(() => "")
+    for (const pid of pidsText.trim().split("\n")) if (pid) Bun.spawnSync(["/bin/kill", "-KILL", pid])
+  }
+})
+
+test("does not let allowFailure convert a local timeout into success", async () => {
+  await expect(localCommand(["/bin/sh", "-ceu", "trap '' TERM; while :; do sleep 1; done"], 50, undefined, true)).rejects.toBeInstanceOf(CommandTimeoutError)
+})
+
+test("force-removes every named Docker container after compile, build, or runtime timeout", async () => {
+  for (const needle of ["cargo build --locked --offline", "docker build", "timeout 20"] as const) {
+    const fake = runner()
+    const timeout: CommandRunner = async (argv, options) => {
+      if (argv.join(" ").includes(needle)) throw new Error(`timed out ${needle}`)
+      return fake.runner(argv, options)
+    }
+    await expect(runMuslSpike({ target: "x86_64-unknown-linux-musl", sourceRoot: root, runner: timeout })).rejects.toThrow("timed out")
+    const names = fake.invocations
+      .filter(({ argv }) => argv[0] === "docker" && argv[1] === "run")
+      .map(({ argv }) => argv[argv.indexOf("--name") + 1])
+    const removed = fake.invocations
+      .filter(({ argv }) => argv[0] === "docker" && argv[1] === "rm" && argv[2] === "-f")
+      .map(({ argv }) => argv[3])
+    expect(removed).toEqual(expect.arrayContaining(names))
+    expect(fake.invocations.some(({ argv }) => argv[0] === "docker" && argv[1] === "image" && argv[2] === "rm" && argv[3] === "-f")).toBe(true)
+  }
+})
+
 test("builds x86_64 only with target-derived pinned images and offline network", async () => {
   const fake = runner()
 
@@ -220,7 +307,7 @@ test("builds x86_64 only with target-derived pinned images and offline network",
   expect(fake.invocations.some(({ argv }) => argv.join(" ").includes("cargo build --locked --offline --release --target x86_64-unknown-linux-musl"))).toBe(true)
   expect(fake.invocations.some(({ argv }) => argv.includes(`${root}:/source:ro`))).toBe(true)
   const runtimeBuild = fake.invocations.find(({ argv }) => argv[0] === "docker" && argv[1] === "build")
-  expect(runtimeBuild?.argv).toEqual(expect.arrayContaining(["--platform", "linux/amd64", "--network", "default", "-t"]))
+  expect(runtimeBuild?.argv).toEqual(expect.arrayContaining(["--platform", "linux/amd64", "--network", "default", "--rm", "--force-rm", "-t"]))
   expect(runtimeBuild?.argv).not.toContain("buildx")
   expect(runtimeBuild?.argv).not.toContain("--load")
   expect(runtimeBuild?.argv).toEqual(expect.arrayContaining([
@@ -243,6 +330,10 @@ test("builds x86_64 only with target-derived pinned images and offline network",
   expect(fake.invocations.some(({ argv }) => argv.some((part) => part.includes("/Users/") && part.includes(".cargo")))).toBe(false)
   expect(fake.invocations.some(({ argv }) => argv.join(" ").includes("volume rm"))).toBe(true)
   expect(fake.invocations.some(({ argv }) => argv.join(" ").includes("image rm"))).toBe(true)
+  const dockerRuns = fake.invocations.filter(({ argv }) => argv[0] === "docker" && argv[1] === "run")
+  expect(dockerRuns.length).toBeGreaterThan(0)
+  expect(dockerRuns.every(({ argv }) => argv.includes("--name") && argv[argv.indexOf("--name") + 1]?.startsWith("pane-dash-musl-"))).toBe(true)
+  expect(fake.invocations.filter(({ argv }) => argv[0] === "docker" && argv[1] === "rm" && argv.includes("-f")).length).toBe(dockerRuns.length)
 })
 
 test("rejects a builder RepoDigest that differs from the target pin and still cleans owned resources", async () => {
