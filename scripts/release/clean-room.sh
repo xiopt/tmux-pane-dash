@@ -33,10 +33,13 @@ if [[ ! "$tmux_version" =~ ^tmux\ 3\.([6-9]|[1-9][0-9])([^0-9].*)?$ ]]; then
   exit 64
 fi
 
+ambient_home=${HOME:-}
 root=$(mktemp -d "${TMPDIR:-/tmp}/tmux-pane-dash-clean.XXXXXX")
 root=$(cd "$root" && pwd -P)
 tmux_root=$(mktemp -d /tmp/pd-tmux.XXXXXX)
 tmux_root=$(cd "$tmux_root" && pwd -P)
+tmp_root=$(mktemp -d /tmp/pd-tmp.XXXXXX)
+tmp_root=$(cd "$tmp_root" && pwd -P)
 # macOS bounds Unix-domain socket paths; the clean-room root can already be long.
 printf -v socket 'pd-%04x%04x' "$RANDOM" "$RANDOM"
 child_pid=''
@@ -65,6 +68,7 @@ cleanup() {
     TMUX='' TMUX_PANE='' TMUX_TMPDIR="$tmux_root" "${tools[TMUX_BIN]}" -L "$socket" kill-server 2>/dev/null || true
   fi
   rm -rf -- "$tmux_root"
+  rm -rf -- "$tmp_root"
   rm -rf -- "$root"
   exit "$status"
 }
@@ -81,6 +85,13 @@ unset BUN_INSTALL BUN_INSTALL_CACHE_DIR
 for tool in "${tool_names[@]}"; do unset "$tool"; done
 for tool in "${!tools[@]}"; do export "$tool=${tools[$tool]}"; done
 
+if [ -z "${RUSTUP_HOME:-}" ] && [[ "$ambient_home" = /* ]] && [ -d "$ambient_home/.rustup" ]; then
+  export RUSTUP_HOME="$ambient_home/.rustup"
+fi
+if [ -z "${CARGO_HOME:-}" ] && [[ "$ambient_home" = /* ]] && [ -d "$ambient_home/.cargo" ]; then
+  export CARGO_HOME="$ambient_home/.cargo"
+fi
+
 export HOME="$root/home"
 export XDG_DATA_HOME="$root/xdg-data"
 export XDG_CONFIG_HOME="$root/xdg-config"
@@ -88,7 +99,7 @@ export XDG_CACHE_HOME="$root/xdg-cache"
 export npm_config_cache="$root/npm-cache"
 export npm_config_userconfig="$root/npmrc"
 export BUN_INSTALL_CACHE_DIR="$root/bun-cache"
-export TMPDIR="$root/tmp"
+export TMPDIR="$tmp_root"
 export TMUX_TMPDIR="$tmux_root"
 export PANE_DASH_TMUX_SOCKET="$socket"
 mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$npm_config_cache" "$BUN_INSTALL_CACHE_DIR" "$TMPDIR" "$TMUX_TMPDIR"

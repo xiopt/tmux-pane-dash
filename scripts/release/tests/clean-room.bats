@@ -64,3 +64,23 @@ setup() {
   run "$repo_root/scripts/release/clean-room.sh" -- sh -c 'case "$PANE_DASH_TMUX_SOCKET" in pd-????????) [ "${#PANE_DASH_TMUX_SOCKET}" -le 11 ] ;; *) exit 1 ;; esac'
   [ "$status" -eq 0 ]
 }
+
+@test "keeps an existing Rustup toolchain root when replacing HOME" {
+  mkdir -p "$ambient/home/.rustup" "$ambient/home/.cargo"
+  run env -u RUSTUP_HOME -u CARGO_HOME \
+    HOME="$ambient/home" \
+    EXPECTED_RUSTUP_HOME="$ambient/home/.rustup" \
+    EXPECTED_CARGO_HOME="$ambient/home/.cargo" \
+    "$repo_root/scripts/release/clean-room.sh" -- sh -c 'test "$RUSTUP_HOME" = "$EXPECTED_RUSTUP_HOME" && test "$CARGO_HOME" = "$EXPECTED_CARGO_HOME"'
+  [ "$status" -eq 0 ]
+}
+
+@test "uses and removes a short isolated TMPDIR for tmux socket consumers" {
+  observed="$BATS_TEST_TMPDIR/tmpdir"
+  run env OBSERVED="$observed" "$repo_root/scripts/release/clean-room.sh" -- sh -c 'printf "%s\n" "$TMPDIR" > "$OBSERVED"'
+  [ "$status" -eq 0 ]
+  tmpdir="$(cat "$observed")"
+  [[ "$(basename "$tmpdir")" == pd-tmp.* ]]
+  [ "${#tmpdir}" -le 32 ]
+  [ ! -e "$tmpdir" ]
+}

@@ -25,6 +25,7 @@ validate_tools() {
   case "$node:$npm" in /*:/*) ;; *) return 1 ;; esac
   [ -x "$node" ] && [ -x "$npm" ] || return 1
   [ "$("$node" --version 2>/dev/null)" = 'v20.0.0' ] || return 1
+  "$node" "$npm" --version >/dev/null 2>&1
 }
 
 descriptor_root=''
@@ -114,7 +115,7 @@ write_descriptor() {
 }
 
 provision() {
-  local mise root node npm install_pid elapsed=0
+  local mise root node npm gpg_link install_pid elapsed=0
   mise=$(command -v mise || true)
   case "$mise" in /*) [ -x "$mise" ] || fail 'mise is not executable' ;; *) fail 'mise is required to provision Node 20.0.0' ;; esac
   root=$(mktemp -d "${TMPDIR:-/tmp}/tmux-pane-dash-node20.XXXXXX")
@@ -124,15 +125,22 @@ provision() {
   export MISE_DATA_DIR="$root/mise/data" MISE_CACHE_DIR="$root/mise/cache" MISE_CONFIG_DIR="$root/mise/config"
   export MISE_GLOBAL_CONFIG_FILE="$root/mise/config/global.toml" MISE_SYSTEM_CONFIG_FILE="$root/mise/config/system.toml"
   export MISE_DEFAULT_CONFIG_FILENAME="$root/mise/config/default-packages"
-  mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$MISE_DATA_DIR" "$MISE_CACHE_DIR" "$MISE_CONFIG_DIR"
+  mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$MISE_DATA_DIR" "$MISE_CACHE_DIR" "$MISE_CONFIG_DIR" "$root/gnupg"
+  chmod 700 "$root/gnupg"
+  gpg_link=$(mktemp -d /tmp/tmux-pane-dash-node20-gpg.XXXXXX)
+  rmdir "$gpg_link"
+  ln -s "$root/gnupg" "$gpg_link"
+  export GNUPGHOME="$gpg_link"
   set -m; "$mise" install node@20.0.0 & install_pid=$!; set +m
   while kill -0 "$install_pid" 2>/dev/null; do
-    [ "$elapsed" -lt 600 ] || { kill -TERM -- "-$install_pid" 2>/dev/null || kill -TERM "$install_pid" 2>/dev/null || true; sleep 5; kill -KILL -- "-$install_pid" 2>/dev/null || true; wait "$install_pid" 2>/dev/null || true; rm -rf -- "$root"; fail 'Node provision timed out'; }
+    [ "$elapsed" -lt 600 ] || { kill -TERM -- "-$install_pid" 2>/dev/null || kill -TERM "$install_pid" 2>/dev/null || true; sleep 5; kill -KILL -- "-$install_pid" 2>/dev/null || true; wait "$install_pid" 2>/dev/null || true; rm -f -- "$gpg_link"; rm -rf -- "$root"; fail 'Node provision timed out'; }
     sleep 1; elapsed=$((elapsed + 1))
   done
-  wait "$install_pid" || { rm -rf -- "$root"; fail 'mise failed to install Node 20.0.0'; }
+  wait "$install_pid" || { rm -f -- "$gpg_link"; rm -rf -- "$root"; fail 'mise failed to install Node 20.0.0'; }
+  rm -f -- "$gpg_link"
+  unset GNUPGHOME
   node="$MISE_DATA_DIR/installs/node/20.0.0/bin/node"
-  npm="$MISE_DATA_DIR/installs/node/20.0.0/bin/npm"
+  npm="$MISE_DATA_DIR/installs/node/20.0.0/lib/node_modules/npm/bin/npm-cli.js"
   validate_tools "$node" "$npm" || { rm -rf -- "$root"; fail 'mise did not provide exact Node 20.0.0 and npm'; }
   write_descriptor "$root" "$mise" "$node" "$npm"
 }
