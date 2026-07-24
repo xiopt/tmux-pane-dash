@@ -84,3 +84,15 @@ setup() {
   [ "${#tmpdir}" -le 32 ]
   [ ! -e "$tmpdir" ]
 }
+
+@test "terminates descendants after the command leader exits successfully" {
+  observed="$BATS_TEST_TMPDIR/clean-root"
+  descendant="$BATS_TEST_TMPDIR/descendant-pid"
+  run env OBSERVED="$observed" DESCENDANT="$descendant" "$repo_root/scripts/release/clean-room.sh" -- sh -c 'printf "%s\n" "$HOME" > "$OBSERVED"; sh -c "trap '\''exit 0'\'' TERM; printf '%s\\n' \"\$\$\" > \"\$DESCENDANT\"; while :; do sleep 1; done" >/dev/null 2>&1 & while [ ! -e "$DESCENDANT" ]; do sleep 1; done; exit 0'
+  [ "$status" -eq 0 ]
+  root="$(dirname "$(cat "$observed")")"
+  [ ! -e "$root" ]
+  descendant_pid="$(cat "$descendant")"
+  for _ in 1 2 3 4 5; do ! kill -0 "$descendant_pid" 2>/dev/null && break; sleep 1; done
+  ! kill -0 "$descendant_pid" 2>/dev/null
+}

@@ -20,6 +20,25 @@ path_is_under() {
   [ "$path" = "$base" ] || [[ "$path" == "$base/"* ]]
 }
 
+has_parent_component() { [[ "/$1/" == *'/../'* ]]; }
+
+validate_contained_executable() {
+  local file=$1 root=$2 component candidate canonical
+  case "$file" in /*) ;; *) return 1 ;; esac
+  has_parent_component "$file" && return 1
+  path_is_under "$file" "$root" || return 1
+  candidate=$root
+  IFS=/ read -r -a components <<< "${file#"$root"/}"
+  for component in "${components[@]}"; do
+    [ -n "$component" ] && [ "$component" != . ] || return 1
+    candidate="$candidate/$component"
+    [ ! -L "$candidate" ] || return 1
+  done
+  [ -f "$file" ] && [ -x "$file" ] || return 1
+  canonical="$(canonical_dir "$(dirname "$file")")/$(basename "$file")" || return 1
+  [ "$canonical" = "$file" ] && path_is_under "$canonical" "$root"
+}
+
 validate_tools() {
   local node=$1 npm=$2
   case "$node:$npm" in /*:/*) ;; *) return 1 ;; esac
@@ -61,6 +80,7 @@ validate_root() {
   [ -d "$root" ] || return 1
   [ "$(basename "$root")" != "$root" ] || return 1
   [[ "$(basename "$root")" == tmux-pane-dash-node20.* ]] || return 1
+  has_parent_component "$root" && return 1
   root=$(canonical_dir "$root") || return 1
   path_is_under "$root" "$temp_prefix" || return 1
   for forbidden in "$repo_root" "${HOME:-$repo_root}" "${XDG_DATA_HOME:-${HOME:-$repo_root}/.local/share}" "${XDG_CONFIG_HOME:-${HOME:-$repo_root}/.config}" "${XDG_CACHE_HOME:-${HOME:-$repo_root}/.cache}"; do
@@ -75,9 +95,9 @@ validate_descriptor() {
   parse_descriptor || return 1
   validate_root "$descriptor_root" || return 1
   case "$descriptor_mise:$descriptor_node:$descriptor_npm" in /*:/*:/*) ;; *) return 1 ;; esac
-  [ -x "$descriptor_mise" ] || return 1
-  path_is_under "$descriptor_node" "$descriptor_root" || return 1
-  path_is_under "$descriptor_npm" "$descriptor_root" || return 1
+  [ -f "$descriptor_mise" ] && [ -x "$descriptor_mise" ] || return 1
+  validate_contained_executable "$descriptor_node" "$descriptor_root" || return 1
+  validate_contained_executable "$descriptor_npm" "$descriptor_root" || return 1
   validate_tools "$descriptor_node" "$descriptor_npm"
 }
 
@@ -90,7 +110,16 @@ acquire_lock() {
     if [ -f "$lock/owner" ]; then
       IFS=' ' read -r owner_pid owner_token < "$lock/owner" || true
     fi
-    if [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+    if [ -z "$owner_pid" ] && [ -z "$owner_token" ]; then
+      tries=$((tries + 1))
+      if [ "$tries" -ge 5 ]; then
+        rm -rf -- "$lock"
+        tries=0
+      else
+        sleep 1
+      fi
+      continue
+    elif [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
       current_token=$(pid_start_token "$owner_pid")
       [ -n "$owner_token" ] && [ "$current_token" = "$owner_token" ] || fail 'Node 20 provisioning lock owner changed'
     else
@@ -104,6 +133,34 @@ acquire_lock() {
   printf '%s %s\n' "$$" "$(pid_start_token "$$")" > "$lock/owner"
 }
 release_lock() { rm -rf -- "$lock"; }
+
+incomplete_root=''
+incomplete_gpg_link=''
+install_pgid=''
+
+stop_incomplete_provision() {
+  local _
+  if [ -n "$install_pgid" ]; then
+    kill -TERM -- "-$install_pgid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 -- "-$install_pgid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL -- "-$install_pgid" 2>/dev/null || true
+    wait "$install_pgid" 2>/dev/null || true
+  fi
+  rm -f -- "$incomplete_gpg_link"
+  rm -rf -- "$incomplete_root"
+  incomplete_gpg_link='' incomplete_root='' install_pgid=''
+}
+
+release_on_signal() {
+  local status=$1
+  trap - EXIT HUP INT TERM
+  stop_incomplete_provision
+  release_lock
+  exit "$status"
+}
 
 write_descriptor() {
   local root=$1 mise=$2 node=$3 npm=$4 temporary
@@ -120,6 +177,7 @@ provision() {
   case "$mise" in /*) [ -x "$mise" ] || fail 'mise is not executable' ;; *) fail 'mise is required to provision Node 20.0.0' ;; esac
   root=$(mktemp -d "${TMPDIR:-/tmp}/tmux-pane-dash-node20.XXXXXX")
   root=$(canonical_dir "$root") || fail 'cannot canonicalize Node root'
+  incomplete_root=$root
   validate_root "$root" || { rm -rf -- "$root"; fail 'unsafe Node root'; }
   export HOME="$root/home" XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME="$root/cache"
   export MISE_DATA_DIR="$root/mise/data" MISE_CACHE_DIR="$root/mise/cache" MISE_CONFIG_DIR="$root/mise/config"
@@ -130,26 +188,34 @@ provision() {
   gpg_link=$(mktemp -d /tmp/tmux-pane-dash-node20-gpg.XXXXXX)
   rmdir "$gpg_link"
   ln -s "$root/gnupg" "$gpg_link"
+  incomplete_gpg_link=$gpg_link
   export GNUPGHOME="$gpg_link"
   set -m; "$mise" install node@20.0.0 & install_pid=$!; set +m
+  install_pgid=$install_pid
   while kill -0 "$install_pid" 2>/dev/null; do
-    [ "$elapsed" -lt 600 ] || { kill -TERM -- "-$install_pid" 2>/dev/null || kill -TERM "$install_pid" 2>/dev/null || true; sleep 5; kill -KILL -- "-$install_pid" 2>/dev/null || true; wait "$install_pid" 2>/dev/null || true; rm -f -- "$gpg_link"; rm -rf -- "$root"; fail 'Node provision timed out'; }
+    [ "$elapsed" -lt 600 ] || { stop_incomplete_provision; fail 'Node provision timed out'; }
     sleep 1; elapsed=$((elapsed + 1))
   done
-  wait "$install_pid" || { rm -f -- "$gpg_link"; rm -rf -- "$root"; fail 'mise failed to install Node 20.0.0'; }
+  wait "$install_pid" || { stop_incomplete_provision; fail 'mise failed to install Node 20.0.0'; }
+  install_pgid=''
   rm -f -- "$gpg_link"
+  incomplete_gpg_link=''
   unset GNUPGHOME
   node="$MISE_DATA_DIR/installs/node/20.0.0/bin/node"
   npm="$MISE_DATA_DIR/installs/node/20.0.0/lib/node_modules/npm/bin/npm-cli.js"
-  validate_tools "$node" "$npm" || { rm -rf -- "$root"; fail 'mise did not provide exact Node 20.0.0 and npm'; }
+  validate_tools "$node" "$npm" || { stop_incomplete_provision; fail 'mise did not provide exact Node 20.0.0 and npm'; }
   write_descriptor "$root" "$mise" "$node" "$npm"
+  incomplete_root=''
 }
 
 if [ "${1:-}" = '--cleanup' ]; then
   [ "$#" -eq 1 ] || fail 'usage: with-node20.sh --cleanup'
   [ -d "$state_dir" ] || exit 0
   acquire_lock
-  trap release_lock EXIT HUP INT TERM
+  trap release_lock EXIT
+  trap 'release_on_signal 129' HUP
+  trap 'release_on_signal 130' INT
+  trap 'release_on_signal 143' TERM
   if [ -e "$descriptor" ]; then
     validate_descriptor || fail 'invalid descriptor refuses cleanup'
     rm -rf -- "$descriptor_root"
@@ -172,7 +238,10 @@ if [ "${PANE_DASH_NODE20_PREPROVIDED:-}" = 1 ]; then
 fi
 
 acquire_lock
-trap release_lock EXIT HUP INT TERM
+trap release_lock EXIT
+trap 'release_on_signal 129' HUP
+trap 'release_on_signal 130' INT
+trap 'release_on_signal 143' TERM
 if ! validate_descriptor; then
   rm -f -- "$descriptor"
   provision

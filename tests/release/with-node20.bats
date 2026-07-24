@@ -18,6 +18,22 @@ EOF
   chmod +x "$work/bin/node" "$work/bin/npm"
 }
 
+write_fake_mise() {
+  cat > "$work/bin/mise" <<'EOF'
+#!/bin/sh
+[ "$1" = install ] || exit 1
+printf 'provision\n' >> "$PROVISION_LOG"
+bin="$MISE_DATA_DIR/installs/node/20.0.0/bin"
+cli="$MISE_DATA_DIR/installs/node/20.0.0/lib/node_modules/npm/bin"
+mkdir -p "$bin" "$cli"
+cp "$FAKE_NODE" "$bin/node"
+cp "$FAKE_NPM" "$bin/npm"
+cp "$FAKE_NPM" "$cli/npm-cli.js"
+chmod +x "$bin/node" "$bin/npm" "$cli/npm-cli.js"
+EOF
+  chmod +x "$work/bin/mise"
+}
+
 @test "uses validated exact preprovided Node without creating persistent state" {
   run env PANE_DASH_NODE20_PREPROVIDED=1 NODE_20_BIN="$work/bin/node" NPM_20_CLI="$work/bin/npm" "$work/tests/release/with-node20.sh" -- node --version
   [ "$status" -eq 0 ]
@@ -103,4 +119,59 @@ EOF
   root="$(awk -F= '$1 == "ROOT" { print $2 }' "$work/.cortexkit/v0.1-release/node20.env")"
   [ "$(cat "$gpg_home_resolved")" = "$root/gnupg" ]
   [ ! -e "$gpg_home" ]
+}
+
+@test "does not steal an ownerless new lock before its owner records identity" {
+  write_fake_mise
+  real_mkdir="$(command -v mkdir)"
+  cat > "$work/bin/mkdir" <<EOF
+#!/bin/sh
+"$real_mkdir" "\$@"
+status=\$?
+[ "\$status" -eq 0 ] || exit "\$status"
+case "\$*" in *node20.lock) if [ ! -e "\$PAUSED_LOCK_MKDIR" ]; then : > "\$PAUSED_LOCK_MKDIR"; sleep 2; fi ;; esac
+exit 0
+EOF
+  chmod +x "$work/bin/mkdir"
+  private_tmp="$BATS_TEST_TMPDIR/private"
+  "$real_mkdir" -p "$private_tmp"
+  provision_log="$BATS_TEST_TMPDIR/provisions"
+  paused="$BATS_TEST_TMPDIR/paused"
+  env PAUSED_LOCK_MKDIR="$paused" PROVISION_LOG="$provision_log" TMPDIR="$private_tmp" PATH="$work/bin:$PATH" FAKE_NODE="$work/bin/node" FAKE_NPM="$work/bin/npm" "$work/tests/release/with-node20.sh" -- true >"$BATS_TEST_TMPDIR/owner.log" 2>&1 &
+  owner=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$paused" ] && break; sleep 1; done
+  [ -e "$paused" ]
+  env PAUSED_LOCK_MKDIR="$paused" PROVISION_LOG="$provision_log" TMPDIR="$private_tmp" PATH="$work/bin:$PATH" FAKE_NODE="$work/bin/node" FAKE_NPM="$work/bin/npm" "$work/tests/release/with-node20.sh" -- true >"$BATS_TEST_TMPDIR/contender.log" 2>&1 &
+  contender=$!
+  wait "$contender"
+  contender_status=$?
+  wait "$owner"
+  owner_status=$?
+  [ "$owner_status" -eq 0 ]
+  [ "$contender_status" -eq 0 ]
+  [ "$(wc -l < "$provision_log" | tr -d ' ')" -eq 1 ]
+  [ "$(wc -l < "$work/.cortexkit/v0.1-release/node20.env" | tr -d ' ')" -eq 5 ]
+}
+
+@test "rejects descriptor node traversal and symlink escapes" {
+  private_tmp="$BATS_TEST_TMPDIR/private"
+  root="$private_tmp/tmux-pane-dash-node20.synthetic"
+  mkdir -p "$root/mise/data/installs/node/20.0.0/bin" "$root/mise/data/installs/node/20.0.0/lib/node_modules/npm/bin" "$BATS_TEST_TMPDIR/outside"
+  cp "$work/bin/node" "$root/mise/data/installs/node/20.0.0/bin/node"
+  cp "$work/bin/npm" "$root/mise/data/installs/node/20.0.0/lib/node_modules/npm/bin/npm-cli.js"
+  cp "$work/bin/npm" "$BATS_TEST_TMPDIR/outside/npm-cli.js"
+  chmod +x "$root/mise/data/installs/node/20.0.0/bin/node" "$root/mise/data/installs/node/20.0.0/lib/node_modules/npm/bin/npm-cli.js" "$BATS_TEST_TMPDIR/outside/npm-cli.js"
+  ln -s "$BATS_TEST_TMPDIR/outside" "$root/mise/data/escape"
+  cat > "$work/.cortexkit/v0.1-release/node20.env" <<EOF
+SCHEMA=1
+ROOT=$root
+MISE=$work/bin/node
+NODE_20_BIN=$root/mise/data/../data/installs/node/20.0.0/bin/node
+NPM_20_CLI=$root/mise/data/escape/npm-cli.js
+EOF
+  chmod 600 "$work/.cortexkit/v0.1-release/node20.env"
+  run env TMPDIR="$private_tmp" "$work/tests/release/with-node20.sh" --cleanup
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"invalid descriptor"* ]]
+  [ -d "$root" ]
 }

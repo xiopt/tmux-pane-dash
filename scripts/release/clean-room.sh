@@ -43,27 +43,36 @@ tmp_root=$(cd "$tmp_root" && pwd -P)
 # macOS bounds Unix-domain socket paths; the clean-room root can already be long.
 printf -v socket 'pd-%04x%04x' "$RANDOM" "$RANDOM"
 child_pid=''
+child_pgid=''
+own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')
 
 # shellcheck disable=SC2329 # Called by the EXIT-trapped cleanup function.
 terminate_group() {
   local signal=$1
-  [ -n "$child_pid" ] || return 0
-  kill -"$signal" -- "-$child_pid" 2>/dev/null || kill -"$signal" "$child_pid" 2>/dev/null || true
+  [ -n "$child_pgid" ] || return 0
+  [[ "$child_pgid" =~ ^[1-9][0-9]*$ ]] || return 0
+  [ "$child_pgid" != "$own_pgid" ] || return 0
+  kill -"$signal" -- "-$child_pgid" 2>/dev/null || true
+}
+
+# shellcheck disable=SC2329 # Called by the EXIT-trapped cleanup function.
+group_is_alive() {
+  [ -n "$child_pgid" ] && [ "$child_pgid" != "$own_pgid" ] && kill -0 -- "-$child_pgid" 2>/dev/null
 }
 
 # shellcheck disable=SC2329 # Invoked by EXIT/HUP/INT/TERM traps.
 cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
-  if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+  if group_is_alive; then
     terminate_group TERM
     for _ in 1 2 3 4 5; do
-      kill -0 "$child_pid" 2>/dev/null || break
+      group_is_alive || break
       sleep 1
     done
-    kill -0 "$child_pid" 2>/dev/null && terminate_group KILL
-    wait "$child_pid" 2>/dev/null || true
+    group_is_alive && terminate_group KILL
   fi
+  [ -n "$child_pid" ] && wait "$child_pid" 2>/dev/null || true
   if [ -n "${tools[TMUX_BIN]:-}" ]; then
     TMUX='' TMUX_PANE='' TMUX_TMPDIR="$tmux_root" "${tools[TMUX_BIN]}" -L "$socket" kill-server 2>/dev/null || true
   fi
@@ -108,10 +117,10 @@ mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$npm_con
 set -m
 "$@" &
 child_pid=$!
+child_pgid=$(ps -o pgid= -p "$child_pid" 2>/dev/null | tr -d ' ')
 set +m
 set +e
 wait "$child_pid"
 status=$?
 set -e
-child_pid=''
 exit "$status"
