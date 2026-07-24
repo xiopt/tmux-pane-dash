@@ -1,0 +1,51 @@
+#!/usr/bin/env bats
+
+setup() {
+  repo_root="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd -P)"
+  ambient="$BATS_TEST_TMPDIR/ambient"
+  mkdir -p "$ambient/home" "$ambient/xdg" "$ambient/cache" "$ambient/npm" "$ambient/bun" "$ambient/tmux"
+  printf 'unchanged\n' > "$ambient/home/sentinel"
+}
+
+@test "requires a command after --" {
+  run "$repo_root/scripts/release/clean-room.sh" --
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"command required"* ]]
+}
+
+@test "isolates synthetic ambient state and removes its root" {
+  observed="$BATS_TEST_TMPDIR/observed"
+  run env \
+    HOME="$ambient/home" \
+    XDG_DATA_HOME="$ambient/xdg" \
+    XDG_CONFIG_HOME="$ambient/config" \
+    XDG_CACHE_HOME="$ambient/cache" \
+    npm_config_cache="$ambient/npm" \
+    BUN_INSTALL_CACHE_DIR="$ambient/bun" \
+    TMUX="${ambient}/tmux/default,1,0" \
+    OBSERVED="$observed" \
+    "$repo_root/scripts/release/clean-room.sh" -- sh -c 'printf "%s\\n%s\\n%s\\n" "$HOME" "$XDG_DATA_HOME" "${TMUX-unset}" > "$OBSERVED"'
+  [ "$status" -eq 0 ]
+  [ "$(sed -n '1p' "$observed")" != "$ambient/home" ]
+  [ "$(sed -n '2p' "$observed")" != "$ambient/xdg" ]
+  [ "$(sed -n '3p' "$observed")" = "unset" ]
+  [ "$(cat "$ambient/home/sentinel")" = "unchanged" ]
+  root="$(dirname "$(sed -n '1p' "$observed")")"
+  [ ! -e "$root" ]
+}
+
+@test "rejects a nonabsolute pinned tool path" {
+  run env TMUX_BIN=tmux "$repo_root/scripts/release/clean-room.sh" -- true
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"absolute executable"* ]]
+}
+
+@test "preserves only absolute pinned tool paths" {
+  fake="$BATS_TEST_TMPDIR/opencode"
+  printf '#!/bin/sh\nexit 0\n' > "$fake"
+  chmod +x "$fake"
+  run env OPENCODE_1_17_20_BIN="$fake" "$repo_root/scripts/release/clean-room.sh" -- sh -c 'test "$OPENCODE_1_17_20_BIN" = "$EXPECTED"'
+  [ "$status" -eq 1 ]
+  run env EXPECTED="$fake" OPENCODE_1_17_20_BIN="$fake" "$repo_root/scripts/release/clean-room.sh" -- sh -c 'test "$OPENCODE_1_17_20_BIN" = "$EXPECTED"'
+  [ "$status" -eq 0 ]
+}
