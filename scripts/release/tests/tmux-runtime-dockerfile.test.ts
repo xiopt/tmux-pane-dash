@@ -12,8 +12,19 @@ test("pins the runtime base and verifies the tmux 3.6 source", () => {
 test("keeps builder selection in the spike contract and has no final-stage network", () => {
   expect(dockerfile).not.toContain("FROM rust-")
   expect(dockerfile).not.toContain("cross-rs")
-  const runtime = dockerfile.slice(dockerfile.lastIndexOf("FROM debian:"))
+  expectFinalStageHasNoNetwork(dockerfile)
+})
+
+function expectFinalStageHasNoNetwork(contents: string): void {
+  const stages = [...contents.matchAll(/^FROM\s+\$\{DEBIAN_BASE\}(?:\s+AS\s+\S+)?\s*$/gim)]
+  expect(stages.length).toBeGreaterThanOrEqual(2)
+  const runtime = contents.slice(stages.at(-1)!.index)
   expect(runtime).not.toMatch(/apt-get|curl|wget/)
+}
+
+test("rejects network tooling added after the actual DEBIAN_BASE final-stage boundary", () => {
+  expect(() => expectFinalStageHasNoNetwork(`${dockerfile}\nRUN apt-get update`)).toThrow()
+  expect(() => expectFinalStageHasNoNetwork(dockerfile.replace("ENTRYPOINT", "RUN curl https://example.invalid\nENTRYPOINT"))).toThrow()
 })
 
 test("has no BuildKit-only TARGETARCH expansion", () => {

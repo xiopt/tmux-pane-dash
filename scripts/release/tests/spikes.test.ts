@@ -8,10 +8,13 @@ import {
   assertOpenCodeRegistryRequests,
   assertOpenCodeCleanupDelayState,
   assertNoOwnedTmuxProcess,
+  assertIsolationObservations,
+  formatOpenCodePassSummary,
   parseOpenCodePluginSpec,
   requiredSpikeChecks,
   runOpenCodeVersion,
   runMuslSpike,
+  seatbeltIsolationPlatform,
   tmuxWrapperScript,
   validateTmuxBinaryPath,
 } from "../spikes"
@@ -136,9 +139,52 @@ test("requires an absolute tmux binary and embeds it in the cleanup wrapper", ()
   expect(() => validateTmuxBinaryPath("tmux")).toThrow("absolute")
   const wrapper = tmuxWrapperScript("/opt/homebrew/bin/tmux", "pd-12345678", "/tmp/calls", "/tmp/done")
   expect(wrapper).toContain("exec '/opt/homebrew/bin/tmux' -L 'pd-12345678'")
+  expect(wrapper).toContain('"-L pd-12345678 $*" >> \'/tmp/calls\'')
   expect(wrapper).toContain("/tmp/calls")
   expect(wrapper).toContain("[ -f '/tmp/done' ]")
   expect(wrapper).toContain('[ "$#" -eq 5 ] && [ "$1" = set-option ] && [ "$2" = -pu ]')
+})
+
+test("uses a Darwin isolation platform through its runner seam and fails closed elsewhere", async () => {
+  const invocations: Invocation[] = []
+  const platform = seatbeltIsolationPlatform("darwin", async (argv, options) => {
+    invocations.push({ argv, options })
+    return { code: 0, stdout: "", stderr: "" }
+  })
+  const result = await platform.run(["/bin/true"], "/tmp/profile", 500)
+
+  expect(result.code).toBe(0)
+  expect(invocations).toEqual([{ argv: ["/usr/bin/sandbox-exec", "-f", "/tmp/profile", "/bin/true"], options: { timeoutMs: 500, signal: undefined } }])
+  await expect(seatbeltIsolationPlatform("linux", async () => ({ code: 0, stdout: "", stderr: "" })).run(["/bin/true"], "/tmp/profile", 500)).rejects.toThrow("unavailable")
+})
+
+test("refuses to summarize unasserted or mutated isolation observations", () => {
+  const isolation = {
+    platform: "darwin" as const,
+    policySha256: "a".repeat(64),
+    nonLoopbackConnect: "denied-by-policy" as const,
+    loopbackRegistryConnect: "succeeded" as const,
+    allowedSyntheticWrite: "succeeded" as const,
+    forbiddenWrite: "denied-by-policy" as const,
+    publicNetworkRequests: 0 as const,
+    realHomeWrites: 0 as const,
+    defaultTmuxUses: 0 as const,
+  }
+  expect(() => assertIsolationObservations(isolation)).not.toThrow()
+  expect(formatOpenCodePassSummary({ version: "1.17.20", sha256: "b".repeat(64), name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.0", requests: [], isolation })).toContain("public-network-requests=0")
+  for (const key of ["platform", "policySha256", "nonLoopbackConnect", "loopbackRegistryConnect", "allowedSyntheticWrite", "forbiddenWrite", "publicNetworkRequests", "realHomeWrites", "defaultTmuxUses"] as const) {
+    const mutated = {
+      ...isolation,
+      [key]: key === "platform" ? "linux" : key === "policySha256" ? "invalid" : key.endsWith("Requests") || key.endsWith("Writes") || key === "defaultTmuxUses" ? 1 : "failed",
+    }
+    expect(() => formatOpenCodePassSummary({ version: "1.17.20", sha256: "b".repeat(64), name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.0", requests: [], isolation: mutated as typeof isolation })).toThrow()
+  }
+})
+
+test("redacts the pinned OpenCode binary location from partial Task 1 evidence", async () => {
+  const evidence = await Bun.file(new URL("../../../spike/results/v0.1-task1-opencode.md", import.meta.url)).text()
+  expect(evidence).toContain("path=<pinned-opencode-1.17.20>")
+  expect(evidence).not.toMatch(/\/Users\/|\.opencode\/bin/)
 })
 
 test("normalizes an OpenCode binary version through the CLI", async () => {

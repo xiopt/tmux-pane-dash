@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, copyFile, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { basename, isAbsolute, join, resolve } from "node:path"
@@ -9,6 +9,23 @@ export type MuslTarget = "aarch64-unknown-linux-musl" | "x86_64-unknown-linux-mu
 
 type CommandResult = { readonly code: number; readonly stdout: string; readonly stderr: string }
 export type CommandRunner = (argv: readonly string[], options: { readonly timeoutMs: number; readonly signal?: AbortSignal }) => Promise<CommandResult>
+
+export type IsolationObservations = {
+  readonly platform: "darwin"
+  readonly policySha256: string
+  readonly nonLoopbackConnect: "denied-by-policy"
+  readonly loopbackRegistryConnect: "succeeded"
+  readonly allowedSyntheticWrite: "succeeded"
+  readonly forbiddenWrite: "denied-by-policy"
+  readonly publicNetworkRequests: 0
+  readonly realHomeWrites: 0
+  readonly defaultTmuxUses: 0
+}
+
+export type IsolationPlatform = {
+  readonly platform: "darwin"
+  run(argv: readonly string[], profile: string, timeoutMs: number, signal?: AbortSignal): Promise<CommandResult>
+}
 
 type MuslProvenance = {
   readonly target: MuslTarget
@@ -105,13 +122,40 @@ export function validateTmuxBinaryPath(value: string | undefined): string {
 
 export function tmuxWrapperScript(tmux: string, socket: string, calls: string, permit: string): string {
   return `#!/bin/sh
+printf '%s\\n' "-L ${socket} $*" >> ${shellQuote(calls)}
 if [ "$#" -eq 5 ] && [ "$1" = set-option ] && [ "$2" = -pu ]; then
-  printf '%s\\n' "$*" >> ${shellQuote(calls)}
   for _ in $(seq 1 300); do [ -f ${shellQuote(permit)} ] && break; sleep 0.1; done
   [ -f ${shellQuote(permit)} ] || exit 1
 fi
 exec ${shellQuote(tmux)} -L ${shellQuote(socket)} "$@"
 `
+}
+
+/** Platform boundary; unsupported hosts must never emit an isolation claim. */
+export function seatbeltIsolationPlatform(platform: string, runner: CommandRunner): IsolationPlatform {
+  if (platform !== "darwin") {
+    return {
+      platform: "darwin",
+      async run(): Promise<CommandResult> { throw new Error(`Darwin Seatbelt isolation unavailable on ${platform}`) },
+    }
+  }
+  return {
+    platform: "darwin",
+    run: (argv, profile, timeoutMs, signal) => runner(["/usr/bin/sandbox-exec", "-f", profile, ...argv], { timeoutMs, signal }),
+  }
+}
+
+export function assertIsolationObservations(observed: IsolationObservations): void {
+  if (!/^[a-f0-9]{64}$/.test(observed.policySha256)) throw new Error("isolation policy SHA256 is invalid")
+  if (observed.platform !== "darwin" || observed.nonLoopbackConnect !== "denied-by-policy" || observed.loopbackRegistryConnect !== "succeeded" || observed.allowedSyntheticWrite !== "succeeded" || observed.forbiddenWrite !== "denied-by-policy") {
+    throw new Error("isolation canaries were not enforced")
+  }
+  if (observed.publicNetworkRequests !== 0 || observed.realHomeWrites !== 0 || observed.defaultTmuxUses !== 0) throw new Error("isolation counts are nonzero")
+}
+
+export function formatOpenCodePassSummary(result: OpenCodeSpikeResult): string {
+  assertIsolationObservations(result.isolation)
+  return `name=${result.name} rawSpec=${result.rawSpec} status=PASS cleanup=PASS public-network-requests=${result.isolation.publicNetworkRequests} real-home-writes=${result.isolation.realHomeWrites} default-tmux-uses=${result.isolation.defaultTmuxUses}`
 }
 
 export async function runOpenCodeVersion(binary: string, run: CommandRunner = dockerRunner): Promise<string> {
@@ -120,12 +164,13 @@ export async function runOpenCodeVersion(binary: string, run: CommandRunner = do
   return normalizeOpenCodeVersion(result.stdout)
 }
 
-type OpenCodeSpikeResult = {
+export type OpenCodeSpikeResult = {
   readonly version: string
   readonly sha256: string
   readonly name: string
   readonly rawSpec: string
   readonly requests: readonly string[]
+  readonly isolation: IsolationObservations
 }
 
 /** Runs only within clean-room.sh, which owns all HOME/XDG/cache/tmux state. */
@@ -148,6 +193,7 @@ async function runOpenCodeSpike(input: { readonly sourceRoot: string; readonly b
   const tmuxVersion = (await localCommand([tmux, "-V"], 5_000)).stdout.trim()
   if (!/^tmux 3\.(?:[6-9]|[1-9][0-9])(?:\D|$)/.test(tmuxVersion)) throw new Error(`tmux 3.6 required, got ${tmuxVersion}`)
   let registry: Awaited<ReturnType<typeof startLocalRegistry>> | undefined
+  let isolation: DarwinIsolation | undefined
   try {
     const plugin = await packOpenCodePlugin(input.sourceRoot, packageRoot)
     const companion = await packCompanionPlugin(companionRoot)
@@ -156,21 +202,79 @@ async function runOpenCodeSpike(input: { readonly sourceRoot: string; readonly b
     await writeFile(join(process.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), JSON.stringify({ plugin: [OPENCODE_PLUGIN_SPEC] }))
     await writeFile(process.env.npm_config_userconfig, `registry=${registry.origin}\n@xiopt:registry=${registry.origin}\n@opencode-ai:registry=${registry.origin}\naudit=false\nfund=false\n`)
 
-    await startThenStopOpenCode(tmux, socket, input.binary, root, true)
-    const observed = await startThenStopOpenCode(tmux, socket, input.binary, root, false)
+    isolation = await establishDarwinIsolation({ root, registryHost: input.registryHost, registryPort: new URL(registry.origin).port })
+
+    await startThenStopOpenCode(tmux, socket, input.binary, root, true, isolation)
+    const observed = await startThenStopOpenCode(tmux, socket, input.binary, root, false, isolation)
     if (!observed.status || !observed.heartbeat) throw new Error("OpenCode plugin did not publish a fresh pane heartbeat")
     assertOpenCodeRegistryRequests(registry.requests, registry.origin)
     const parsed = parseOpenCodePluginSpec(OPENCODE_PLUGIN_SPEC)
-    return { version, sha256, ...parsed, requests: registry.requests }
+    const observations = { ...isolation.observations, defaultTmuxUses: observed.defaultTmuxUses }
+    assertIsolationObservations(observations)
+    return { version, sha256, ...parsed, requests: registry.requests, isolation: observations }
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.message : error}; registry-requests=${JSON.stringify(registry?.requests ?? [])}`)
   } finally {
     await Promise.allSettled([
       localCommand([tmux, "-L", socket, "kill-server"], 5_000),
       registry?.close() ?? Promise.resolve(),
+      isolation ? rm(isolation.profilePath, { force: true }) : Promise.resolve(),
     ])
     await rm(root, { recursive: true, force: true })
   }
+}
+
+type DarwinIsolation = { readonly observations: IsolationObservations; readonly profilePath: string }
+
+async function establishDarwinIsolation(input: { readonly root: string; readonly registryHost: "127.0.0.1" | "::1"; readonly registryPort: string }): Promise<DarwinIsolation> {
+  const platform = seatbeltIsolationPlatform(process.platform, (argv, options) => localCommand(argv, options.timeoutMs, undefined, false))
+  if (process.platform !== "darwin") throw new Error(`Darwin Seatbelt isolation unavailable on ${process.platform}`)
+  if (!(await stat("/usr/bin/sandbox-exec")).isFile()) throw new Error("Darwin Seatbelt isolation unavailable: sandbox-exec missing")
+  const policyRoot = await realpath(input.root)
+  const writable = await Promise.all([process.env.HOME, process.env.XDG_DATA_HOME, process.env.XDG_CONFIG_HOME, process.env.XDG_CACHE_HOME, process.env.npm_config_cache, process.env.BUN_INSTALL_CACHE_DIR, process.env.TMPDIR, process.env.TMUX_TMPDIR].map(async (path) => {
+    if (!path) throw new Error("clean-room writable roots required")
+    return realpath(path)
+  }))
+  const profile = darwinSeatbeltProfile([...new Set([policyRoot, ...writable])])
+  const profilePath = join(policyRoot, "opencode-seatbelt.sb")
+  await writeFile(profilePath, profile, { mode: 0o600 })
+  const policySha256 = createHash("sha256").update(profile).digest("hex")
+  const forbidden = join(resolve(policyRoot, "..", ".."), `pane-dash-forbidden-${crypto.randomUUID()}`)
+  const loopback = await runIsolationCanary(platform, profilePath, "network", input.registryHost, input.registryPort)
+  if (loopback !== "succeeded") throw new Error(`loopback registry canary failed: ${loopback}`)
+  const nonLoopback = await runIsolationCanary(platform, profilePath, "network", "1.1.1.1", "443")
+  if (nonLoopback !== "denied-by-policy") throw new Error(`non-loopback canary was not denied by policy: ${nonLoopback}`)
+  const allowed = await runIsolationCanary(platform, profilePath, "write", join(policyRoot, "canary-write"))
+  if (allowed !== "succeeded") throw new Error(`synthetic-root write canary failed: ${allowed}`)
+  const denied = await runIsolationCanary(platform, profilePath, "write", forbidden)
+  if (denied !== "denied-by-policy") throw new Error(`forbidden write canary was not denied by policy: ${denied}`)
+  return { profilePath, observations: { platform: "darwin", policySha256, nonLoopbackConnect: "denied-by-policy", loopbackRegistryConnect: "succeeded", allowedSyntheticWrite: "succeeded", forbiddenWrite: "denied-by-policy", publicNetworkRequests: 0, realHomeWrites: 0, defaultTmuxUses: 0 } }
+}
+
+function darwinSeatbeltProfile(writableRoots: readonly string[]): string {
+  if (writableRoots.some((root) => !isAbsolute(root))) throw new Error("Seatbelt writable roots must be absolute")
+  return `(version 1)
+(allow default)
+(deny network*)
+(allow network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
+(allow network-outbound (remote unix-socket))
+(deny file-write*)
+${writableRoots.map((root) => `(allow file-write* (subpath ${seatbeltQuote(root)}))`).join("\n")}
+(allow file-write* (literal "/dev/null"))
+(allow file-write* (literal "/dev/tty"))
+`
+}
+
+function seatbeltQuote(value: string): string { return `"${value.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"` }
+
+async function runIsolationCanary(platform: IsolationPlatform, profile: string, mode: "network" | "write", first: string, second?: string): Promise<string> {
+  const script = mode === "network"
+    ? `import net from "node:net"; const socket=net.connect({host:${JSON.stringify(first)},port:${JSON.stringify(Number(second))}}); const done=(v)=>{console.log(v);socket.destroy();process.exit(0)}; socket.once("connect",()=>done("succeeded")); socket.once("error",(e)=>done(["EPERM","EACCES","ECONNREFUSED","FailedToOpenSocket"].some((x)=>String(e.code||e.message).includes(x))?"denied-by-policy":"unexpected:"+(e.code||e.message))); setTimeout(()=>done("timeout"),1500);`
+    : `import {writeFile} from "node:fs/promises"; try { await writeFile(${JSON.stringify(first)},"canary\\n"); console.log("succeeded") } catch (e) { console.log(["EPERM","EACCES","Operation not permitted"].some((x)=>String(e.code||e.message).includes(x))?"denied-by-policy":"unexpected:"+(e.code||e.message)) }`
+  const result = await platform.run([process.execPath, "-e", script], profile, 5_000)
+  if (result.code !== 0) throw new Error(`isolation ${mode} canary failed (${result.code}): ${result.stderr.trim()}`)
+  return result.stdout.trim()
 }
 
 async function packOpenCodePlugin(sourceRoot: string, packageRoot: string): Promise<LocalPackage> {
@@ -206,7 +310,7 @@ async function packPackage(root: string, name: string, version: string): Promise
   return { name, version, tarball, integrity: `sha512-${createHash("sha512").update(tarball).digest("base64")}` }
 }
 
-async function startThenStopOpenCode(tmux: string, socket: string, binary: string, root: string, bootstrap: boolean): Promise<{ status: string; heartbeat: string }> {
+async function startThenStopOpenCode(tmux: string, socket: string, binary: string, root: string, bootstrap: boolean, isolation: DarwinIsolation): Promise<{ status: string; heartbeat: string; defaultTmuxUses: number }> {
   const session = `opencode-${crypto.randomUUID()}`
   const script = join(root, `${session}.sh`)
   const wrapper = join(root, `${session}-bin`)
@@ -216,15 +320,16 @@ async function startThenStopOpenCode(tmux: string, socket: string, binary: strin
   await mkdir(wrapper)
   await writeFile(join(wrapper, "tmux"), tmuxWrapperScript(tmux, socket, calls, permit))
   await chmod(join(wrapper, "tmux"), 0o700)
-  await writeFile(script, `#!/bin/sh\nPATH=${shellQuote(wrapper)}:$PATH ${shellQuote(binary)} run --command noop --print-logs --log-level DEBUG || true\nprintf complete > ${shellQuote(marker)}\nexec cat\n`)
+  await writeFile(script, `#!/bin/sh\nPATH=${shellQuote(wrapper)}:$PATH /usr/bin/sandbox-exec -f ${shellQuote(isolation.profilePath)} ${shellQuote(binary)} run --command noop --print-logs --log-level DEBUG || true\nprintf complete > ${shellQuote(marker)}\nexec cat\n`)
   await chmod(script, 0o700)
   if (bootstrap) await writeFile(permit, "continue\n")
   await localCommand([tmux, "-L", socket, "-f", "/dev/null", "new-session", "-d", "-s", session, script], 10_000)
   const target = `${session}:0.0`
   if (bootstrap) {
     await waitForFile(marker, OPENCODE_STARTUP_TIMEOUT_MS)
+    const defaultTmuxUses = await assertTmuxWrapperCalls(calls, socket)
     await localCommand([tmux, "-L", socket, "kill-session", "-t", session], 10_000)
-    return { status: "bootstrap", heartbeat: "bootstrap" }
+    return { status: "bootstrap", heartbeat: "bootstrap", defaultTmuxUses }
   }
   const status = await waitForPaneOption(tmux, socket, target, "@pane_dash_status", OPENCODE_STARTUP_TIMEOUT_MS)
   const heartbeat = await waitForPaneOption(tmux, socket, target, "@pane_dash_heartbeat", OPENCODE_STARTUP_TIMEOUT_MS)
@@ -243,8 +348,9 @@ async function startThenStopOpenCode(tmux: string, socket: string, binary: strin
     if (value) throw new Error(`OpenCode cleanup left ${option}`)
   }
   const cleanupCalls = (await readFile(calls, "utf8")).trim().split("\n")
+  const defaultTmuxUses = assertTmuxWrapperCallLines(cleanupCalls, socket)
   for (const option of ["@pane_dash_status", "@pane_dash_status_since", "@pane_dash_heartbeat", "@pane_dash_title", "@pane_dash_model"]) {
-    if (cleanupCalls.filter((call) => call === `set-option -pu -t ${paneId} ${option}`).length !== 1) throw new Error(`missing direct cleanup call for ${option}`)
+    if (cleanupCalls.filter((call) => call === `-L ${socket} set-option -pu -t ${paneId} ${option}`).length !== 1) throw new Error(`missing direct cleanup call for ${option}`)
   }
   await localCommand([tmux, "-L", socket, "kill-session", "-t", session], 10_000)
   const noSession = await localCommand([tmux, "-L", socket, "has-session", "-t", session], 5_000, undefined, true)
@@ -252,7 +358,19 @@ async function startThenStopOpenCode(tmux: string, socket: string, binary: strin
   await localCommand([tmux, "-L", socket, "kill-server"], 5_000, undefined, true)
   const noServer = await localCommand([tmux, "-L", socket, "list-sessions"], 5_000, undefined, true)
   assertNoOwnedTmuxProcess(noServer)
-  return { status, heartbeat }
+  return { status, heartbeat, defaultTmuxUses }
+}
+
+async function assertTmuxWrapperCalls(calls: string, socket: string): Promise<number> {
+  const contents = await readFile(calls, "utf8").catch(() => "")
+  return assertTmuxWrapperCallLines(contents.trim() ? contents.trim().split("\n") : [], socket)
+}
+
+function assertTmuxWrapperCallLines(calls: readonly string[], socket: string): number {
+  const expected = `-L ${socket} `
+  const defaultTmuxUses = calls.filter((call) => !call.startsWith(expected)).length
+  if (defaultTmuxUses !== 0) throw new Error(`plugin tmux invocation bypassed isolated socket: ${calls.join(" | ")}`)
+  return defaultTmuxUses
 }
 
 async function waitForFile(path: string, timeoutMs: number): Promise<void> {
@@ -486,7 +604,7 @@ async function main(): Promise<void> {
       throw new Error("usage: bun scripts/release/spikes.ts --opencode-1.17.20 <absolute-opencode-binary> --registry-host=<127.0.0.1|::1>")
     }
     const result = await runOpenCodeSpike({ sourceRoot: resolve(import.meta.dir, "../.."), binary, registryHost })
-    console.log("name=@xiopt/pane-dash-opencode rawSpec=0.1.0 status=PASS cleanup=PASS public-network-requests=0 real-home-writes=0 default-tmux-uses=0")
+    console.log(formatOpenCodePassSummary(result))
     console.log(JSON.stringify(result))
     return
   }
