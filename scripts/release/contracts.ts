@@ -14,6 +14,12 @@ export const TMUX_RUNTIME = {
   tmuxSha256: "136db80cfbfba617a103401f52874e7c64927986b65b1b700350b6058ad69607",
 } as const
 
+/** Platform manifests resolved from TMUX_RUNTIME.debianDigest's multiarch index. */
+export const DEBIAN_PLATFORM_MANIFESTS = {
+  amd64: "63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+  arm64: "9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+} as const
+
 type Target = {
   readonly rustTarget: string
   readonly asset: string

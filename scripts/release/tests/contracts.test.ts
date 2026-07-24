@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import {
   ARCHIVE_PAYLOAD,
   CLI_PACKAGE_FILES,
+  DEBIAN_PLATFORM_MANIFESTS,
   OPENCODE_PACKAGE_FILES,
   REPOSITORY,
   RELEASE_ASSETS,
@@ -82,5 +83,9 @@ test("pins only official Rust Alpine builders and the Debian tmux runtime", () =
     debianDigest: "7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
     tmuxVersion: "3.6",
     tmuxSha256: "136db80cfbfba617a103401f52874e7c64927986b65b1b700350b6058ad69607",
+  })
+  expect(DEBIAN_PLATFORM_MANIFESTS).toEqual({
+    amd64: "63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+    arm64: "9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
   })
 })
