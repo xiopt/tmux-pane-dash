@@ -284,6 +284,37 @@ EOF
   [ "$status" -eq 0 ]; [ ! -d "$work/.cortexkit/v0.1-release/node20.lock" ]
 }
 
+@test "eight stale-lock contenders serialize recovery and provision exactly once across ten barrier rounds" {
+  write_fake_mise
+  for round in 1 2 3 4 5 6 7 8 9 10; do
+    rm -rf "$work/.cortexkit/v0.1-release"
+    mkdir -p "$work/.cortexkit/v0.1-release/node20.lock"
+    printf '999999 dead-token\n' > "$work/.cortexkit/v0.1-release/node20.lock/owner"
+    provision_log="$BATS_TEST_TMPDIR/stale-provisions-$round"
+    ready="$BATS_TEST_TMPDIR/stale-ready-$round"
+    started="$BATS_TEST_TMPDIR/stale-started-$round"
+    for contender in 1 2 3 4 5 6 7 8; do
+      (
+        : > "$started-$contender"
+        while [ ! -e "$ready" ]; do sleep 0.01; done
+        base_env PROVISION_LOG="$provision_log" "$work/tests/release/with-node20.sh" -- true
+      ) >"$BATS_TEST_TMPDIR/stale-$round-$contender.log" 2>&1 &
+    done
+    for contender in 1 2 3 4 5 6 7 8; do
+      for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$started-$contender" ] && break; sleep 1; done
+      [ -e "$started-$contender" ]
+    done
+    : > "$ready"
+    failures=0
+    for pid in $(jobs -p); do wait "$pid" || failures=$((failures + 1)); done
+    [ "$failures" -eq 0 ] || { printf 'stale round=%s failures=%s\n' "$round" "$failures" >&3; for log in "$BATS_TEST_TMPDIR"/stale-"$round"-*.log; do printf '%s: ' "$log" >&3; cat "$log" >&3; done; false; }
+    [ "$(wc -l < "$provision_log" | tr -d ' ')" -eq 1 ]
+    [ "$(wc -l < "$work/.cortexkit/v0.1-release/node20.env" | tr -d ' ')" -eq 5 ]
+    [ ! -d "$work/.cortexkit/v0.1-release/node20.lock" ]
+    [ ! -e "$work/.cortexkit/v0.1-release/node20.recovery.lock" ]
+  done
+}
+
 @test "refuses a live lock whose PID has a mismatched or reused start token" {
   mkdir -p "$work/.cortexkit/v0.1-release/node20.lock"
   printf '%s stale-token\n' "$$" > "$work/.cortexkit/v0.1-release/node20.lock/owner"
@@ -307,15 +338,53 @@ EOF
   done
 }
 
-@test "normal run discards invalid owned state then reprovisions while cleanup preserves it" {
+@test "normal and cleanup runs fail closed for a wrong-mode descriptor" {
   write_fake_mise
-  root="$private_tmp/tmux-pane-dash-node20.stale"; write_descriptor "$root"
+  physical_tmp="$(cd "$private_tmp" && pwd -P)"
+  root="$physical_tmp/tmux-pane-dash-node20.stale"; write_descriptor "$root"
   chmod 644 "$work/.cortexkit/v0.1-release/node20.env"
   run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/provisions" "$work/tests/release/with-node20.sh" -- true
-  [ "$status" -eq 0 ]; [ "$(wc -l < "$BATS_TEST_TMPDIR/provisions" | tr -d ' ')" -eq 1 ]; [ -d "$root" ]
-  chmod 644 "$work/.cortexkit/v0.1-release/node20.env"
+  [ "$status" -eq 64 ]; [ ! -e "$BATS_TEST_TMPDIR/provisions" ]; [ -d "$root" ]; [ -e "$work/.cortexkit/v0.1-release/node20.env" ]
   run base_env "$work/tests/release/with-node20.sh" --cleanup
   [ "$status" -eq 64 ]; [ -e "$work/.cortexkit/v0.1-release/node20.env" ]
+}
+
+@test "normal run removes a safely owned invalid root, but fails closed for unsafe descriptor ownership" {
+  write_fake_mise
+  physical_tmp="$(cd "$private_tmp" && pwd -P)"
+  root="$physical_tmp/tmux-pane-dash-node20.invalid-tools"
+  write_descriptor "$root"
+  chmod -x "$root/mise/data/installs/node/20.0.0/bin/node"
+  run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/invalid-tools-provisions" "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 0 ]
+  [ ! -e "$root" ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/invalid-tools-provisions" | tr -d ' ')" -eq 1 ]
+
+  for label in malformed duplicate-root descriptor-symlink wrong-mode outside-root; do
+    rm -rf "$work/.cortexkit/v0.1-release"
+    mkdir -p "$work/.cortexkit/v0.1-release"
+    suspect="$physical_tmp/tmux-pane-dash-node20.suspect-$label"
+    write_descriptor "$suspect"
+    case "$label" in
+      malformed) printf 'not-an-assignment\n' >> "$work/.cortexkit/v0.1-release/node20.env" ;;
+      duplicate-root) printf 'ROOT=%s\n' "$suspect" >> "$work/.cortexkit/v0.1-release/node20.env" ;;
+      descriptor-symlink)
+        mv "$work/.cortexkit/v0.1-release/node20.env" "$work/.cortexkit/v0.1-release/real.env"
+        ln -s real.env "$work/.cortexkit/v0.1-release/node20.env"
+        ;;
+      wrong-mode) chmod 644 "$work/.cortexkit/v0.1-release/node20.env" ;;
+      outside-root)
+        outside="$work/outside-$label"; mkdir -p "$outside"
+        sed -i.bak "s#ROOT=$suspect#ROOT=$outside#" "$work/.cortexkit/v0.1-release/node20.env"
+        suspect="$outside"
+        ;;
+    esac
+    run base_env PROVISION_LOG="$BATS_TEST_TMPDIR/unsafe-$label-provisions" "$work/tests/release/with-node20.sh" -- true
+    [ "$status" -eq 64 ] || { printf 'unsafe label=%s output=%s\n' "$label" "$output" >&3; false; }
+    [ -e "$work/.cortexkit/v0.1-release/node20.env" ]
+    [ -d "$suspect" ]
+    [ ! -e "$BATS_TEST_TMPDIR/unsafe-$label-provisions" ]
+  done
 }
 
 @test "rejects malformed descriptor schema keys and unsafe roots without cleanup" {
@@ -412,6 +481,32 @@ EOF
   [ ! -e "$work/.cortexkit/v0.1-release/node20.env" ]; [ ! -d "$work/.cortexkit/v0.1-release/node20.lock" ]
   read -r mise_pid child_pid < "$BATS_TEST_TMPDIR/hang-pids"
   assert_pid_reaped "$mise_pid"; assert_pid_reaped "$child_pid"
+}
+
+@test "successful mise leader drains TERM-ignoring descendants before committing its descriptor" {
+  cat > "$work/bin/mise" <<'EOF'
+#!/bin/sh
+[ "$1" = install ] || exit 1
+bin="$MISE_DATA_DIR/installs/node/20.0.0/bin"
+cli="$MISE_DATA_DIR/installs/node/20.0.0/lib/node_modules/npm/bin"
+mkdir -p "$bin" "$cli"
+cp "$FAKE_NODE" "$bin/node"
+cp "$FAKE_NPM" "$cli/npm-cli.js"
+chmod +x "$bin/node" "$cli/npm-cli.js"
+(trap '' TERM; printf '%s\n' "$$" > "$SUCCESS_DESCENDANT_PID"; : > "$SUCCESS_DESCENDANT_MARKER"; while :; do sleep 1; done) &
+exit 0
+EOF
+  chmod +x "$work/bin/mise"
+  marker="$BATS_TEST_TMPDIR/success-descendant-marker"
+  pid_file="$BATS_TEST_TMPDIR/success-descendant-pid"
+  run base_env SUCCESS_DESCENDANT_MARKER="$marker" SUCCESS_DESCENDANT_PID="$pid_file" PANE_DASH_TEST_KILL_GRACE=0 "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 0 ]
+  [ -e "$marker" ]; [ -f "$pid_file" ]
+  read -r child_pid < "$pid_file"
+  assert_pid_reaped "$child_pid"
+  run base_env "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$work/.cortexkit/v0.1-release/node20.env" | tr -d ' ')" -eq 5 ]
 }
 
 @test "HUP and TERM during provision return signal statuses and reap their owned process group" {

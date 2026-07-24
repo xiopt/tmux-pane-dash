@@ -6,6 +6,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 state_dir="$repo_root/.cortexkit/v0.1-release"
 descriptor="$state_dir/node20.env"
 lock="$state_dir/node20.lock"
+recovery_lock="$state_dir/node20.recovery.lock"
 
 fail() { printf 'with-node20: %s\n' "$*" >&2; exit 64; }
 canonical_dir() { (cd "$1" && pwd -P); }
@@ -108,10 +109,35 @@ validate_descriptor() {
   validate_tools "$descriptor_node" "$descriptor_npm"
 }
 
+safe_discard_root=''
+parse_safe_discard_root() {
+  local line key value root_count=0
+  safe_discard_root=''
+  [ -f "$descriptor" ] && [ ! -L "$descriptor" ] || return 1
+  [ "$(stat_mode "$descriptor")" = 600 ] || return 1
+  [ "$(stat_uid "$descriptor")" = "$(owner_uid)" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    key=${line%%=*}
+    value=${line#*=}
+    [ "$key" != "$line" ] && [ -n "$value" ] || return 1
+    if [ "$key" = ROOT ]; then
+      root_count=$((root_count + 1))
+      [ "$root_count" -eq 1 ] || return 1
+      safe_discard_root=$value
+    fi
+  done < "$descriptor"
+  [ "$root_count" -eq 1 ] && validate_root "$safe_discard_root"
+}
+
 pid_start_token() { ps -o lstart= -p "$1" 2>/dev/null | tr -d ' '; }
 
 lock_owned=0
 lock_token=''
+recovery_lock_owned=0
+recovery_lock_token=''
+recovery_lock_temp=''
+recovery_owner_pid=''
+recovery_owner_token=''
 read_complete_lock_owner() {
   local owner_pid owner_token extra
   [ -f "$lock/owner" ] || return 1
@@ -120,16 +146,125 @@ read_complete_lock_owner() {
   [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && [ -n "$owner_token" ] && [ -z "$extra" ]
 }
 
-acquire_lock() {
+read_complete_recovery_owner() {
+  local extra
+  [ -f "$recovery_lock" ] && [ ! -L "$recovery_lock" ] || return 1
+  recovery_owner_pid='' recovery_owner_token='' extra=''
+  IFS=' ' read -r recovery_owner_pid recovery_owner_token extra < "$recovery_lock" || true
+  [[ "$recovery_owner_pid" =~ ^[1-9][0-9]*$ ]] && [ -n "$recovery_owner_token" ] && [ -z "$extra" ]
+}
+
+lock_owner_is_dead() {
+  local owner_pid=$1 owner_token=$2
+  [ -n "$owner_token" ] && ! kill -0 "$owner_pid" 2>/dev/null
+}
+
+wait_for_recovery_lock() {
   local tries=0 owner_pid owner_token current_token lock_attempt_limit=${PANE_DASH_TEST_LOCK_ATTEMPTS:-600} lock_sleep=${PANE_DASH_TEST_LOCK_SLEEP:-1}
+  while [ -e "$recovery_lock" ] || [ -L "$recovery_lock" ]; do
+    if ! read_complete_recovery_owner; then
+      [ -e "$recovery_lock" ] || [ -L "$recovery_lock" ] || continue
+      tries=$((tries + 1))
+      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner record is incomplete'
+      sleep "$lock_sleep"
+      continue
+    fi
+    owner_pid=$recovery_owner_pid owner_token=$recovery_owner_token
+    if lock_owner_is_dead "$owner_pid" "$owner_token"; then
+      tries=$((tries + 1))
+      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner is stale'
+      sleep "$lock_sleep"
+      continue
+    fi
+    current_token=$(pid_start_token "$owner_pid")
+    if [ "$current_token" != "$owner_token" ]; then
+      tries=$((tries + 1))
+      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner changed'
+      sleep "$lock_sleep"
+      continue
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock is held'
+    sleep "$lock_sleep"
+  done
+}
+
+acquire_recovery_lock() {
+  local tries=0 owner_pid owner_token current_token lock_attempt_limit=${PANE_DASH_TEST_LOCK_ATTEMPTS:-600} lock_sleep=${PANE_DASH_TEST_LOCK_SLEEP:-1}
+  recovery_lock_token=$(pid_start_token "$$")
+  [ -n "$recovery_lock_token" ] || fail 'cannot identify Node 20 provisioning recovery lock owner'
+  recovery_lock_temp="$state_dir/node20.recovery.owner.$$.${recovery_lock_token}"
+  (umask 077; printf '%s %s\n' "$$" "$recovery_lock_token" > "$recovery_lock_temp")
+  while ! ln "$recovery_lock_temp" "$recovery_lock" 2>/dev/null; do
+    if ! read_complete_recovery_owner; then
+      [ -e "$recovery_lock" ] || [ -L "$recovery_lock" ] || continue
+      tries=$((tries + 1))
+      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner record is incomplete'
+      sleep "$lock_sleep"
+      continue
+    fi
+    owner_pid=$recovery_owner_pid owner_token=$recovery_owner_token
+    if lock_owner_is_dead "$owner_pid" "$owner_token"; then
+      tries=$((tries + 1))
+      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner is stale'
+      sleep "$lock_sleep"
+      continue
+    fi
+    current_token=$(pid_start_token "$owner_pid")
+    if [ "$current_token" != "$owner_token" ]; then
+      tries=$((tries + 1))
+      [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock owner changed'
+      sleep "$lock_sleep"
+      continue
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -lt "$lock_attempt_limit" ] || fail 'Node 20 provisioning recovery lock is held'
+    sleep "$lock_sleep"
+  done
+  recovery_lock_owned=1
+  rm -f -- "$recovery_lock_temp"
+  recovery_lock_temp=''
+}
+
+release_recovery_lock() {
+  local owner_pid owner_token
+  rm -f -- "$recovery_lock_temp"
+  recovery_lock_temp=''
+  [ "$recovery_lock_owned" -eq 1 ] || return 0
+  owner_pid='' owner_token=''
+  if read_complete_recovery_owner; then
+    owner_pid=$recovery_owner_pid owner_token=$recovery_owner_token
+    [ "$owner_pid" = "$$" ] && [ "$owner_token" = "$recovery_lock_token" ] && rm -f -- "$recovery_lock"
+  fi
+  recovery_lock_owned=0
+}
+
+acquire_lock() {
+  local tries=0 owner_pid owner_token current_token observed_owner lock_attempt_limit=${PANE_DASH_TEST_LOCK_ATTEMPTS:-600} lock_sleep=${PANE_DASH_TEST_LOCK_SLEEP:-1}
   [[ "$lock_attempt_limit" =~ ^[1-9][0-9]*$ ]] || fail 'invalid test lock attempt limit'
   [[ "$lock_sleep" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail 'invalid test lock sleep'
   mkdir -p "$state_dir"
-  while ! mkdir "$lock" 2>/dev/null; do
+  while true; do
+    wait_for_recovery_lock
+    if mkdir "$lock" 2>/dev/null; then
+      if [ -e "$recovery_lock" ]; then
+        rm -rf -- "$lock"
+        continue
+      fi
+      break
+    fi
     if read_complete_lock_owner; then
       IFS=' ' read -r owner_pid owner_token < "$lock/owner" || true
-      if ! kill -0 "$owner_pid" 2>/dev/null; then
-        rm -rf -- "$lock"
+      if lock_owner_is_dead "$owner_pid" "$owner_token"; then
+        observed_owner="$owner_pid $owner_token"
+        acquire_recovery_lock
+        if read_complete_lock_owner; then
+          IFS=' ' read -r owner_pid owner_token < "$lock/owner" || true
+          if [ "$owner_pid $owner_token" = "$observed_owner" ] && lock_owner_is_dead "$owner_pid" "$owner_token"; then
+            rm -rf -- "$lock"
+          fi
+        fi
+        release_recovery_lock
         continue
       fi
       current_token=$(pid_start_token "$owner_pid")
@@ -176,26 +311,32 @@ fault_after() {
 }
 
 stop_incomplete_provision() {
-  local _
-  if [ -n "$install_pgid" ]; then
-    kill -TERM -- "-$install_pgid" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do
-      kill -0 -- "-$install_pgid" 2>/dev/null || break
-      sleep 1
-    done
-    kill -KILL -- "-$install_pgid" 2>/dev/null || true
-    wait "$install_pgid" 2>/dev/null || true
-  fi
+  terminate_install_group
   rm -f -- "$incomplete_descriptor_temp"
   rm -f -- "$incomplete_gpg_link"
   rm -rf -- "$incomplete_root"
   incomplete_descriptor_temp='' incomplete_gpg_link='' incomplete_root='' install_pgid=''
 }
 
+terminate_install_group() {
+  local _ kill_grace=${PANE_DASH_TEST_KILL_GRACE:-5}
+  if [ -n "$install_pgid" ]; then
+    kill -TERM -- "-$install_pgid" 2>/dev/null || true
+    [[ "$kill_grace" =~ ^[0-9]+$ ]] || fail 'invalid test kill grace'
+    for ((_=0; _<kill_grace; _++)); do
+      kill -0 -- "-$install_pgid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL -- "-$install_pgid" 2>/dev/null || true
+    wait "$install_pgid" 2>/dev/null || true
+  fi
+}
+
 finish_owned_provision() {
   local status=$?
   trap - EXIT HUP INT TERM
   stop_incomplete_provision
+  release_recovery_lock
   release_lock
   exit "$status"
 }
@@ -246,6 +387,7 @@ provision() {
     sleep 1; elapsed=$((elapsed + 1))
   done
   wait "$install_pid" || { stop_incomplete_provision; fail 'mise failed to install Node 20.0.0'; }
+  terminate_install_group
   install_pgid=''
   rm -f -- "$gpg_link"
   incomplete_gpg_link=''
@@ -260,11 +402,11 @@ provision() {
 if [ "${1:-}" = '--cleanup' ]; then
   [ "$#" -eq 1 ] || fail 'usage: with-node20.sh --cleanup'
   [ -d "$state_dir" ] || exit 0
-  acquire_lock
   trap finish_owned_provision EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  acquire_lock
   if [ -e "$descriptor" ]; then
     validate_descriptor || fail 'invalid descriptor refuses cleanup'
     rm -rf -- "$descriptor_root"
@@ -286,13 +428,17 @@ if [ "${PANE_DASH_NODE20_PREPROVIDED:-}" = 1 ]; then
   exec "$@"
 fi
 
-acquire_lock
 trap finish_owned_provision EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+acquire_lock
 if ! validate_descriptor; then
-  rm -f -- "$descriptor"
+  if [ -e "$descriptor" ] || [ -L "$descriptor" ]; then
+    parse_safe_discard_root || fail 'invalid descriptor refuses replacement'
+    rm -rf -- "$safe_discard_root"
+    rm -f -- "$descriptor"
+  fi
   provision
   validate_descriptor || fail 'new Node descriptor failed validation'
 fi
