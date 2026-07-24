@@ -15,6 +15,7 @@ import {
   formatOpenCodePassSummary,
   parseOpenCodePluginSpec,
   requiredSpikeChecks,
+  runCli,
   runOpenCodeVersion,
   runMuslSpike,
   seatbeltIsolationPlatform,
@@ -37,6 +38,7 @@ beforeEach(async () => {
   await mkdir(join(root, "scripts", "release"), { recursive: true })
   await writeFile(join(root, "pane-dash", "Cargo.toml"), "[package]\nname = 'pane-dash'\n")
   await writeFile(join(root, "scripts", "release", "tmux-runtime.Dockerfile"), "FROM scratch\n")
+  await writeFile(join(root, "scripts", "release", "tmux-runtime-bootstrap.Dockerfile"), "FROM scratch\n")
 })
 
 afterEach(async () => {
@@ -51,6 +53,7 @@ function runner(overrides: Readonly<Record<string, string>> = {}): { runner: Com
       invocations.push({ argv, options })
       const command = argv.join(" ")
       if (command.includes("docker container inspect")) return { code: 1, stdout: "", stderr: "No such container" }
+      if (argv[0] === "docker" && argv[1] === "image" && argv[2] === "inspect" && !argv.includes("--format")) return { code: 1, stdout: "", stderr: "No such image" }
       const stdout = Object.entries(overrides).find(([needle]) => command.includes(needle))?.[1] ?? defaultStdout(argv)
       return { code: 0, stdout, stderr: "" }
     },
@@ -353,6 +356,7 @@ test("removes owned Docker resources in dependency order when volumes reject liv
   const stateful: CommandRunner = async (argv, options) => {
     invocations.push({ argv, options })
     const command = argv.join(" ")
+    if (argv[0] === "docker" && argv[1] === "image" && argv[2] === "inspect" && !argv.includes("--format")) return { code: 1, stdout: "", stderr: "No such image" }
     if (argv[0] === "docker" && argv[1] === "run") liveContainers.add(argv[argv.indexOf("--name") + 1]!)
     if (argv[0] === "docker" && argv[1] === "rm") {
       await Bun.sleep(10)
@@ -382,7 +386,7 @@ test("removes owned Docker resources in dependency order when volumes reject liv
   expect(invocations.filter(({ argv }) => argv[0] === "docker" && argv[1] === "image" && argv[2] === "rm").pop()?.argv[3]).toBe("-f")
 })
 
-test("builds x86_64 only with target-derived pinned images and offline network", async () => {
+test("builds x86_64 only with target-derived pinned images and offline compilation", async () => {
   const fake = runner()
 
   const result = await runMuslSpike({
@@ -399,14 +403,22 @@ test("builds x86_64 only with target-derived pinned images and offline network",
   expect(fake.invocations.some(({ argv }) => argv.includes("--network") && argv.includes("none") && argv.includes("linux/amd64"))).toBe(true)
   expect(fake.invocations.some(({ argv }) => argv.join(" ").includes("cargo build --locked --offline --release --target x86_64-unknown-linux-musl"))).toBe(true)
   expect(fake.invocations.some(({ argv }) => argv.includes(`${root}:/source:ro`))).toBe(true)
-  const runtimeBuild = fake.invocations.find(({ argv }) => argv[0] === "docker" && argv[1] === "build")
-  expect(runtimeBuild?.argv).toEqual(expect.arrayContaining(["--platform", "linux/amd64", "--network", "default", "--rm", "--force-rm", "-t"]))
+  const dockerBuilds = fake.invocations.filter(({ argv }) => argv[0] === "docker" && argv[1] === "build")
+  const bootstrapBuild = dockerBuilds.find(({ argv }) => argv.some(part => part.endsWith("tmux-runtime-bootstrap.Dockerfile")))
+  const runtimeBuild = dockerBuilds.find(({ argv }) => argv.some(part => part.endsWith("tmux-runtime.Dockerfile")))
+  expect(bootstrapBuild?.argv).toEqual(expect.arrayContaining(["--platform", "linux/amd64", "--network", "default", "--rm", "--force-rm", "-t"]))
+  expect(runtimeBuild?.argv).toEqual(expect.arrayContaining(["--platform", "linux/amd64", "--network", "none", "--rm", "--force-rm", "-t"]))
   expect(runtimeBuild?.argv).not.toContain("buildx")
   expect(runtimeBuild?.argv).not.toContain("--load")
   expect(runtimeBuild?.argv).toEqual(expect.arrayContaining([
     "--build-arg",
     "DEBIAN_BASE=docker.io/library/debian@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
   ]))
+  expect(runtimeBuild?.argv.some(part => part.startsWith("BOOTSTRAP_IMAGE=pane-dash-musl-bootstrap-"))).toBe(true)
+  const fetch = fake.invocations.find(({ argv }) => argv[0] === "docker" && argv[1] === "run" && argv.join(" ").includes("tmux-3.6.tar.gz"))
+  expect(fetch?.argv).toEqual(expect.arrayContaining(["--network", "bridge"]))
+  expect(fetch?.argv?.join(" ")).toContain("136db80cfbfba617a103401f52874e7c64927986b65b1b700350b6058ad69607")
+  expect(dockerBuilds.filter(({ argv }) => !argv.some(part => part.endsWith("tmux-runtime-bootstrap.Dockerfile"))).every(({ argv }) => argv.includes("--network") && argv.includes("none"))).toBe(true)
   expect(result.provenance.runtimeBaseDigest).toBe("7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818")
   expect(fake.invocations.some(({ argv }) => argv.join(" ").includes("docker manifest inspect docker.io/library/debian@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e"))).toBe(true)
   expect(fake.invocations.some(({ argv }) => argv.join(" ").includes("image inspect --format {{.Os}}/{{.Architecture}}"))).toBe(true)
@@ -427,6 +439,31 @@ test("builds x86_64 only with target-derived pinned images and offline network",
   expect(dockerRuns.length).toBeGreaterThan(0)
   expect(dockerRuns.every(({ argv }) => argv.includes("--name") && argv[argv.indexOf("--name") + 1]?.startsWith("pane-dash-musl-"))).toBe(true)
   expect(fake.invocations.filter(({ argv }) => argv[0] === "docker" && argv[1] === "rm" && argv.includes("-f")).length).toBe(dockerRuns.length)
+})
+
+test("renders primary and ordered Docker cleanup failures through the CLI seam", async () => {
+  const fake = runner()
+  const failing: CommandRunner = async (argv, options) => {
+    const command = argv.join(" ")
+    if (command.includes("cargo build --locked --offline")) return { code: 17, stdout: "", stderr: "primary compile failure" }
+    if (argv[0] === "docker" && argv[1] === "rm") return { code: 18, stdout: "", stderr: "cleanup container failure" }
+    if (argv[0] === "docker" && argv[1] === "volume" && argv[2] === "rm") return { code: 19, stdout: "", stderr: "cleanup volume failure" }
+    if (argv[0] === "docker" && argv[1] === "image" && argv[2] === "rm") {
+      return { code: 20, stdout: "", stderr: command.includes("bootstrap") ? "cleanup bootstrap image failure" : "cleanup runtime image failure" }
+    }
+    return fake.runner(argv, options)
+  }
+  const stderr: string[] = []
+
+  const status = await runCli(["--musl", "x86_64-unknown-linux-musl", "--network=none"], failing, line => stderr.push(line), root)
+
+  expect(status).toBe(1)
+  const output = stderr.join("\n")
+  for (const detail of ["primary compile failure", "cleanup container failure", "cleanup volume failure", "cleanup runtime image failure", "cleanup bootstrap image failure"]) expect(output).toContain(detail)
+  expect(output.indexOf("primary compile failure")).toBeLessThan(output.indexOf("cleanup container failure"))
+  expect(output.indexOf("cleanup container failure")).toBeLessThan(output.indexOf("cleanup volume failure"))
+  expect(output.indexOf("cleanup volume failure")).toBeLessThan(output.indexOf("cleanup runtime image failure"))
+  expect(output.indexOf("cleanup runtime image failure")).toBeLessThan(output.indexOf("cleanup bootstrap image failure"))
 })
 
 test("rejects a builder RepoDigest that differs from the target pin and still cleans owned resources", async () => {

@@ -11,6 +11,7 @@ export const RUST_ALPINE_BUILDERS = {
 export const TMUX_RUNTIME = {
   debianDigest: "7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
   tmuxVersion: "3.6",
+  tmuxSourceUrl: "https://github.com/tmux/tmux/releases/download/3.6/tmux-3.6.tar.gz",
   tmuxSha256: "136db80cfbfba617a103401f52874e7c64927986b65b1b700350b6058ad69607",
 } as const
 

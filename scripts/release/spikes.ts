@@ -50,6 +50,8 @@ type MuslProvenance = {
   readonly runtimeBaseDigest: string
   readonly runtimeManifest: string
   readonly tmuxVersion: string
+  readonly tmuxSourceUrl: string
+  readonly tmuxSourceSha256: string
   readonly runtimeUname: string
 }
 
@@ -568,6 +570,7 @@ export async function runMuslSpike(input: MuslSpikeInput): Promise<MuslSpikeResu
   const suffix = `${process.pid}-${crypto.randomUUID()}`
   const registryVolume = `pane-dash-musl-registry-${suffix}`
   const targetVolume = `pane-dash-musl-target-${suffix}`
+  const bootstrapTag = `pane-dash-musl-bootstrap-${suffix}`
   const runtimeTag = `pane-dash-musl-runtime-${suffix}`
   const ownedContainers: string[] = []
   const docker = (image: string, args: readonly string[]) => {
@@ -577,6 +580,7 @@ export async function runMuslSpike(input: MuslSpikeInput): Promise<MuslSpikeResu
   }
   const buildContext = await mkdtemp(join(tmpdir(), "pane-dash-musl-runtime-"))
   const dockerfile = join(sourceRoot, "scripts/release/tmux-runtime.Dockerfile")
+  const bootstrapDockerfile = join(sourceRoot, "scripts/release/tmux-runtime-bootstrap.Dockerfile")
   let runtimeImageId = ""
 
   const cleanup = async (): Promise<unknown[]> => {
@@ -596,6 +600,7 @@ export async function runMuslSpike(input: MuslSpikeInput): Promise<MuslSpikeResu
       failures.push(new Error("refusing volume cleanup until owned containers are absent"))
     }
     await record(() => removeOwnedImage(run, runtimeTag))
+    await record(() => removeOwnedImage(run, bootstrapTag))
     await record(async () => { await rm(buildContext, { recursive: true, force: true }) })
     return failures
   }
@@ -603,6 +608,7 @@ export async function runMuslSpike(input: MuslSpikeInput): Promise<MuslSpikeResu
   let primaryError: unknown
   try {
     await copyFile(dockerfile, join(buildContext, "tmux-runtime.Dockerfile"))
+    await copyFile(bootstrapDockerfile, join(buildContext, "tmux-runtime-bootstrap.Dockerfile"))
     const builderRepoDigest = await ensureExactImage(run, image, info.platform, input.signal)
     const runtimeImage = runtimeManifest(info.builderArch)
     await ensureExactImage(run, runtimeImage, info.platform, input.signal, true)
@@ -622,7 +628,12 @@ export async function runMuslSpike(input: MuslSpikeInput): Promise<MuslSpikeResu
       "sh", "-ceu", `cargo build --locked --offline --release --target ${input.target}`,
     ]), input.signal, DOCKER_TIMEOUT_MS)
 
-    await execute(run, ["docker", "build", "--rm", "--force-rm", "--platform", info.platform, "--network", "default", "--build-arg", `DEBIAN_BASE=${runtimeImage}`, "-f", join(buildContext, "tmux-runtime.Dockerfile"), "-t", runtimeTag, buildContext], input.signal, DOCKER_TIMEOUT_MS)
+    await execute(run, ["docker", "build", "--rm", "--force-rm", "--platform", info.platform, "--network", "default", "--build-arg", `DEBIAN_BASE=${runtimeImage}`, "-f", join(buildContext, "tmux-runtime-bootstrap.Dockerfile"), "-t", bootstrapTag, buildContext], input.signal, DOCKER_TIMEOUT_MS)
+    await execute(run, docker(bootstrapTag, [
+      "--network", "bridge", "-v", `${buildContext}:/build`, "sh", "-ceu",
+      `curl --fail --location --silent --show-error --output /build/tmux-${TMUX_RUNTIME.tmuxVersion}.tar.gz ${shellQuote(TMUX_RUNTIME.tmuxSourceUrl)} && echo '${TMUX_RUNTIME.tmuxSha256}  /build/tmux-${TMUX_RUNTIME.tmuxVersion}.tar.gz' | sha256sum -c -`,
+    ]), input.signal, DOCKER_TIMEOUT_MS)
+    await execute(run, ["docker", "build", "--rm", "--force-rm", "--platform", info.platform, "--network", "none", "--build-arg", `DEBIAN_BASE=${runtimeImage}`, "--build-arg", `BOOTSTRAP_IMAGE=${bootstrapTag}`, "-f", join(buildContext, "tmux-runtime.Dockerfile"), "-t", runtimeTag, buildContext], input.signal, DOCKER_TIMEOUT_MS)
     runtimeImageId = (await execute(run, ["docker", "image", "inspect", "--format", "{{.Id}}", runtimeTag], input.signal, 30_000)).stdout.trim()
     if (!runtimeImageId) throw new Error("runtime image ID missing")
 
@@ -651,7 +662,7 @@ export async function runMuslSpike(input: MuslSpikeInput): Promise<MuslSpikeResu
       fileOutput,
       executionOutput,
       tmuxOutput,
-      provenance: { target: input.target, platform: info.platform, builderDigest: `sha256:${RUST_ALPINE_BUILDERS[info.builderArch]}`, builderImage: image, runtimeImageId, runtimeBaseDigest: TMUX_RUNTIME.debianDigest, runtimeManifest: runtimeImage, tmuxVersion: tmuxOutput.trim(), runtimeUname },
+      provenance: { target: input.target, platform: info.platform, builderDigest: `sha256:${RUST_ALPINE_BUILDERS[info.builderArch]}`, builderImage: image, runtimeImageId, runtimeBaseDigest: TMUX_RUNTIME.debianDigest, runtimeManifest: runtimeImage, tmuxVersion: tmuxOutput.trim(), tmuxSourceUrl: TMUX_RUNTIME.tmuxSourceUrl, tmuxSourceSha256: TMUX_RUNTIME.tmuxSha256, runtimeUname },
     }
   } catch (error) {
     primaryError = error
@@ -659,9 +670,7 @@ export async function runMuslSpike(input: MuslSpikeInput): Promise<MuslSpikeResu
   } finally {
     const cleanupFailures = await cleanup()
     if (cleanupFailures.length > 0 && primaryError !== undefined) {
-      if (typeof primaryError === "object" && primaryError) {
-        Object.defineProperty(primaryError, "cleanupFailures", { value: cleanupFailures, enumerable: false })
-      }
+      throw new AggregateError([primaryError, ...cleanupFailures], "musl spike and Docker cleanup failed")
     } else if (cleanupFailures.length > 0) {
       throw new AggregateError(cleanupFailures, "Docker resource cleanup failed")
     }
@@ -771,6 +780,8 @@ async function removeOwnedVolume(run: CommandRunner, name: string, ownedContaine
 async function removeOwnedImage(run: CommandRunner, tag: string): Promise<void> {
   const argv = ["docker", "image", "rm", "-f", tag]
   assertDockerCleanupSucceeded(await cleanupDockerCommand(run, argv), argv)
+  const inspected = await cleanupDockerCommand(run, ["docker", "image", "inspect", tag])
+  if (!isDockerResourceAbsent(inspected)) throw new Error(`owned image remained after cleanup: ${tag}`)
 }
 
 async function dockerRunner(argv: readonly string[], options: { readonly timeoutMs: number; readonly signal?: AbortSignal }): Promise<CommandResult> {
@@ -803,14 +814,19 @@ cat "$bench"
 `
 }
 
-async function main(): Promise<void> {
-  const args = Bun.argv.slice(2)
+export async function runCli(
+  args: readonly string[],
+  run: CommandRunner = dockerRunner,
+  writeError: (line: string) => void = console.error,
+  sourceRoot = resolve(import.meta.dir, "../.."),
+): Promise<0 | 1> {
+  try {
   if (args[0] === "--normalize-opencode-version") {
     if (args.length !== 2 || !args[1]) {
       throw new Error("usage: bun scripts/release/spikes.ts --normalize-opencode-version <absolute-opencode-binary>")
     }
-    console.log(await runOpenCodeVersion(args[1]))
-    return
+    console.log(await runOpenCodeVersion(args[1], run))
+    return 0
   }
   if (args[0] === "--opencode-1.17.20") {
     const binary = args[1]
@@ -821,19 +837,35 @@ async function main(): Promise<void> {
     const result = await runOpenCodeSpike({ sourceRoot: resolve(import.meta.dir, "../.."), binary, registryHost })
     console.log(formatOpenCodePassSummary(result))
     console.log(JSON.stringify(result))
-    return
+    return 0
   }
   const [mode, target, network] = args
   if (mode !== "--musl" || !target || network !== "--network=none" || !isMuslTarget(target)) {
     throw new Error("usage: bun scripts/release/spikes.ts --musl <aarch64-unknown-linux-musl|x86_64-unknown-linux-musl> --network=none")
   }
-  const result = await runMuslSpike({ target, sourceRoot: resolve(import.meta.dir, "../..") })
+  const result = await runMuslSpike({ target, sourceRoot, runner: run })
   console.log(`${target} elf-static=PASS execution=PASS tmux=PASS`)
   console.log(JSON.stringify(result.provenance))
+  return 0
+  } catch (error) {
+    writeError(renderCliError(error))
+    return 1
+  }
+}
+
+export function renderCliError(error: unknown): string {
+  if (error instanceof AggregateError) {
+    return [error.message, ...error.errors.map(renderCliError)].join("\n")
+  }
+  return error instanceof Error ? error.message : String(error)
+}
+
+async function main(): Promise<void> {
+  process.exitCode = await runCli(Bun.argv.slice(2))
 }
 
 function isMuslTarget(value: string): value is MuslTarget {
   return value === "aarch64-unknown-linux-musl" || value === "x86_64-unknown-linux-musl"
 }
 
-if (import.meta.main) main().catch((error: unknown) => { console.error(error instanceof Error ? error.message : error); process.exitCode = 1 })
+if (import.meta.main) main().catch((error: unknown) => { console.error(renderCliError(error)); process.exitCode = 1 })
