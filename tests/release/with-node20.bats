@@ -397,8 +397,111 @@ EOF
   done
 }
 
-@test "INT during provisioning is documented as a macOS Bats background-job portability limitation" {
-  skip "macOS Bats async jobs inherit SIGINT ignored; a direct foreground harness is required to assert status 130"
+@test "INT during provisioning returns 130 and removes transient state" {
+  [ -n "$(command -v perl)" ]
+  cat > "$work/bin/mise" <<'EOF'
+#!/bin/sh
+[ "$1" = install ] || exit 1
+sleep 30 &
+root=${MISE_DATA_DIR%/mise/data}
+printf '%s %s %s %s %s\n' "$PPID" "$$" "$!" "$GNUPGHOME" "$root" > "$SIGNAL_PIDS"
+wait
+EOF
+  chmod +x "$work/bin/mise"
+  supervisor="$BATS_TEST_TMPDIR/int-supervisor.pl"
+  cat > "$supervisor" <<'PERL'
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use POSIX qw(WNOHANG);
+use Time::HiRes qw(sleep time);
+
+my ($marker, @command) = @ARGV;
+die "usage: int-supervisor.pl MARKER COMMAND...\n" unless defined $marker && @command;
+my $script_pid = fork();
+my $mise_pid;
+die "fork: $!\n" unless defined $script_pid;
+if ($script_pid == 0) {
+  $SIG{INT} = 'DEFAULT';
+  exec @command;
+  die "exec $command[0]: $!\n";
+}
+
+my $waited = 0;
+sub stop_child {
+  return if $waited;
+  kill 'TERM', $script_pid;
+  kill 'TERM', -$mise_pid if defined $mise_pid;
+  my $deadline = time + 5;
+  my $reaped = 0;
+  while (time < $deadline) {
+    my $result = waitpid($script_pid, WNOHANG);
+    if ($result == $script_pid || $result == -1) {
+      $waited = 1;
+      $reaped = 1;
+      last;
+    }
+    sleep 0.05;
+  }
+  if (!$reaped) {
+    kill 'KILL', $script_pid;
+    waitpid($script_pid, 0);
+    $waited = 1;
+  }
+  return unless defined $mise_pid;
+  $deadline = time + 5;
+  while (kill 0, -$mise_pid) {
+    last if time >= $deadline;
+    sleep 0.05;
+  }
+  kill 'KILL', -$mise_pid if kill 0, -$mise_pid;
+}
+
+my $deadline = time + 10;
+while (!-e $marker && time < $deadline) {
+  sleep 0.05;
+}
+if (!-e $marker) {
+  stop_child();
+  die "timed out waiting for SIGNAL_PIDS\n";
+}
+open my $fh, '<', $marker or do { stop_child(); die "open $marker: $!\n"; };
+my $line = <$fh>;
+close $fh;
+my @fields = defined $line ? split(/\s+/, $line) : ();
+if (@fields != 5 || $fields[0] ne "$script_pid" || grep { !/^[1-9][0-9]*\z/ } @fields[0..2] || !defined $fields[3] || $fields[3] !~ m{^/} || !defined $fields[4] || $fields[4] !~ m{^/}) {
+  stop_child();
+  die "invalid SIGNAL_PIDS\n";
+}
+$mise_pid = $fields[1];
+kill 'INT', $script_pid or do { stop_child(); die "INT $script_pid: $!\n"; };
+my $status;
+$deadline = time + 10;
+while (time < $deadline) {
+  my $result = waitpid($script_pid, WNOHANG);
+  if ($result == $script_pid) {
+    $status = $?;
+    $waited = 1;
+    last;
+  }
+  sleep 0.05;
+}
+if (!defined $status) {
+  stop_child();
+  die "timed out waiting for $script_pid\n";
+}
+die "expected exit 130, got status $status\n" unless ($status >> 8) == 130 && ($status & 127) == 0;
+print join(' ', @fields), "\n";
+PERL
+  chmod +x "$supervisor"
+  marker="$BATS_TEST_TMPDIR/int-pids"
+  run base_env SIGNAL_PIDS="$marker" "$supervisor" "$marker" "$work/tests/release/with-node20.sh" -- true
+  [ "$status" -eq 0 ]
+  read -r script_pid mise_pid child_pid gpg_link root < <(printf '%s\n' "$output")
+  [[ "$script_pid" =~ ^[1-9][0-9]*$ ]]; [[ "$mise_pid" =~ ^[1-9][0-9]*$ ]]; [[ "$child_pid" =~ ^[1-9][0-9]*$ ]]
+  assert_pid_reaped "$mise_pid"; assert_pid_reaped "$child_pid"
+  [ ! -e "$gpg_link" ]; [ ! -e "$root" ]
+  [ ! -d "$work/.cortexkit/v0.1-release/node20.lock" ]; [ ! -e "$work/.cortexkit/v0.1-release/node20.env" ]
 }
 
 @test "successful provisioning preserves child status and child signal behavior, and cleanup is idempotent" {
