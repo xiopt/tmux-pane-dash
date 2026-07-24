@@ -28,6 +28,7 @@ export type IsolationObservations = {
   readonly platform: "darwin"
   readonly policySha256: string
   readonly nonLoopbackConnect: "denied-by-policy"
+  readonly nonLoopbackConnectErrno: "EPERM" | "EACCES"
   readonly loopbackRegistryConnect: "succeeded"
   readonly allowedSyntheticWrite: "succeeded"
   readonly forbiddenWrite: "denied-by-policy"
@@ -80,6 +81,7 @@ const COMMAND_OUTPUT_CAP_BYTES = 1_000_000
 const COMMAND_TERM_GRACE_MS = 300
 const COMMAND_REAP_TIMEOUT_MS = 500
 const COMMAND_PIPE_TIMEOUT_MS = 500
+const COMMAND_MONITOR_TIMEOUT_MS = COMMAND_TERM_GRACE_MS + COMMAND_REAP_TIMEOUT_MS + 500
 const DOCKER_CLEANUP_TIMEOUT_MS = 30_000
 const CLEANUP_PANE_OPTIONS = ["@pane_dash_status", "@pane_dash_status_since", "@pane_dash_heartbeat", "@pane_dash_title", "@pane_dash_model"] as const
 
@@ -174,7 +176,7 @@ export function seatbeltIsolationPlatform(platform: string, runner: CommandRunne
 
 export function assertIsolationObservations(observed: IsolationObservations): void {
   if (!/^[a-f0-9]{64}$/.test(observed.policySha256)) throw new Error("isolation policy SHA256 is invalid")
-  if (observed.platform !== "darwin" || observed.nonLoopbackConnect !== "denied-by-policy" || observed.loopbackRegistryConnect !== "succeeded" || observed.allowedSyntheticWrite !== "succeeded" || observed.forbiddenWrite !== "denied-by-policy") {
+  if (observed.platform !== "darwin" || observed.nonLoopbackConnect !== "denied-by-policy" || !["EPERM", "EACCES"].includes(observed.nonLoopbackConnectErrno) || observed.loopbackRegistryConnect !== "succeeded" || observed.allowedSyntheticWrite !== "succeeded" || observed.forbiddenWrite !== "denied-by-policy") {
     throw new Error("isolation canaries were not enforced")
   }
   if (observed.publicNetworkRequests !== 0 || observed.realHomeWrites !== 0 || observed.defaultTmuxUses !== 0) throw new Error("isolation counts are nonzero")
@@ -182,7 +184,7 @@ export function assertIsolationObservations(observed: IsolationObservations): vo
 
 export function formatOpenCodePassSummary(result: OpenCodeSpikeResult): string {
   assertIsolationObservations(result.isolation)
-  return `name=${result.name} rawSpec=${result.rawSpec} status=PASS cleanup=PASS public-network-requests=${result.isolation.publicNetworkRequests} real-home-writes=${result.isolation.realHomeWrites} default-tmux-uses=${result.isolation.defaultTmuxUses}`
+  return `name=${result.name} rawSpec=${result.rawSpec} status=PASS cleanup=PASS non-loopback-connect-errno=${result.isolation.nonLoopbackConnectErrno} public-network-requests=${result.isolation.publicNetworkRequests} real-home-writes=${result.isolation.realHomeWrites} default-tmux-uses=${result.isolation.defaultTmuxUses}`
 }
 
 export async function runOpenCodeVersion(binary: string, run: CommandRunner = dockerRunner): Promise<string> {
@@ -268,14 +270,14 @@ async function establishDarwinIsolation(input: { readonly root: string; readonly
   const policySha256 = createHash("sha256").update(profile).digest("hex")
   const forbidden = join(resolve(policyRoot, "..", ".."), `pane-dash-forbidden-${crypto.randomUUID()}`)
   const loopback = await runIsolationCanary(platform, profilePath, "network", input.registryHost, input.registryPort)
-  if (loopback !== "succeeded") throw new Error(`loopback registry canary failed: ${loopback}`)
+  if (loopback.outcome !== "succeeded") throw new Error(`loopback registry canary failed: ${loopback.outcome}`)
   const nonLoopback = await runIsolationCanary(platform, profilePath, "network", "1.1.1.1", "443")
-  if (nonLoopback !== "denied-by-policy") throw new Error(`non-loopback canary was not denied by policy: ${nonLoopback}`)
+  if (nonLoopback.outcome !== "denied-by-policy" || !nonLoopback.errno) throw new Error(`non-loopback canary was not denied by policy: ${nonLoopback.outcome}`)
   const allowed = await runIsolationCanary(platform, profilePath, "write", join(policyRoot, "canary-write"))
-  if (allowed !== "succeeded") throw new Error(`synthetic-root write canary failed: ${allowed}`)
+  if (allowed.outcome !== "succeeded") throw new Error(`synthetic-root write canary failed: ${allowed.outcome}`)
   const denied = await runIsolationCanary(platform, profilePath, "write", forbidden)
-  if (denied !== "denied-by-policy") throw new Error(`forbidden write canary was not denied by policy: ${denied}`)
-  return { profilePath, observations: { platform: "darwin", policySha256, nonLoopbackConnect: "denied-by-policy", loopbackRegistryConnect: "succeeded", allowedSyntheticWrite: "succeeded", forbiddenWrite: "denied-by-policy", publicNetworkRequests: 0, realHomeWrites: 0, defaultTmuxUses: 0 } }
+  if (denied.outcome !== "denied-by-policy") throw new Error(`forbidden write canary was not denied by policy: ${denied.outcome}`)
+  return { profilePath, observations: { platform: "darwin", policySha256, nonLoopbackConnect: "denied-by-policy", nonLoopbackConnectErrno: nonLoopback.errno, loopbackRegistryConnect: "succeeded", allowedSyntheticWrite: "succeeded", forbiddenWrite: "denied-by-policy", publicNetworkRequests: 0, realHomeWrites: 0, defaultTmuxUses: 0 } }
 }
 
 function darwinSeatbeltProfile(writableRoots: readonly string[]): string {
@@ -295,13 +297,33 @@ ${writableRoots.map((root) => `(allow file-write* (subpath ${seatbeltQuote(root)
 
 function seatbeltQuote(value: string): string { return `"${value.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"` }
 
-async function runIsolationCanary(platform: IsolationPlatform, profile: string, mode: "network" | "write", first: string, second?: string): Promise<string> {
+type SeatbeltNetworkClassification =
+  | { readonly outcome: "denied-by-policy"; readonly errno: "EPERM" | "EACCES" }
+  | { readonly outcome: "unexpected:" | `unexpected:${string}` }
+
+type IsolationCanaryResult = SeatbeltNetworkClassification | { readonly outcome: "succeeded" | "denied-by-policy" }
+
+/** Maps only Seatbelt's permission failures, never ambient network failures, to a policy denial. */
+export function classifySeatbeltNetworkDenial(error: { readonly code?: unknown; readonly message?: unknown }): SeatbeltNetworkClassification {
+  const code = typeof error.code === "string" ? error.code : ""
+  if (code === "EPERM" || code === "EACCES") return { outcome: "denied-by-policy", errno: code }
+  const message = typeof error.message === "string" ? error.message : ""
+  if (message === "Operation not permitted") return { outcome: "denied-by-policy", errno: "EPERM" }
+  if (message === "Permission denied") return { outcome: "denied-by-policy", errno: "EACCES" }
+  return { outcome: `unexpected:${code || message}` }
+}
+
+async function runIsolationCanary(platform: IsolationPlatform, profile: string, mode: "network" | "write", first: string, second?: string): Promise<IsolationCanaryResult> {
   const script = mode === "network"
-    ? `import net from "node:net"; const socket=net.connect({host:${JSON.stringify(first)},port:${JSON.stringify(Number(second))}}); const done=(v)=>{console.log(v);socket.destroy();process.exit(0)}; socket.once("connect",()=>done("succeeded")); socket.once("error",(e)=>done(["EPERM","EACCES","ECONNREFUSED","FailedToOpenSocket"].some((x)=>String(e.code||e.message).includes(x))?"denied-by-policy":"unexpected:"+(e.code||e.message))); setTimeout(()=>done("timeout"),1500);`
+    ? `import net from "node:net"; const socket=net.connect({host:${JSON.stringify(first)},port:${JSON.stringify(Number(second))}}); const done=(v)=>{console.log(JSON.stringify(v));socket.destroy();process.exit(0)}; socket.once("connect",()=>done({outcome:"succeeded"})); socket.once("error",(e)=>done({code:e.code,message:String(e.message)})); setTimeout(()=>done({code:"ETIMEDOUT",message:"timeout"}),1500);`
     : `import {writeFile} from "node:fs/promises"; try { await writeFile(${JSON.stringify(first)},"canary\\n"); console.log("succeeded") } catch (e) { console.log(["EPERM","EACCES","Operation not permitted"].some((x)=>String(e.code||e.message).includes(x))?"denied-by-policy":"unexpected:"+(e.code||e.message)) }`
   const result = await platform.run([process.execPath, "-e", script], profile, 5_000)
   if (result.code !== 0) throw new Error(`isolation ${mode} canary failed (${result.code}): ${result.stderr.trim()}`)
-  return result.stdout.trim()
+  if (mode === "write") return { outcome: result.stdout.trim() as "succeeded" | "denied-by-policy" }
+  const parsed: unknown = JSON.parse(result.stdout)
+  if (!parsed || typeof parsed !== "object") return { outcome: "unexpected:invalid-canary-output" }
+  const value = parsed as { readonly outcome?: unknown; readonly code?: unknown; readonly message?: unknown }
+  return value.outcome === "succeeded" ? { outcome: "succeeded" } : classifySeatbeltNetworkDenial(value)
 }
 
 async function packOpenCodePlugin(sourceRoot: string, packageRoot: string): Promise<LocalPackage> {
@@ -506,17 +528,95 @@ function signalOwnedGroup(groupId: number, signal: "SIGTERM" | "SIGKILL"): void 
   }
 }
 
+function signalMonitor(pid: number, signal: "SIGTERM" | "SIGKILL"): void {
+  try { process.kill(pid, signal) } catch (error) {
+    if (!(error instanceof Error) || !/ESRCH/.test(error.message)) throw error
+  }
+}
+
 async function stopOwnedGroup(groupId: number): Promise<void> {
   signalOwnedGroup(groupId, "SIGTERM")
   await delay(COMMAND_TERM_GRACE_MS)
   signalOwnedGroup(groupId, "SIGKILL")
 }
 
+const PERL_PROCESS_MONITOR = String.raw`
+use strict;
+use warnings;
+use POSIX qw(setpgid);
+
+my $report = shift @ARGV;
+my $child = fork();
+die "fork failed: $!\n" unless defined $child;
+
+if ($child == 0) {
+  setpgid(0, 0) or die "setpgid failed: $!\n";
+  open my $fh, ">", $report or die "monitor report failed: $!\n";
+  print {$fh} "$$\n" or die "monitor report write failed: $!\n";
+  close $fh or die "monitor report close failed: $!\n";
+  exec @ARGV;
+  die "exec failed: $!\n";
+}
+
+sub group_exists {
+  return kill(0, -$child) || $!{EPERM};
+}
+
+sub drain_group {
+  return unless group_exists();
+  kill 'TERM', -$child;
+  select undef, undef, undef, 0.300;
+  kill 'KILL', -$child if group_exists();
+  for (1 .. 50) {
+    last unless group_exists();
+    select undef, undef, undef, 0.010;
+  }
+}
+
+sub terminate {
+  drain_group();
+  waitpid($child, 0);
+  exit 143;
+}
+
+$SIG{HUP} = \&terminate;
+$SIG{INT} = \&terminate;
+$SIG{TERM} = \&terminate;
+
+waitpid($child, 0);
+my $status = $?;
+drain_group();
+exit 128 + ($status & 127) if $status & 127;
+exit $status >> 8;
+`
+
+async function monitorGroupId(reportPath: string, exited: Promise<number>): Promise<number> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const report = await readFile(reportPath, "utf8").catch(() => "")
+    if (/^[1-9][0-9]*\n$/.test(report)) return Number(report)
+    await Promise.race([exited.then(() => undefined), delay(10)])
+  }
+  const report = await readFile(reportPath, "utf8").catch(() => "")
+  if (/^[1-9][0-9]*\n$/.test(report)) return Number(report)
+  throw new Error("process monitor did not report its child process group")
+}
+
+async function stopMonitor(monitorPid: number, groupId: number, exited: Promise<number>): Promise<void> {
+  signalMonitor(monitorPid, "SIGTERM")
+  if (await within(exited, COMMAND_MONITOR_TIMEOUT_MS) !== undefined) return
+  await stopOwnedGroup(groupId)
+  signalMonitor(monitorPid, "SIGKILL")
+  await within(exited, COMMAND_REAP_TIMEOUT_MS)
+}
+
 async function superviseCommand(argv: readonly string[], options: SupervisedCommandOptions): Promise<CommandResult> {
   if (options.signal?.aborted) throw new CommandAbortedError(argv, "", "")
-  const child = Bun.spawn(argv, { cwd: options.cwd, env: options.env, stdout: "pipe", stderr: "pipe", detached: true })
-  const stdout = collectBoundedOutput(child.stdout)
-  const stderr = collectBoundedOutput(child.stderr)
+  const monitorRoot = await mkdtemp(join(tmpdir(), "pane-dash-process-monitor-"))
+  await chmod(monitorRoot, 0o700)
+  const reportPath = join(monitorRoot, "child-pgid")
+  const monitor = Bun.spawn(["/usr/bin/perl", "-e", PERL_PROCESS_MONITOR, reportPath, ...argv], { cwd: options.cwd, env: options.env, stdout: "pipe", stderr: "pipe", detached: true })
+  const stdout = collectBoundedOutput(monitor.stdout)
+  const stderr = collectBoundedOutput(monitor.stderr)
   let pipesClosed = false
   const pipes = Promise.all([stdout.result, stderr.result]).then(([out, err]) => {
     pipesClosed = true
@@ -531,23 +631,20 @@ async function superviseCommand(argv: readonly string[], options: SupervisedComm
   const timer = new Promise<"timed-out">(resolve => { timeout = setTimeout(() => resolve("timed-out"), options.timeoutMs) })
 
   try {
+    const groupId = await monitorGroupId(reportPath, monitor.exited)
     const outcome = await Promise.race([
-      child.exited.then(code => ({ kind: "exited" as const, code })),
+      monitor.exited.then(code => ({ kind: "exited" as const, code })),
       timer.then(kind => ({ kind })),
       aborted.then(kind => ({ kind })),
     ])
     if (outcome.kind === "exited") {
       const output = await within(pipes, COMMAND_PIPE_TIMEOUT_MS)
       if (output) return { code: outcome.code, ...output }
-      await stopOwnedGroup(child.pid)
-      const stoppedOutput = await within(pipes, COMMAND_PIPE_TIMEOUT_MS)
-      if (stoppedOutput) return { code: outcome.code, ...stoppedOutput }
       await Promise.all([stdout.cancel(), stderr.cancel()])
       return { code: outcome.code, stdout: "[output pipe did not close]", stderr: "[output pipe did not close]" }
     }
 
-    await stopOwnedGroup(child.pid)
-    await within(child.exited, COMMAND_REAP_TIMEOUT_MS)
+    await stopMonitor(monitor.pid, groupId, monitor.exited)
     const output = await within(pipes, COMMAND_PIPE_TIMEOUT_MS)
     if (!output) await Promise.all([stdout.cancel(), stderr.cancel()])
     const captured = output ?? { stdout: "[output pipe did not close]", stderr: "[output pipe did not close]" }
@@ -556,6 +653,7 @@ async function superviseCommand(argv: readonly string[], options: SupervisedComm
   } finally {
     clearTimeout(timeout)
     options.signal?.removeEventListener("abort", abort!)
+    await rm(monitorRoot, { recursive: true, force: true })
   }
 }
 

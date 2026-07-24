@@ -226,6 +226,7 @@ test("refuses to summarize unasserted or mutated isolation observations", () => 
     platform: "darwin" as const,
     policySha256: "a".repeat(64),
     nonLoopbackConnect: "denied-by-policy" as const,
+    nonLoopbackConnectErrno: "EPERM" as const,
     loopbackRegistryConnect: "succeeded" as const,
     allowedSyntheticWrite: "succeeded" as const,
     forbiddenWrite: "denied-by-policy" as const,
@@ -234,13 +235,35 @@ test("refuses to summarize unasserted or mutated isolation observations", () => 
     defaultTmuxUses: 0 as const,
   }
   expect(() => assertIsolationObservations(isolation)).not.toThrow()
-  expect(formatOpenCodePassSummary({ version: "1.17.20", sha256: "b".repeat(64), name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.0", requests: [], isolation })).toContain("public-network-requests=0")
-  for (const key of ["platform", "policySha256", "nonLoopbackConnect", "loopbackRegistryConnect", "allowedSyntheticWrite", "forbiddenWrite", "publicNetworkRequests", "realHomeWrites", "defaultTmuxUses"] as const) {
+  const summary = formatOpenCodePassSummary({ version: "1.17.20", sha256: "b".repeat(64), name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.0", requests: [], isolation })
+  expect(summary).toContain("public-network-requests=0")
+  expect(summary).toContain("non-loopback-connect-errno=EPERM")
+  for (const key of ["platform", "policySha256", "nonLoopbackConnect", "nonLoopbackConnectErrno", "loopbackRegistryConnect", "allowedSyntheticWrite", "forbiddenWrite", "publicNetworkRequests", "realHomeWrites", "defaultTmuxUses"] as const) {
     const mutated = {
       ...isolation,
-      [key]: key === "platform" ? "linux" : key === "policySha256" ? "invalid" : key.endsWith("Requests") || key.endsWith("Writes") || key === "defaultTmuxUses" ? 1 : "failed",
+      [key]: key === "platform" ? "linux" : key === "policySha256" ? "invalid" : key === "nonLoopbackConnectErrno" ? "ECONNREFUSED" : key.endsWith("Requests") || key.endsWith("Writes") || key === "defaultTmuxUses" ? 1 : "failed",
     }
     expect(() => formatOpenCodePassSummary({ version: "1.17.20", sha256: "b".repeat(64), name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.0", requests: [], isolation: mutated as typeof isolation })).toThrow()
+  }
+})
+
+test("classifies only Seatbelt permission errors as non-loopback policy denials", async () => {
+  const module = await import("../spikes") as Record<string, unknown>
+  const classify = module.classifySeatbeltNetworkDenial
+  if (typeof classify !== "function") {
+    expect(typeof classify).toBe("function")
+    return
+  }
+  for (const error of [
+    { code: "EPERM" },
+    { code: "EACCES" },
+    { message: "Operation not permitted" },
+    { message: "Permission denied" },
+  ]) {
+    expect(classify(error)).toEqual({ outcome: "denied-by-policy", errno: error.code === "EACCES" || error.message === "Permission denied" ? "EACCES" : "EPERM" })
+  }
+  for (const code of ["ECONNREFUSED", "ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH"]) {
+    expect(classify({ code })).toEqual({ outcome: `unexpected:${code}` })
   }
 })
 
@@ -324,6 +347,49 @@ test("cleans a descendant pipe holder after its leader exits successfully", asyn
     const pidsText = await readFile(pids, "utf8").catch(() => "")
     for (const pid of pidsText.trim().split("\n")) if (pid) Bun.spawnSync(["/bin/kill", "-KILL", pid])
   }
+})
+
+test("waits for a closed-pipe TERM-ignoring descendant before reporting its leader's successful exit", async () => {
+  const pids = join(root, "closed-pipe-pids")
+  const barrier = join(root, "leader-exited")
+  const script = [
+    "echo \"$$\" > \"$1\"",
+    "( trap '' TERM; exec >/dev/null 2>&1; while :; do sleep 1; done ) &",
+    "echo \"$!\" >> \"$1\"",
+    "touch \"$2\"",
+    "exit 0",
+  ].join("\n")
+  const started = performance.now()
+  let unrelated: ReturnType<typeof Bun.spawn> | undefined
+  try {
+    const command = localCommand(["/bin/sh", "-ceu", script, "sh", pids, barrier], 5_000)
+    for (let attempt = 0; attempt < 50 && !(await Bun.file(barrier).exists()); attempt++) await Bun.sleep(10)
+    expect(await Bun.file(barrier).exists()).toBe(true)
+    unrelated = Bun.spawn(["/bin/sh", "-ceu", "sleep 2"], { stdout: "ignore", stderr: "ignore" })
+    await expect(command).resolves.toMatchObject({ code: 0, stdout: "", stderr: "" })
+    expect(performance.now() - started).toBeLessThan(1_500)
+    const [, descendant] = (await readFile(pids, "utf8")).trim().split("\n")
+    await expect(localCommand(["/bin/kill", "-0", descendant!], 500, undefined, true)).resolves.toMatchObject({ code: 1 })
+    expect(await Promise.race([unrelated.exited, Bun.sleep(25).then(() => "running")])).toBe("running")
+    unrelated.kill("SIGKILL")
+    await unrelated.exited
+    unrelated = undefined
+  } finally {
+    if (unrelated) {
+      unrelated.kill("SIGKILL")
+      await unrelated.exited
+    }
+    const pidsText = await readFile(pids, "utf8").catch(() => "")
+    for (const pid of pidsText.trim().split("\n")) if (pid) Bun.spawnSync(["/bin/kill", "-KILL", pid])
+  }
+})
+
+test("preserves normal no-descendant command status and output", async () => {
+  await expect(localCommand(["/bin/sh", "-ceu", "printf out; printf err >&2; exit 7"], 5_000, undefined, true)).resolves.toEqual({
+    code: 7,
+    stdout: "out",
+    stderr: "err",
+  })
 })
 
 test("does not let allowFailure convert a local timeout into success", async () => {
