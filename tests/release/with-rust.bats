@@ -150,6 +150,134 @@ SH
   [ "$status" -eq 0 ]; [ ! -e "$safe" ]
 }
 
+assert_pid_reaped() {
+  local pid=$1
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+  done
+  return 1
+}
+
+make_hanging_rustup() {
+  local bin=$1
+  mkdir -p "$bin"
+  cat > "$bin/rustup" <<'SH'
+#!/bin/sh
+set -eu
+root=${RUSTUP_HOME%/rustup}
+case "$1" in
+  toolchain)
+    sleep 30 &
+    printf '%s %s\n' "$$" "$!" > "$root/hang-pids"
+    wait ;;
+  which) echo "no" ;;
+esac
+SH
+  chmod +x "$bin/rustup"
+}
+
+@test "with-rust provision timeout terminates and reaps descendants with no descriptor or transient state" {
+  root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+  tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$tmp"; tmp="$(cd "$tmp" && pwd -P)"
+  make_hanging_rustup "$bin"
+  # Use a 2s timeout with 0s kill-grace: wrapper must complete (which proves TERM→KILL/reap)
+  run env TMPDIR="$tmp" RUSTUP_BOOTSTRAP="$bin/rustup" PANE_DASH_TEST_PROVISION_TIMEOUT=2 PANE_DASH_TEST_KILL_GRACE=0 "$root/tests/release/with-rust.sh" -- true
+  [ "$status" -ne 0 ]
+  state="$tmp/tmux-pane-dash-release-$(id -u)"
+  # Descriptor must not exist (incomplete provision cleaned up)
+  [ ! -e "$state/rust1.96.1.env" ]
+  # No transient roots should survive (stop_incomplete_provision removes them)
+  ! compgen -G "$tmp/tmux-pane-dash-rust.*" >/dev/null 2>&1 || [ "$(ls -d "$tmp"/tmux-pane-dash-rust.* 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ]
+}
+
+@test "with-rust SIGKILL of guarded prepare releases the kernel flock and later contender succeeds" {
+  root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+  tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$tmp" "$bin"; tmp="$(cd "$tmp" && pwd -P)"
+  cat > "$bin/rustup" <<'SH'
+#!/bin/sh
+set -eu
+root=${RUSTUP_HOME%/rustup}
+case "$1" in
+  toolchain)
+    printf '%s %s\n' "$PPID" "$$" > "$root/guarded-pid"
+    while :; do sleep 1; done ;;
+  which) echo "no" ;;
+esac
+SH
+  chmod +x "$bin/rustup"
+  env TMPDIR="$tmp" RUSTUP_BOOTSTRAP="$bin/rustup" "$root/tests/release/with-rust.sh" -- true >"$BATS_TEST_TMPDIR/killed.log" 2>&1 &
+  outer_pid=$!
+  # Wait for the guarded-pid file to appear under the provisioned root
+  guarded_pid_file=""
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    guarded_pid_file="$(find "$tmp" -name guarded-pid -type f 2>/dev/null | head -1)"
+    [ -n "$guarded_pid_file" ] && [ -s "$guarded_pid_file" ] && break
+    guarded_pid_file=""
+    sleep 1
+  done
+  [ -n "$guarded_pid_file" ] && [ -s "$guarded_pid_file" ]
+  read -r guarded_pid rustup_pid < "$guarded_pid_file"
+  kill -KILL "$guarded_pid"
+  wait "$outer_pid" || true
+  # Kill the orphaned rustup process (test cleanup only)
+  kill -KILL "$rustup_pid" 2>/dev/null || true
+  assert_pid_reaped "$rustup_pid"
+  state="$tmp/tmux-pane-dash-release-$(id -u)"
+  [ ! -e "$state/rust1.96.1.env" ]
+  # Now a fresh contender with proper rustup must succeed (flock released)
+  make_fake_rustup "$bin"
+  run env TMPDIR="$tmp" RUSTUP_BOOTSTRAP="$bin/rustup" "$root/tests/release/with-rust.sh" -- true
+  [ "$status" -eq 0 ]
+}
+
+@test "with-rust HUP and TERM during provision return signal statuses and reap process group" {
+  root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+  tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$tmp"; tmp="$(cd "$tmp" && pwd -P)"
+  for signal in HUP TERM; do
+    rm -rf "$tmp/tmux-pane-dash-release-$(id -u)"
+    rm -rf "$tmp"/tmux-pane-dash-rust.*
+    mkdir -p "$bin"
+    # The rustup child runs under env -i so can only see RUSTUP_HOME
+    # Write PIDs to a file inside the root derived from RUSTUP_HOME
+    cat > "$bin/rustup" <<'SH'
+#!/bin/sh
+set -eu
+root=${RUSTUP_HOME%/rustup}
+case "$1" in
+  toolchain)
+    sleep 30 &
+    printf '%s %s %s\n' "$PPID" "$$" "$!" > "$root/signal-pids"
+    wait ;;
+  which) echo "no" ;;
+esac
+SH
+    chmod +x "$bin/rustup"
+    env TMPDIR="$tmp" RUSTUP_BOOTSTRAP="$bin/rustup" sh -c 'trap - HUP INT TERM; exec "$@"' signal-shell "$root/tests/release/with-rust.sh" -- true >"$BATS_TEST_TMPDIR/$signal.log" 2>&1 & wrapper=$!
+    # Wait for the signal-pids file to appear under the provisioned root
+    marker=""
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+      marker="$(find "$tmp" -name signal-pids -type f 2>/dev/null | head -1)"
+      [ -n "$marker" ] && [ -s "$marker" ] && break
+      marker=""
+      sleep 1
+    done
+    [ -n "$marker" ] && [ -s "$marker" ]; read -r script_pid rustup_pid child_pid < "$marker"
+    status=0; kill -"$signal" "$script_pid"; wait "$wrapper" || status=$?
+    case "$signal" in HUP) [ "$status" -eq 129 ] ;; TERM) [ "$status" -eq 143 ] ;; esac || { printf '%s status=%s\n' "$signal" "$status" >&3; false; }
+    # Clean up any orphaned test processes
+    kill -KILL "$rustup_pid" 2>/dev/null || true
+    kill -KILL "$child_pid" 2>/dev/null || true
+    assert_pid_reaped "$rustup_pid"
+    assert_pid_reaped "$child_pid"
+    state="$tmp/tmux-pane-dash-release-$(id -u)"
+    [ ! -e "$state/rust1.96.1.env" ]
+  done
+}
+
 @test "with-rust strips credentials preserves caller home and forwards child status while cleanup keeps a sentinel" {
   root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"; tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"; home="$BATS_TEST_TMPDIR/home"
   mkdir -p "$tmp" "$home"; tmp="$(cd "$tmp" && pwd -P)"; make_fake_rustup "$bin"

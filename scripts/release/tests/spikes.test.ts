@@ -149,6 +149,39 @@ test("fails closed when the Seatbelt parser returns malformed or noncanonical pa
   }
 })
 
+test("observeOpenCodePluginSpec launches parser under /usr/bin/sandbox-exec with PANE_DASH_NPA_ROOT profile", async () => {
+  // Construct a valid parser root inside the OS tempdir with physical path (no symlinks)
+  const { realpath: nodeRealpath } = await import("node:fs/promises")
+  const physicalRoot = await nodeRealpath(root)
+  const parserRoot = join(physicalRoot, "parser-sandbox-root")
+  const packageRoot = join(parserRoot, "node_modules", "npm-package-arg")
+  await mkdir(packageRoot, { recursive: true })
+  await writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "npm-package-arg", version: "13.0.2" }))
+  await mkdir(join(packageRoot, "lib"), { recursive: true })
+  // Provide a npa.js that actually parses (production module.exports = npa function)
+  await writeFile(join(packageRoot, "lib", "npa.js"), "")
+  // The wrapper index.js used by createRequire
+  await writeFile(
+    join(packageRoot, "index.js"),
+    `module.exports = function npa(spec) { const m = spec.match(/^(@[^/]+\\/[^@]+)@(.+)$/); return { name: m ? m[1] : spec, rawSpec: m ? m[2] : '' }; };`
+  )
+  const previous = process.env.PANE_DASH_NPA_ROOT
+  process.env.PANE_DASH_NPA_ROOT = parserRoot
+  try {
+    // This must run through /usr/bin/sandbox-exec -f <profile>
+    const result = await observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.0")
+    expect(result).toEqual({ name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.0" })
+    // The profile file is cleaned up, but the call must have used sandbox-exec
+    // Verify no stale profile files remain
+    const { readdir } = await import("node:fs/promises")
+    const files = await readdir(parserRoot)
+    expect(files.filter(f => f.endsWith(".sb"))).toEqual([])
+  } finally {
+    if (previous === undefined) delete process.env.PANE_DASH_NPA_ROOT
+    else process.env.PANE_DASH_NPA_ROOT = previous
+  }
+})
+
 test("accepts only the local companion and scoped-plugin registry inventory", () => {
   const origin = "http://127.0.0.1:54321"
   expect(() => assertOpenCodeRegistryRequests([
