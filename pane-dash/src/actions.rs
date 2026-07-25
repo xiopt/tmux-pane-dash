@@ -123,6 +123,12 @@ mod tests {
 
     use super::{execute_jump, jump_commands, kill_pane, send_text};
 
+    fn real_tmux() -> std::path::PathBuf {
+        std::env::var_os("TMUX_BIN")
+            .unwrap_or_else(|| "tmux".into())
+            .into()
+    }
+
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(ToString::to_string).collect()
     }
@@ -365,7 +371,7 @@ mod tests {
         struct ScratchServer(std::path::PathBuf);
         impl Drop for ScratchServer {
             fn drop(&mut self) {
-                let _ = Command::new("tmux")
+                let _ = Command::new(real_tmux())
                     .arg("-S")
                     .arg(&self.0)
                     .arg("kill-server")
@@ -375,14 +381,14 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("socket");
-        let _ = Command::new("tmux")
+        let _ = Command::new(real_tmux())
             .arg("-S")
             .arg(&socket)
             .arg("kill-server")
             .output();
         let _server = ScratchServer(socket.clone());
         assert!(
-            Command::new("tmux")
+            Command::new(real_tmux())
                 .arg("-S")
                 .arg(&socket)
                 .args(["-f", "/dev/null", "new-session", "-d", "-s", "send", "cat"])
@@ -393,14 +399,18 @@ mod tests {
         let wrapper = dir.path().join("tmux-send");
         std::fs::write(
             &wrapper,
-            format!("#!/bin/sh\nexec tmux -S '{}' \"$@\"\n", socket.display()),
+            format!(
+                "#!/bin/sh\nexec {} -S '{}' \"$@\"\n",
+                real_tmux().display(),
+                socket.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
         let tmux = TmuxExec::new(&wrapper);
         let pane_id = crate::model::PaneId::from(
             String::from_utf8(
-                Command::new("tmux")
+                Command::new(real_tmux())
                     .arg("-S")
                     .arg(&socket)
                     .args(["display-message", "-p", "-t", "send:0.0", "#{pane_id}"])
@@ -420,7 +430,7 @@ mod tests {
         let captured = tmux.capture_pane(&pane_id).await.unwrap();
         assert!(String::from_utf8_lossy(&captured).contains(text));
         assert!(
-            Command::new("tmux")
+            Command::new(real_tmux())
                 .arg("-S")
                 .arg(&socket)
                 .args(["has-session", "-t", "send"])
@@ -440,7 +450,7 @@ mod tests {
         struct ScratchServer(std::path::PathBuf);
         impl Drop for ScratchServer {
             fn drop(&mut self) {
-                let _ = Command::new("tmux")
+                let _ = Command::new(real_tmux())
                     .arg("-S")
                     .arg(&self.0)
                     .arg("kill-server")
@@ -452,7 +462,7 @@ mod tests {
         let socket = dir.path().join("socket");
         let _server = ScratchServer(socket.clone());
         assert!(
-            Command::new("tmux")
+            Command::new(real_tmux())
                 .arg("-S")
                 .arg(&socket)
                 .args([
@@ -469,7 +479,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("tmux")
+            Command::new(real_tmux())
                 .arg("-S")
                 .arg(&socket)
                 .args(["split-window", "-d", "-t", "kill:0", "sleep 60"])
@@ -478,7 +488,7 @@ mod tests {
                 .success()
         );
         let pane_id = String::from_utf8(
-            Command::new("tmux")
+            Command::new(real_tmux())
                 .arg("-S")
                 .arg(&socket)
                 .args(["display-message", "-p", "-t", "kill:0.1", "#{pane_id}"])
@@ -491,7 +501,11 @@ mod tests {
         let wrapper = dir.path().join("tmux-kill");
         std::fs::write(
             &wrapper,
-            format!("#!/bin/sh\nexec tmux -S '{}' \"$@\"\n", socket.display()),
+            format!(
+                "#!/bin/sh\nexec {} -S '{}' \"$@\"\n",
+                real_tmux().display(),
+                socket.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -501,7 +515,7 @@ mod tests {
             ActionOutcome::Success
         );
         let remaining = String::from_utf8(
-            Command::new("tmux")
+            Command::new(real_tmux())
                 .arg("-S")
                 .arg(&socket)
                 .args(["list-panes", "-a", "-F", "#{pane_id}"])
@@ -523,7 +537,7 @@ mod tests {
         struct ScratchServer(std::path::PathBuf);
         impl Drop for ScratchServer {
             fn drop(&mut self) {
-                let _ = Command::new("tmux")
+                let _ = Command::new(real_tmux())
                     .arg("-S")
                     .arg(&self.0)
                     .arg("kill-server")
@@ -535,7 +549,7 @@ mod tests {
         let socket = dir.path().join("socket");
         let _server = ScratchServer(socket.clone());
         assert!(
-            Command::new("tmux")
+            Command::new(real_tmux())
                 .arg("-S")
                 .arg(&socket)
                 .args([
@@ -552,7 +566,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("tmux")
+            Command::new(real_tmux())
                 .arg("-S")
                 .arg(&socket)
                 .args(["split-window", "-d", "-t", "jump:0", "sleep 60"])
@@ -561,7 +575,7 @@ mod tests {
                 .success()
         );
         let pane_id = String::from_utf8(
-            Command::new("tmux")
+            Command::new(real_tmux())
                 .arg("-S")
                 .arg(&socket)
                 .args(["display-message", "-p", "-t", "jump:0.1", "#{pane_id}"])
@@ -575,8 +589,9 @@ mod tests {
         std::fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resize-pane ]; then\n  tmux -S '{0}' \"$@\" || exit $?\n  tmux -S '{0}' kill-pane -t \"$4\"\n  exit $?\nfi\nexec tmux -S '{0}' \"$@\"\n",
-                socket.display()
+                "#!/bin/sh\nif [ \"$1\" = resize-pane ]; then\n  {tmux} -S '{socket}' \"$@\" || exit $?\n  {tmux} -S '{socket}' kill-pane -t \"$4\"\n  exit $?\nfi\nexec {tmux} -S '{socket}' \"$@\"\n",
+                tmux = real_tmux().display(),
+                socket = socket.display(),
             ),
         )
         .unwrap();
@@ -593,7 +608,7 @@ mod tests {
             .await
         );
         let remaining = String::from_utf8(
-            Command::new("tmux")
+            Command::new(real_tmux())
                 .arg("-S")
                 .arg(&socket)
                 .args(["list-panes", "-a", "-F", "#{pane_id}"])
@@ -867,7 +882,7 @@ mod tests {
         struct ScratchServer(std::path::PathBuf);
         impl Drop for ScratchServer {
             fn drop(&mut self) {
-                let _ = Command::new("tmux")
+                let _ = Command::new(real_tmux())
                     .arg("-S")
                     .arg(&self.0)
                     .arg("kill-server")
@@ -879,7 +894,7 @@ mod tests {
         let socket = dir.path().join("socket");
         let _server = ScratchServer(socket.clone());
         assert!(
-            Command::new("tmux")
+            Command::new(real_tmux())
                 .arg("-S")
                 .arg(&socket)
                 .args([
@@ -901,8 +916,9 @@ mod tests {
         std::fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec tmux -S '{}' \"$@\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec {} -S '{}' \"$@\"\n",
                 log.display(),
+                real_tmux().display(),
                 socket.display()
             ),
         )

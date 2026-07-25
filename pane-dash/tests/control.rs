@@ -35,6 +35,12 @@ mod actor_tests {
         .expect("marker timed out")
     }
 
+    fn real_tmux() -> std::path::PathBuf {
+        std::env::var_os("TMUX_BIN")
+            .unwrap_or_else(|| "tmux".into())
+            .into()
+    }
+
     #[tokio::test]
     async fn connects_with_exact_control_attach_argv() {
         let dir = TempDir::new().unwrap();
@@ -798,13 +804,13 @@ mod actor_tests {
         struct Server(String);
         impl Drop for Server {
             fn drop(&mut self) {
-                let _ = Command::new("tmux")
+                let _ = Command::new(real_tmux())
                     .args(["-L", &self.0, "kill-server"])
                     .status();
             }
         }
         fn tmux(socket: &str, args: &[&str]) -> String {
-            let output = Command::new("tmux")
+            let output = Command::new(real_tmux())
                 .args(["-L", socket])
                 .args(args)
                 .output()
@@ -816,7 +822,10 @@ mod actor_tests {
         let socket = format!("pd_control_it_{}", std::process::id());
         let _server = Server(socket.clone());
         let bin_dir = TempDir::new().unwrap();
-        let tmux_bin = fake_tmux(&bin_dir, &format!("exec tmux -L '{}' \"$@\"", socket));
+        let tmux_bin = fake_tmux(
+            &bin_dir,
+            &format!("exec {} -L '{}' \"$@\"", real_tmux().display(), socket),
+        );
         tmux(
             &socket,
             &["-f", "/dev/null", "new-session", "-d", "-s", "first"],
@@ -835,16 +844,9 @@ mod actor_tests {
         .trim()
         .to_owned();
         let mut pty = Command::new("script")
-            .args([
-                "-q",
-                "/dev/null",
-                "tmux",
-                "-L",
-                &socket,
-                "attach-session",
-                "-t",
-                "first",
-            ])
+            .args(["-q", "/dev/null"])
+            .arg(real_tmux())
+            .args(["-L", &socket, "attach-session", "-t", "first"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

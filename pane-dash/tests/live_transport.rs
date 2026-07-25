@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use std::{
-    fs,
+    env, fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
@@ -27,12 +27,78 @@ const OPTIONAL_NOTIFICATION_QUIET_PERIOD: Duration = Duration::from_millis(100);
 const PREVIEW_BUDGET: Duration = Duration::from_millis(500);
 const DEBOUNCE: Duration = Duration::from_millis(50);
 
+fn real_tmux() -> PathBuf {
+    env::var_os("TMUX_BIN")
+        .unwrap_or_else(|| "tmux".into())
+        .into()
+}
+
+struct EnvRestore {
+    name: &'static str,
+    old: Option<std::ffi::OsString>,
+}
+
+impl EnvRestore {
+    fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let old = env::var_os(name);
+        // SAFETY: this test target has no concurrent real-tmux test execution.
+        unsafe { env::set_var(name, value) };
+        Self { name, old }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        // SAFETY: this test target has no concurrent real-tmux test execution.
+        unsafe {
+            if let Some(value) = self.old.take() {
+                env::set_var(self.name, value);
+            } else {
+                env::remove_var(self.name);
+            }
+        }
+    }
+}
+
 #[test]
 fn parses_new_window_ids_from_one_rs_terminated_tab_delimited_record() {
     let (window_id, pane_id) = parse_new_window_ids("@17\t%42\u{001e}\n");
 
     assert_eq!(window_id, WindowId::from("@17"));
     assert_eq!(pane_id, PaneId::from("%42"));
+}
+
+#[test]
+fn real_tmux_harness_never_uses_a_path_predecessor() {
+    let pinned_tmux = env::var_os("TMUX_BIN").expect("test requires absolute TMUX_BIN");
+    let dir = TempDir::new().expect("create trap directory");
+    let trap = dir.path().join("tmux");
+    let invoked = dir.path().join("malicious-tmux-invoked");
+    fs::write(
+        &trap,
+        format!(
+            "#!/bin/sh\nprintf invoked > {}\nexit 99\n",
+            shell_quote(&invoked)
+        ),
+    )
+    .expect("write trap tmux");
+    fs::set_permissions(&trap, fs::Permissions::from_mode(0o755)).expect("make trap executable");
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        env::var("PATH").unwrap_or_default()
+    );
+    let _path = EnvRestore::set("PATH", path);
+    let _tmux_bin = EnvRestore::set("TMUX_BIN", pinned_tmux);
+
+    let harness = Harness::new();
+    harness.create_session("pinned", "exec cat");
+    drop(harness);
+
+    assert!(
+        !invoked.exists(),
+        "real-tmux test harness invoked PATH's malicious tmux"
+    );
 }
 
 /// Exercises the real control-channel and one-shot paths without relying on a
@@ -542,8 +608,9 @@ impl Harness {
         fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$$\" >> {}\nexec tmux -S {} \"$@\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" >> {}\nexec {} -S {} \"$@\"\n",
                 shell_quote(&log),
+                shell_quote(&real_tmux()),
                 shell_quote(&socket),
             ),
         )
@@ -563,7 +630,7 @@ impl Harness {
     }
 
     fn run<const N: usize>(&self, args: [&str; N]) {
-        let output = Command::new("tmux")
+        let output = Command::new(real_tmux())
             .arg("-S")
             .arg(&self.socket)
             .args(args)
@@ -577,7 +644,7 @@ impl Harness {
     }
 
     fn output<const N: usize>(&self, args: [&str; N]) -> String {
-        let output = Command::new("tmux")
+        let output = Command::new(real_tmux())
             .arg("-S")
             .arg(&self.socket)
             .args(args)
@@ -592,7 +659,7 @@ impl Harness {
     }
 
     fn create_session(&self, name: &str, command: &str) {
-        let output = Command::new("tmux")
+        let output = Command::new(real_tmux())
             .args(["-f", "/dev/null", "-S"])
             .arg(&self.socket)
             .args(["new-session", "-d", "-s", name, command])
@@ -686,7 +753,7 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
+        let _ = Command::new(real_tmux())
             .arg("-S")
             .arg(&self.socket)
             .arg("kill-server")

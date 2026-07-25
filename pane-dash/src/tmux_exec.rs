@@ -361,7 +361,7 @@ mod tests {
     use std::fs;
     use std::future;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
@@ -372,6 +372,12 @@ mod tests {
 
     fn shell_quote(path: &Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
+    }
+
+    fn real_tmux() -> PathBuf {
+        std::env::var_os("TMUX_BIN")
+            .unwrap_or_else(|| "tmux".into())
+            .into()
     }
 
     fn wait_for_pid_exit(pid: &str) {
@@ -752,7 +758,7 @@ mod tests {
 
     impl Drop for ScratchServer<'_> {
         fn drop(&mut self) {
-            let _ = Command::new("tmux")
+            let _ = Command::new(real_tmux())
                 .args(["-L", self.socket, "kill-server"])
                 .status();
         }
@@ -763,14 +769,14 @@ mod tests {
     async fn scratch_server_snapshot_builds_status_memberships() {
         let socket = "pd_rust_it";
         let tmux = |args: &[&str]| {
-            let status = Command::new("tmux")
+            let status = Command::new(real_tmux())
                 .args(["-L", socket])
                 .args(args)
                 .status()
                 .unwrap();
             assert!(status.success());
         };
-        let _ = Command::new("tmux")
+        let _ = Command::new(real_tmux())
             .args(["-L", socket, "kill-server"])
             .status();
         let _server = ScratchServer { socket };
@@ -818,7 +824,10 @@ mod tests {
         let wrapper = dir.path().join("tmux-pd-rust-it");
         fs::write(
             &wrapper,
-            format!("#!/bin/sh\nexec tmux -L {socket} \"$@\"\n"),
+            format!(
+                "#!/bin/sh\nexec {} -L {socket} \"$@\"\n",
+                real_tmux().display()
+            ),
         )
         .unwrap();
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();

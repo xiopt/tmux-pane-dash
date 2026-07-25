@@ -21,6 +21,12 @@ fn fake_tmux(dir: &TempDir, body: &str) -> std::path::PathBuf {
     path
 }
 
+fn real_tmux() -> std::path::PathBuf {
+    std::env::var_os("TMUX_BIN")
+        .unwrap_or_else(|| "tmux".into())
+        .into()
+}
+
 #[test]
 fn parses_sgr_foreground_background_bold_and_reset() {
     let frame = parse_preview(
@@ -201,7 +207,7 @@ async fn real_tmux_capture_parses_styles_and_rejects_a_disappeared_pane() {
 
     impl Drop for Server {
         fn drop(&mut self) {
-            let _ = Command::new("tmux")
+            let _ = Command::new(real_tmux())
                 .args(["-L", &self.0, "kill-server"])
                 .status();
         }
@@ -210,7 +216,7 @@ async fn real_tmux_capture_parses_styles_and_rejects_a_disappeared_pane() {
     let socket = format!("pd_preview_it_{}", std::process::id());
     let _server = Server(socket.clone());
     let tmux = |args: &[&str]| {
-        Command::new("tmux")
+        Command::new(real_tmux())
             .args(["-L", &socket])
             .args(args)
             .output()
@@ -232,7 +238,10 @@ async fn real_tmux_capture_parses_styles_and_rejects_a_disappeared_pane() {
             .trim()
             .to_owned();
     let wrapper_dir = TempDir::new().unwrap();
-    let wrapper = fake_tmux(&wrapper_dir, &format!("exec tmux -L '{socket}' \"$@\""));
+    let wrapper = fake_tmux(
+        &wrapper_dir,
+        &format!("exec {} -L '{socket}' \"$@\"", real_tmux().display()),
+    );
     let exec = TmuxExec::new(wrapper);
 
     let mut bytes = Vec::new();
