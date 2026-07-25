@@ -155,9 +155,7 @@ terminate_and_reap() {
   local pid=$1 remaining=40 state
   local -a pids=("$pid")
   [ -n "$pid" ] || return 0
-  descendant_pids=()
   collect_descendants "$pid"
-  pids+=("${descendant_pids[@]}")
   kill -TERM "${pids[@]}" 2>/dev/null || true
   while ((remaining--)); do
     state="$(ps -p "$pid" -o stat= 2>/dev/null || :)"
@@ -174,9 +172,58 @@ terminate_and_reap() {
 collect_descendants() {
   local parent=$1 child
   while IFS= read -r child; do
-    descendant_pids+=("$child")
+    pids+=("$child")
     collect_descendants "$child"
   done < <(pgrep -P "$parent" 2>/dev/null || true)
+}
+
+assert_terminate_and_reap_regressions() {
+  local leader child grandchild nested_dir state
+
+  "$BASH" -c 'trap "" TERM; while :; do :; done' &
+  leader=$!
+  terminate_and_reap "$leader"
+  wait "$leader" 2>/dev/null || true
+  state="$(ps -p "$leader" -o stat= 2>/dev/null || :)"
+  [ -z "$state" ] || fail 'terminate_and_reap did not reap a leader without descendants'
+
+  nested_dir="$scratch_root/terminate-and-reap"
+  mkdir -p "$nested_dir"
+  cat > "$nested_dir/child" <<'CHILD'
+#!/usr/bin/env bash
+trap '' TERM
+"$BASH" -c 'trap "" TERM; while :; do :; done' &
+printf '%s\n' "$!" > "$1/grandchild"
+while :; do :; done
+CHILD
+  cat > "$nested_dir/leader" <<'LEADER'
+#!/usr/bin/env bash
+trap '' TERM
+"$BASH" "$1/child" "$1" &
+printf '%s\n' "$!" > "$1/child-pid"
+while :; do :; done
+LEADER
+  chmod 755 "$nested_dir/child" "$nested_dir/leader"
+  "$BASH" "$nested_dir/leader" "$nested_dir" &
+  leader=$!
+  for _ in $(seq 1 40); do
+    [ -s "$nested_dir/child-pid" ] && [ -s "$nested_dir/grandchild" ] && break
+    sleep 0.05
+  done
+  [ -s "$nested_dir/child-pid" ] && [ -s "$nested_dir/grandchild" ] ||
+    fail 'terminate_and_reap regression fixture did not start nested descendants'
+  child="$(<"$nested_dir/child-pid")"
+  grandchild="$(<"$nested_dir/grandchild")"
+  terminate_and_reap "$leader"
+  wait "$leader" 2>/dev/null || true
+  for leader in "$leader" "$child" "$grandchild"; do
+    for _ in $(seq 1 40); do
+      state="$(ps -p "$leader" -o stat= 2>/dev/null || :)"
+      [ -z "$state" ] && break
+      sleep 0.05
+    done
+    [ -z "$state" ] || fail "terminate_and_reap did not reap TERM-ignoring descendant $leader"
+  done
 }
 
 terminate_process_group() {
@@ -215,6 +262,8 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+assert_terminate_and_reap_regressions
 
 before="$(source_fingerprint)"
 generated_before="$(generated_output_metadata)"
