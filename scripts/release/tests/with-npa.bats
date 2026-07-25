@@ -57,3 +57,25 @@ setup() {
   wait "$second"
   [ "$(tail -n 1 "$tmp/one")" = "$(tail -n 1 "$tmp/two")" ]
 }
+
+@test "uses only the explicit Bun bootstrap seam for a validated fixture install" {
+  tmp="$BATS_TEST_TMPDIR/npa-temp"
+  bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$tmp" "$bin"
+  cat > "$bin/bun" <<'SH'
+#!/bin/sh
+set -eu
+test "$1" = --version && { echo 1.3.14; exit 0; }
+root=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --cwd ]; then root=$2; shift 2; continue; fi
+  shift
+done
+mkdir -p "$root/node_modules/npm-package-arg/lib"
+printf '{"name":"npm-package-arg","version":"13.0.2"}\n' > "$root/node_modules/npm-package-arg/package.json"
+printf 'module.exports = function () {}\n' > "$root/node_modules/npm-package-arg/lib/npa.js"
+SH
+  chmod +x "$bin/bun"
+  run env TMPDIR="$tmp" BUN_BOOTSTRAP="$bin/bun" "$wrapper" -- true
+  [ "$status" -eq 0 ]
+}

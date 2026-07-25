@@ -1,5 +1,4 @@
 import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
-import { createRequire } from "node:module"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
@@ -121,15 +120,20 @@ export async function observeOpenCodePluginSpec(value: string): Promise<{ readon
   if (physicalRoot !== root || relative(tempRoot, root).startsWith("..") || !rootStat.isDirectory() || rootStat.isSymbolicLink() || !packageStat.isDirectory() || packageStat.isSymbolicLink() || relative(root, packagePath).startsWith("..")) {
     throw new Error("PANE_DASH_NPA_ROOT must name a validated parser root")
   }
-  const require = createRequire(join(root, "package.json"))
-  const packageJson = require("npm-package-arg/package.json") as { version?: unknown }
-  if (packageJson.version !== "13.0.2") throw new Error("npm-package-arg fixture must be exact 13.0.2")
-  const npa = require("npm-package-arg") as (spec: string) => { name?: unknown; rawSpec?: unknown }
-  const modulePath = await realpath(require.resolve("npm-package-arg"))
-  if (relative(packageRoot, modulePath).startsWith("..")) throw new Error("PANE_DASH_NPA_ROOT resolved npm-package-arg outside its validated root")
-  const parsed = npa(value)
-  if (parsed.name !== "@xiopt/pane-dash-opencode" || parsed.rawSpec !== "0.1.0") throw new Error("exact scoped package observation required")
-  return { name: parsed.name, rawSpec: parsed.rawSpec }
+  if (process.platform !== "darwin" || !(await stat("/usr/bin/sandbox-exec")).isFile()) throw new Error("Darwin Seatbelt isolation unavailable for npm-package-arg")
+  const profilePath = join(root, `.npa-observe-${process.pid}-${crypto.randomUUID()}.sb`)
+  const script = `const { createRequire } = require("node:module"); const root = process.argv[1]; const requireFromRoot = createRequire(root + "/package.json"); const pkg = requireFromRoot("npm-package-arg/package.json"); const npa = requireFromRoot("npm-package-arg"); const parsed = npa(process.argv[2]); console.log(JSON.stringify({version:pkg.version,module:requireFromRoot.resolve("npm-package-arg"),name:parsed.name,rawSpec:parsed.rawSpec}));`
+  try {
+    await writeFile(profilePath, darwinSeatbeltProfile([root]), { mode: 0o600 })
+    const result = await localCommand(["/usr/bin/sandbox-exec", "-f", profilePath, process.execPath, "-e", script, root, value], 5_000)
+    if (result.code !== 0) throw new Error(`sandboxed npm-package-arg parser failed (${result.code}): ${result.stderr.trim()}`)
+    const parsed: { version?: unknown; module?: unknown; name?: unknown; rawSpec?: unknown } = JSON.parse(result.stdout)
+    const modulePath = typeof parsed.module === "string" ? await realpath(parsed.module) : ""
+    if (parsed.version !== "13.0.2" || !modulePath || relative(packageRoot, modulePath).startsWith("..") || parsed.name !== "@xiopt/pane-dash-opencode" || parsed.rawSpec !== "0.1.0") throw new Error("exact scoped package observation required")
+    return { name: parsed.name as "@xiopt/pane-dash-opencode", rawSpec: parsed.rawSpec as "0.1.0" }
+  } finally {
+    await rm(profilePath, { force: true })
+  }
 }
 
 export function assertOpenCodeRegistryRequests(requests: readonly string[], _origin: string): void {

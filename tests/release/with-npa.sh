@@ -17,7 +17,7 @@ for forbidden in "$repo_root" "${HOME:-}" "${XDG_DATA_HOME:-}" "${XDG_CONFIG_HOM
 done
 state_dir="$tmp_prefix/tmux-pane-dash-release-$(id -u)"
 descriptor="$state_dir/npa13.env"
-root=''
+root='' guard_fd='' incomplete_root='' install_pgid='' incomplete_descriptor_temp=''
 
 path_under() { [ "$1" = "$2" ] || [[ "$1" == "$2/"* ]]; }
 valid_root() {
@@ -55,22 +55,47 @@ read_descriptor() {
 }
 provision() {
   local bun root_tmp
-  bun=$(command -v bun || true)
-  case "$bun" in /*) [ -x "$bun" ] && [ "$("$bun" --version)" = 1.3.14 ] || fail 'Bun 1.3.14 is required' ;; *) fail 'Bun 1.3.14 is required' ;; esac
+  bun=${BUN_BOOTSTRAP:-$(command -v bun || true)}
+  case "$bun" in /*) [ -x "$bun" ] && [ "$("$bun" --version)" = 1.3.14 ] || fail 'BUN_BOOTSTRAP must be an exact Bun 1.3.14 executable' ;; *) fail 'BUN_BOOTSTRAP must be an absolute executable path' ;; esac
   root_tmp=$(mktemp -d "$tmp_prefix/tmux-pane-dash-npa.XXXXXX")
   root=$(canonical_dir "$root_tmp") || fail 'cannot canonicalize parser root'
   valid_root "$root" || { rm -rf -- "$root_tmp"; fail 'unsafe parser root'; }
+  incomplete_root=$root
   mkdir -p "$root/home" "$root/data" "$root/config" "$root/cache" "$root/bun-cache"
   cp "$fixture/package.json" "$fixture/bun.lock" "$root/"
-  env -i PATH="$(dirname "$bun"):/usr/bin:/bin" HOME="$root/home" XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME="$root/cache" BUN_INSTALL_CACHE_DIR="$root/bun-cache" "$bun" install --frozen-lockfile --ignore-scripts --cwd "$root" >&2
+  run_owned env -i PATH="$(dirname "$bun"):/usr/bin:/bin" HOME="$root/home" XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME="$root/cache" BUN_INSTALL_CACHE_DIR="$root/bun-cache" "$bun" install --frozen-lockfile --ignore-scripts --cwd "$root" >&2 || fail 'locked npm-package-arg installation failed'
   validate_root || { rm -rf -- "$root"; fail 'locked npm-package-arg installation failed validation'; }
-  (umask 077; printf 'SCHEMA=1\nROOT=%s\n' "$root" > "$descriptor.$$")
-  chmod 600 "$descriptor.$$" && mv -f "$descriptor.$$" "$descriptor"
+  incomplete_descriptor_temp="$descriptor.$$"
+  (umask 077; printf 'SCHEMA=1\nROOT=%s\n' "$root" > "$incomplete_descriptor_temp")
+  chmod 600 "$incomplete_descriptor_temp" && mv -f "$incomplete_descriptor_temp" "$descriptor"
+  incomplete_descriptor_temp='' incomplete_root=''
 }
 write_result() {
   local result=$1
   (umask 077; printf 'SCHEMA=1\nROOT=%s\n' "$root" > "$result.$$.tmp")
   chmod 600 "$result.$$.tmp" && mv -f "$result.$$.tmp" "$result"
+}
+terminate_install_group() {
+  local _ grace=${PANE_DASH_TEST_KILL_GRACE:-5}
+  [ -n "$install_pgid" ] || return 0
+  kill -TERM -- "-$install_pgid" 2>/dev/null || true
+  [[ "$grace" =~ ^[0-9]+$ ]] || fail 'invalid test kill grace'
+  for ((_=0; _<grace; _++)); do kill -0 -- "-$install_pgid" 2>/dev/null || break; sleep 1; done
+  kill -KILL -- "-$install_pgid" 2>/dev/null || true
+  wait "$install_pgid" 2>/dev/null || true
+  install_pgid=''
+}
+stop_incomplete_provision() { terminate_install_group; rm -f -- "$incomplete_descriptor_temp"; rm -rf -- "$incomplete_root"; incomplete_descriptor_temp='' incomplete_root=''; }
+finish_owned_provision() { local status=$?; trap - EXIT HUP INT TERM; stop_incomplete_provision; exit "$status"; }
+run_owned() {
+  local pid elapsed=0 timeout=${PANE_DASH_TEST_PROVISION_TIMEOUT:-600}
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || fail 'invalid test provision timeout'
+  set -m
+  (exec /usr/bin/perl -e 'use POSIX (); POSIX::close(shift @ARGV) or die "close guard fd: $!\n"; exec @ARGV or die "$!\n"' "$guard_fd" "$@") & pid=$!
+  set +m
+  install_pgid=$pid
+  while kill -0 "$pid" 2>/dev/null; do [ "$elapsed" -lt "$timeout" ] || { terminate_install_group; return 124; }; sleep 1; elapsed=$((elapsed + 1)); done
+  wait "$pid"; local status=$?; install_pgid=''; return "$status"
 }
 locked() {
   case "$1" in
@@ -83,9 +108,15 @@ with_lock() {
   local action=$1 result=${2:-} script
   mkdir -p "$state_dir"
   script="$(canonical_dir "$(dirname "${BASH_SOURCE[0]}")")/$(basename "${BASH_SOURCE[0]}")"
-  /usr/bin/perl -MFcntl=:flock,F_SETFD -e 'open my $f, q{<}, $ARGV[0] or die "$!\n"; flock($f, LOCK_EX) or die "$!\n"; fcntl($f, F_SETFD, 0) or die "$!\n"; exec @ARGV[1..$#ARGV] or die "$!\n"' "$script" "$script" --locked "$action" "$result"
+  /usr/bin/perl -MFcntl=:flock,F_SETFD -e 'open my $f, q{<}, $ARGV[0] or die "$!\n"; flock($f, LOCK_EX) or die "$!\n"; fcntl($f, F_SETFD, 0) or die "$!\n"; my $fd=fileno($f); exec $ARGV[1], q{--locked}, $fd, @ARGV[2..$#ARGV] or die "$!\n"' "$script" "$script" "$action" "$result"
 }
-if [ "${1:-}" = --locked ]; then shift; locked "$@"; exit; fi
+if [ "${1:-}" = --locked ]; then
+  guard_fd=${2:-}; action=${3:-}; [[ "$guard_fd" =~ ^[3-9][0-9]*$|^[3-9]$ ]] || fail 'invalid private guard invocation'
+  case "$action:$#" in prepare:4|cleanup:4) ;; *) fail 'invalid private guard invocation' ;; esac
+  trap finish_owned_provision EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+  locked "$action" "${4:-}"
+  trap - EXIT HUP INT TERM; exit
+fi
 if [ "${1:-}" = --cleanup ]; then [ "$#" -eq 1 ] || fail 'usage: with-npa.sh --cleanup'; [ -d "$state_dir" ] || exit 0; with_lock cleanup; exit; fi
 [ "${1:-}" = -- ] && [ "$#" -gt 1 ] || fail 'usage: with-npa.sh -- command [arg ...]'
 shift
