@@ -108,16 +108,17 @@ export function normalizeOpenCodeVersion(output: string): string {
 
 export async function observeOpenCodePluginSpec(value: string): Promise<{ readonly name: "@xiopt/pane-dash-opencode"; readonly rawSpec: "0.1.0" }> {
   const root = process.env.PANE_DASH_NPA_ROOT
-  if (!root || !isAbsolute(root)) throw new Error("PANE_DASH_NPA_ROOT must name a validated absolute parser root")
+  const tempPrefix = process.env.PANE_DASH_NPA_TMP_PREFIX
+  if (!root || !tempPrefix || !isAbsolute(root) || !isAbsolute(tempPrefix)) throw new Error("PANE_DASH_NPA_ROOT must name a validated absolute parser root")
   const packageRoot = join(root, "node_modules", "npm-package-arg")
-  const [tempRoot, physicalRoot, rootStat, packageStat, packagePath] = await Promise.all([
-    realpath(tmpdir()),
+  const [physicalTempPrefix, physicalRoot, rootStat, packageStat, packagePath] = await Promise.all([
+    realpath(tempPrefix),
     realpath(root),
     lstat(root),
     lstat(packageRoot),
     realpath(join(packageRoot, "package.json")),
   ]).catch(() => { throw new Error("PANE_DASH_NPA_ROOT must name a validated parser root") })
-  if (physicalRoot !== root || relative(tempRoot, root).startsWith("..") || !rootStat.isDirectory() || rootStat.isSymbolicLink() || !packageStat.isDirectory() || packageStat.isSymbolicLink() || relative(root, packagePath).startsWith("..")) {
+  if (physicalRoot !== root || relative(physicalTempPrefix, root).startsWith("..") || !rootStat.isDirectory() || rootStat.isSymbolicLink() || !packageStat.isDirectory() || packageStat.isSymbolicLink() || relative(root, packagePath).startsWith("..")) {
     throw new Error("PANE_DASH_NPA_ROOT must name a validated parser root")
   }
   if (process.platform !== "darwin" || !(await stat("/usr/bin/sandbox-exec")).isFile()) throw new Error("Darwin Seatbelt isolation unavailable for npm-package-arg")

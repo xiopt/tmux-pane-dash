@@ -37,7 +37,7 @@ if [ -n "${PANE_DASH_ISOLATED_RUST_ROOT:-}${RUSTUP_HOME:-}${CARGO_HOME:-}" ]; th
   preserve_rust=1
 fi
 if [ -n "${PANE_DASH_NPA_ROOT:-}" ]; then
-  validate_isolated_root "$PANE_DASH_NPA_ROOT" "${TMPDIR:-/tmp}" && [ -f "$PANE_DASH_NPA_ROOT/node_modules/npm-package-arg/package.json" ] || { printf '%s\n' 'clean-room: invalid isolated NPA state' >&2; exit 64; }
+  validate_isolated_root "$PANE_DASH_NPA_ROOT" "${PANE_DASH_NPA_TMP_PREFIX:-}" && [ -f "$PANE_DASH_NPA_ROOT/node_modules/npm-package-arg/package.json" ] || { printf '%s\n' 'clean-room: invalid isolated NPA state' >&2; exit 64; }
   preserve_npa=1
 fi
 
@@ -136,7 +136,7 @@ for index in "${!tool_names[@]}"; do
 done
 
 [ "$preserve_rust" -eq 1 ] || unset RUSTUP_HOME CARGO_HOME PANE_DASH_ISOLATED_RUST_ROOT
-[ "$preserve_npa" -eq 1 ] || unset PANE_DASH_NPA_ROOT
+[ "$preserve_npa" -eq 1 ] || unset PANE_DASH_NPA_ROOT PANE_DASH_NPA_TMP_PREFIX
 
 export HOME="$root/home"
 export XDG_DATA_HOME="$root/xdg-data"

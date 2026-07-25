@@ -119,6 +119,22 @@ test("observes the exact scoped OpenCode plugin spec with npm-package-arg", asyn
   }
 })
 
+test("keeps the validated parser root when the clean room replaces TMPDIR", async () => {
+  const cleanTmp = join(root, "clean-tmp")
+  const previousTmpdir = process.env.TMPDIR
+  await mkdir(cleanTmp)
+  process.env.TMPDIR = cleanTmp
+  try {
+    await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.0")).resolves.toEqual({
+      name: "@xiopt/pane-dash-opencode",
+      rawSpec: "0.1.0",
+    })
+  } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmpdir
+  }
+})
+
 test("refuses an unvalidated ambient npm-package-arg root", async () => {
   const previous = process.env.PANE_DASH_NPA_ROOT
   process.env.PANE_DASH_NPA_ROOT = "/not-a-validated-npa-root"
@@ -136,16 +152,26 @@ test("fails closed when the Seatbelt parser returns malformed or noncanonical pa
   await mkdir(packageRoot, { recursive: true })
   await writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "npm-package-arg", version: "13.0.2" }))
   const previous = process.env.PANE_DASH_NPA_ROOT
+  const previousTempPrefix = process.env.PANE_DASH_NPA_TMP_PREFIX
   process.env.PANE_DASH_NPA_ROOT = parserRoot
+  process.env.PANE_DASH_NPA_TMP_PREFIX = root
   try {
-    for (const result of ["not json", JSON.stringify({ version: "13.0.1", module: join(packageRoot, "index.js"), name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.0" }), JSON.stringify({ version: "13.0.2", module: join(packageRoot, "index.js"), name: "wrong", rawSpec: "0.1.0" }), JSON.stringify({ version: "13.0.2", module: join(packageRoot, "index.js"), name: "@xiopt/pane-dash-opencode", rawSpec: "latest" })]) {
-      await writeFile(join(packageRoot, "index.js"), `module.exports = () => (${JSON.stringify(result === "not json" ? {} : JSON.parse(result))});`)
-      if (result === "not json") await writeFile(join(packageRoot, "index.js"), "module.exports = () => { throw new Error('malformed parser fixture') }")
+    await writeFile(join(packageRoot, "index.js"), "module.exports = () => { throw new Error('malformed parser fixture') }")
+    await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.0")).rejects.toThrow()
+    for (const { version, parsed } of [
+      { version: "13.0.1", parsed: { name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.0" } },
+      { version: "13.0.2", parsed: { name: "wrong", rawSpec: "0.1.0" } },
+      { version: "13.0.2", parsed: { name: "@xiopt/pane-dash-opencode", rawSpec: "latest" } },
+    ]) {
+      await writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "npm-package-arg", version }))
+      await writeFile(join(packageRoot, "index.js"), `module.exports = () => (${JSON.stringify(parsed)});`)
       await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.0")).rejects.toThrow()
     }
   } finally {
     if (previous === undefined) delete process.env.PANE_DASH_NPA_ROOT
     else process.env.PANE_DASH_NPA_ROOT = previous
+    if (previousTempPrefix === undefined) delete process.env.PANE_DASH_NPA_TMP_PREFIX
+    else process.env.PANE_DASH_NPA_TMP_PREFIX = previousTempPrefix
   }
 })
 
@@ -166,7 +192,9 @@ test("observeOpenCodePluginSpec launches parser under /usr/bin/sandbox-exec with
     `module.exports = function npa(spec) { const m = spec.match(/^(@[^/]+\\/[^@]+)@(.+)$/); return { name: m ? m[1] : spec, rawSpec: m ? m[2] : '' }; };`
   )
   const previous = process.env.PANE_DASH_NPA_ROOT
+  const previousTempPrefix = process.env.PANE_DASH_NPA_TMP_PREFIX
   process.env.PANE_DASH_NPA_ROOT = parserRoot
+  process.env.PANE_DASH_NPA_TMP_PREFIX = physicalRoot
   try {
     // This must run through /usr/bin/sandbox-exec -f <profile>
     const result = await observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.0")
@@ -179,6 +207,8 @@ test("observeOpenCodePluginSpec launches parser under /usr/bin/sandbox-exec with
   } finally {
     if (previous === undefined) delete process.env.PANE_DASH_NPA_ROOT
     else process.env.PANE_DASH_NPA_ROOT = previous
+    if (previousTempPrefix === undefined) delete process.env.PANE_DASH_NPA_TMP_PREFIX
+    else process.env.PANE_DASH_NPA_TMP_PREFIX = previousTempPrefix
   }
 })
 

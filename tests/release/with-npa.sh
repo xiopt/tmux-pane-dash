@@ -154,5 +154,5 @@ read_descriptor || fail 'invalid parser result handshake'
 rm -f -- "$result"; trap - EXIT HUP INT TERM
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY no_proxy NPM_TOKEN NODE_AUTH_TOKEN GH_TOKEN GITHUB_TOKEN npm_config_userconfig npm_config_globalconfig npm_config_prefix npm_config_cache npm_config_registry
 for variable in $(env | cut -d= -f1); do case "$variable" in *_TOKEN|*_PASSWORD|*_SECRET|*_API_KEY|AWS_*|AZURE_*|BUN_CONFIG_*|npm_config_*) unset "$variable" ;; esac; done
-export PANE_DASH_NPA_ROOT="$root"
+export PANE_DASH_NPA_ROOT="$root" PANE_DASH_NPA_TMP_PREFIX="$tmp_prefix"
 exec "$@"
