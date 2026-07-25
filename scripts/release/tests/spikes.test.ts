@@ -13,7 +13,7 @@ import {
   assertIsolationObservations,
   assertExactPackageFixture,
   formatOpenCodePassSummary,
-  parseOpenCodePluginSpec,
+  observeOpenCodePluginSpec,
   requiredSpikeChecks,
   runCli,
   runOpenCodeVersion,
@@ -109,13 +109,13 @@ test("reads an absolute OpenCode binary through the bounded process seam", async
   await expect(runOpenCodeVersion("opencode", run)).rejects.toThrow("absolute")
 })
 
-test("parses only the exact scoped OpenCode plugin registry spec", () => {
-  expect(parseOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.0")).toEqual({
+test("observes the exact scoped OpenCode plugin spec with npm-package-arg", async () => {
+  await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.0")).resolves.toEqual({
     name: "@xiopt/pane-dash-opencode",
     rawSpec: "0.1.0",
   })
   for (const invalid of ["pane-dash-opencode@0.1.0", "@xiopt/pane-dash-opencode", "@xiopt/pane-dash-opencode@v0.1.0", "@xiopt/pane-dash-opencode@0.1"]) {
-    expect(() => parseOpenCodePluginSpec(invalid)).toThrow("exact scoped package")
+    await expect(observeOpenCodePluginSpec(invalid)).rejects.toThrow("exact scoped package")
   }
 })
 

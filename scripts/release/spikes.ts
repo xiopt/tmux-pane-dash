@@ -1,4 +1,5 @@
 import { chmod, copyFile, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
+import { createRequire } from "node:module"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { basename, isAbsolute, join, resolve } from "node:path"
@@ -106,10 +107,15 @@ export function normalizeOpenCodeVersion(output: string): string {
   return match[1]!
 }
 
-export function parseOpenCodePluginSpec(value: string): { readonly name: "@xiopt/pane-dash-opencode"; readonly rawSpec: "0.1.0" } {
-  const match = /^(@xiopt\/pane-dash-opencode)@(0\.1\.0)$/.exec(value)
-  if (!match) throw new Error("OpenCode plugin must use the exact scoped package and version")
-  return { name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.0" }
+export async function observeOpenCodePluginSpec(value: string): Promise<{ readonly name: "@xiopt/pane-dash-opencode"; readonly rawSpec: "0.1.0" }> {
+  const fixture = new URL("fixtures/npm-package-arg-13/package.json", import.meta.url)
+  const require = createRequire(fixture)
+  const packageJson = require("npm-package-arg/package.json") as { version?: unknown }
+  if (packageJson.version !== "13.0.2") throw new Error("npm-package-arg fixture must be exact 13.0.2")
+  const npa = require("npm-package-arg") as (spec: string) => { name?: unknown; rawSpec?: unknown }
+  const parsed = npa(value)
+  if (parsed.name !== "@xiopt/pane-dash-opencode" || parsed.rawSpec !== "0.1.0") throw new Error("exact scoped package observation required")
+  return { name: parsed.name, rawSpec: parsed.rawSpec }
 }
 
 export function assertOpenCodeRegistryRequests(requests: readonly string[], _origin: string): void {
@@ -237,7 +243,7 @@ async function runOpenCodeSpike(input: { readonly sourceRoot: string; readonly b
     const observed = await startThenStopOpenCode(tmux, socket, input.binary, root, false, isolation)
     if (!observed.status || !observed.heartbeat) throw new Error("OpenCode plugin did not publish a fresh pane heartbeat")
     assertOpenCodeRegistryRequests(registry.requests, registry.origin)
-    const parsed = parseOpenCodePluginSpec(OPENCODE_PLUGIN_SPEC)
+    const parsed = await observeOpenCodePluginSpec(OPENCODE_PLUGIN_SPEC)
     const observations = { ...isolation.observations, defaultTmuxUses: observed.defaultTmuxUses }
     assertIsolationObservations(observations)
     return { version, sha256, ...parsed, requests: registry.requests, isolation: observations }

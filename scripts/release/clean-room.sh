@@ -35,7 +35,6 @@ if [[ ! "$tmux_version" =~ ^tmux\ 3\.([6-9]|[1-9][0-9])([^0-9].*)?$ ]]; then
   exit 64
 fi
 
-ambient_home=${HOME:-}
 root=$(mktemp -d "${TMPDIR:-/tmp}/tmux-pane-dash-clean.XXXXXX")
 root=$(cd "$root" && pwd -P)
 tmux_root=$(mktemp -d /tmp/pd-tmux.XXXXXX)
@@ -91,8 +90,14 @@ trap 'exit 143' TERM
 
 unset TMUX TMUX_PANE TMUX_TMPDIR TMUX_PLUGIN_MANAGER_PATH SSH_AUTH_SOCK SSH_AGENT_PID
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY no_proxy
-unset npm_config_userconfig npm_config_globalconfig npm_config_prefix npm_config_cache
-unset BUN_INSTALL BUN_INSTALL_CACHE_DIR
+unset npm_config_userconfig npm_config_globalconfig npm_config_prefix npm_config_cache npm_config_registry
+unset BUN_INSTALL BUN_INSTALL_CACHE_DIR DOCKER_CONFIG KUBECONFIG NETRC GOOGLE_APPLICATION_CREDENTIALS
+unset GH_TOKEN GITHUB_TOKEN NPM_TOKEN NODE_AUTH_TOKEN
+for variable in $(env | cut -d= -f1); do
+  case "$variable" in
+    *_TOKEN|*_PASSWORD|*_SECRET|*_API_KEY|AWS_*|AZURE_*|CARGO_REGISTRIES_*|CARGO_REGISTRY_*|BUN_CONFIG_*|npm_config_*) unset "$variable" ;;
+  esac
+done
 for tool in "${tool_names[@]}"; do unset "$tool"; done
 for index in "${!tool_names[@]}"; do
   tool=${tool_names[$index]}
@@ -100,12 +105,7 @@ for index in "${!tool_names[@]}"; do
   [ -n "$value" ] && export "$tool=$value"
 done
 
-if [ -z "${RUSTUP_HOME:-}" ] && [[ "$ambient_home" = /* ]] && [ -d "$ambient_home/.rustup" ]; then
-  export RUSTUP_HOME="$ambient_home/.rustup"
-fi
-if [ -z "${CARGO_HOME:-}" ] && [[ "$ambient_home" = /* ]] && [ -d "$ambient_home/.cargo" ]; then
-  export CARGO_HOME="$ambient_home/.cargo"
-fi
+unset RUSTUP_HOME CARGO_HOME
 
 export HOME="$root/home"
 export XDG_DATA_HOME="$root/xdg-data"

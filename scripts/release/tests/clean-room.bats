@@ -65,13 +65,17 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-@test "keeps an existing Rustup toolchain root when replacing HOME" {
+@test "removes ambient Rust state when replacing HOME" {
   mkdir -p "$ambient/home/.rustup" "$ambient/home/.cargo"
   run env -u RUSTUP_HOME -u CARGO_HOME \
     HOME="$ambient/home" \
-    EXPECTED_RUSTUP_HOME="$ambient/home/.rustup" \
-    EXPECTED_CARGO_HOME="$ambient/home/.cargo" \
-    "$repo_root/scripts/release/clean-room.sh" -- sh -c 'test "$RUSTUP_HOME" = "$EXPECTED_RUSTUP_HOME" && test "$CARGO_HOME" = "$EXPECTED_CARGO_HOME"'
+    "$repo_root/scripts/release/clean-room.sh" -- sh -c 'test -z "${RUSTUP_HOME+x}" && test -z "${CARGO_HOME+x}"'
+  [ "$status" -eq 0 ]
+}
+
+@test "strips ambient credential, registry, and proxy variables" {
+  observed="$BATS_TEST_TMPDIR/observed"
+  run env OBSERVED="$observed" GH_TOKEN=sentinel NPM_TOKEN=sentinel SERVICE_PASSWORD=sentinel SERVICE_SECRET=sentinel SERVICE_API_KEY=sentinel AWS_PROFILE=sentinel GOOGLE_APPLICATION_CREDENTIALS=sentinel AZURE_TOKEN=sentinel DOCKER_CONFIG=sentinel KUBECONFIG=sentinel NETRC=sentinel npm_config_registry=sentinel CARGO_REGISTRIES_X_INDEX=sentinel HTTPS_PROXY=sentinel SSH_AUTH_SOCK=sentinel "$repo_root/scripts/release/clean-room.sh" -- sh -c 'env | grep -E "^(GH_TOKEN|NPM_TOKEN|SERVICE_PASSWORD|SERVICE_SECRET|SERVICE_API_KEY|AWS_|GOOGLE_APPLICATION_CREDENTIALS|AZURE_|DOCKER_CONFIG|KUBECONFIG|NETRC|npm_config_registry|CARGO_REGISTRIES_|HTTPS_PROXY|SSH_AUTH_SOCK)=" > "$OBSERVED" || true; test ! -s "$OBSERVED"'
   [ "$status" -eq 0 ]
 }
 
