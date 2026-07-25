@@ -368,7 +368,7 @@ mod tests {
     use crate::model::{Model, ModelConfig};
     use crate::snapshot::parse;
 
-    use super::{SNAPSHOT_FORMAT, TmuxCommandError, TmuxExec};
+    use super::{READER_CLEANUP_GRACE, SNAPSHOT_FORMAT, TmuxCommandError, TmuxExec};
 
     fn shell_quote(path: &Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
@@ -496,36 +496,53 @@ mod tests {
         assert!(matches!(error, TmuxCommandError::Exit { .. }));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn creation_runner_bounds_retained_descendant_streams_after_child_exit() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("retained-pipe.pid");
+        let wrote_file = dir.path().join("wrote-output");
         let executable = dir.path().join("fake-tmux");
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\n(sleep 60) &\necho $! > '{}'\nprintf '%%44\\n'\n",
-                pid_file.display()
+                "#!/bin/sh\n(sleep 60) &\nprintf '%s\\n' \"$!\" > {pid}\nprintf '%%44\\n'\ntouch {wrote}\n",
+                pid = shell_quote(&pid_file),
+                wrote = shell_quote(&wrote_file),
             ),
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let (_cancel, mut cancellation) = tokio::sync::oneshot::channel();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60 * 60);
 
-        let started = std::time::Instant::now();
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            TmuxExec::new(executable).run_argv_until(
-                &["anything".into()],
-                None,
-                tokio::time::Instant::now() + std::time::Duration::from_millis(25),
-                &mut cancellation,
-            ),
-        )
-        .await
-        .expect("retained descendant must not hold stream collection open")
-        .unwrap_err();
-        assert!(started.elapsed() < Duration::from_millis(500));
+        let exec = TmuxExec::new(executable);
+        let task = tokio::spawn(async move {
+            exec.run_argv_until(&["anything".into()], None, deadline, &mut cancellation)
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        let ready_by = std::time::Instant::now() + Duration::from_secs(1);
+        while !pid_file.exists() || !wrote_file.exists() {
+            assert!(
+                std::time::Instant::now() < ready_by,
+                "fake executable must write its pid and stdout marker before the deadline"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(deadline - tokio::time::Instant::now()).await;
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        let completed_by = std::time::Instant::now() + Duration::from_secs(1);
+        while !task.is_finished() {
+            assert!(
+                std::time::Instant::now() < completed_by,
+                "retained descendant must not hold stream collection open"
+            );
+            tokio::task::yield_now().await;
+            tokio::time::advance(READER_CLEANUP_GRACE).await;
+        }
+        let error = task.await.unwrap().unwrap_err();
 
         let pid = fs::read_to_string(&pid_file)
             .expect("retained pipe descendant pid")
@@ -538,19 +555,7 @@ mod tests {
                 .expect("terminate retained pipe descendant")
                 .success()
         );
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while Command::new("kill")
-                .args(["-0", &pid])
-                .stderr(Stdio::null())
-                .status()
-                .expect("check retained pipe descendant")
-                .success()
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("retained pipe descendant must be reaped after cleanup");
+        wait_for_pid_exit(&pid);
 
         assert!(matches!(
             error,
