@@ -11,6 +11,53 @@ setup() {
   export TMUX_BIN="$fake_tmux"
 }
 
+make_fake_rustup() {
+  local bin=$1
+  mkdir -p "$bin"
+  cat > "$bin/rustup" <<'SH'
+#!/bin/sh
+set -eu
+root=${RUSTUP_HOME%/rustup}
+case "$1" in
+  toolchain)
+    printf '%s\n' "$0" > "$root/bootstrap-marker"
+    mkdir -p "$RUSTUP_HOME/toolchains/1.96.1/bin"
+    cat > "$RUSTUP_HOME/toolchains/1.96.1/bin/rustc" <<'EOF'
+#!/bin/sh
+echo 'rustc 1.96.1 (31fca3adb 2026-06-26)'
+EOF
+    cat > "$RUSTUP_HOME/toolchains/1.96.1/bin/cargo" <<'EOF'
+#!/bin/sh
+case "${1:-}" in --version) echo 'cargo 1.96.1 (fixture)' ;; esac
+EOF
+    for tool in cargo-clippy rustfmt rustdoc clippy-driver; do printf '#!/bin/sh\nexit 0\n' > "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; done
+    chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/rustc" "$RUSTUP_HOME/toolchains/1.96.1/bin/cargo" ;;
+  which) echo "$RUSTUP_HOME/toolchains/1.96.1/bin/$2" ;;
+esac
+SH
+  chmod +x "$bin/rustup"
+}
+
+make_fake_bun() {
+  local bin=$1
+  mkdir -p "$bin"
+  cat > "$bin/bun" <<'SH'
+#!/bin/sh
+set -eu
+test "$1" = --version && { echo 1.3.14; exit 0; }
+root=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --cwd ]; then root=$2; shift 2; continue; fi
+  shift
+done
+printf '%s\n' "$0" > "$root/bootstrap-marker"
+mkdir -p "$root/node_modules/npm-package-arg/lib"
+printf '{"name":"npm-package-arg","version":"13.0.2"}\n' > "$root/node_modules/npm-package-arg/package.json"
+printf 'module.exports = function () {}\n' > "$root/node_modules/npm-package-arg/lib/npa.js"
+SH
+  chmod +x "$bin/bun"
+}
+
 @test "requires a command after --" {
   run "$repo_root/scripts/release/clean-room.sh" --
   [ "$status" -eq 64 ]
@@ -58,6 +105,57 @@ setup() {
   [ "$status" -eq 1 ]
   run env EXPECTED="$fake" OPENCODE_1_17_20_BIN="$fake" "$repo_root/scripts/release/clean-room.sh" -- sh -c 'test "$OPENCODE_1_17_20_BIN" = "$EXPECTED"'
   [ "$status" -eq 0 ]
+}
+
+@test "preserves validated bootstrap executables for nested isolated wrappers" {
+  tmp="$BATS_TEST_TMPDIR/tmp"
+  bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$tmp"
+  tmp="$(cd "$tmp" && pwd -P)"
+  make_fake_rustup "$bin"
+  make_fake_bun "$bin"
+  run env \
+    TMPDIR="$tmp" \
+    REPO_ROOT="$repo_root" \
+    EXPECTED_RUSTUP="$bin/rustup" \
+    EXPECTED_BUN="$bin/bun" \
+    RUSTUP_BOOTSTRAP="$bin/rustup" \
+    BUN_BOOTSTRAP="$bin/bun" \
+    BUN_INSTALL_CACHE_DIR="$ambient/bun" \
+    "$repo_root/scripts/release/clean-room.sh" -- sh -c '
+      test "$RUSTUP_BOOTSTRAP" = "$EXPECTED_RUSTUP"
+      test "$BUN_BOOTSTRAP" = "$EXPECTED_BUN"
+      test "$BUN_INSTALL_CACHE_DIR" != "'"$ambient/bun"'"
+      exec "$REPO_ROOT/tests/release/with-rust.sh" -- "$REPO_ROOT/tests/release/with-npa.sh" -- sh -c '\''
+        test "$(cat "$PANE_DASH_ISOLATED_RUST_ROOT/rustup/bootstrap-marker")" = "$EXPECTED_RUSTUP"
+        test "$(cat "$PANE_DASH_NPA_ROOT/bootstrap-marker")" = "$EXPECTED_BUN"
+      '\''
+    '
+  [ "$status" -eq 0 ]
+}
+
+@test "fails closed without explicit bootstrap executables under a controlled PATH" {
+  tmp="$BATS_TEST_TMPDIR/tmp"
+  mkdir -p "$tmp"
+  run env -u RUSTUP_BOOTSTRAP PATH=/usr/bin:/bin TMPDIR="$tmp" "$repo_root/scripts/release/clean-room.sh" -- "$repo_root/tests/release/with-rust.sh" -- true
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"RUSTUP_BOOTSTRAP must be an absolute executable path"* ]]
+  run env -u BUN_BOOTSTRAP PATH=/usr/bin:/bin TMPDIR="$tmp" "$repo_root/scripts/release/clean-room.sh" -- "$repo_root/tests/release/with-npa.sh" -- true
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"BUN_BOOTSTRAP must be an absolute executable path"* ]]
+}
+
+@test "rejects relative and nonexecutable bootstrap paths before sanitization" {
+  nonexecutable="$BATS_TEST_TMPDIR/nonexecutable"
+  : > "$nonexecutable"
+  for bootstrap in RUSTUP_BOOTSTRAP BUN_BOOTSTRAP; do
+    run env "$bootstrap=relative" "$repo_root/scripts/release/clean-room.sh" -- true
+    [ "$status" -eq 64 ]
+    [[ "$output" == *"$bootstrap must be an absolute executable path"* ]]
+    run env "$bootstrap=$nonexecutable" "$repo_root/scripts/release/clean-room.sh" -- true
+    [ "$status" -eq 64 ]
+    [[ "$output" == *"$bootstrap is not executable"* ]]
+  done
 }
 
 @test "uses a short unique tmux socket name for macOS unix-socket limits" {

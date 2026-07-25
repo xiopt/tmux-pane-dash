@@ -54,7 +54,7 @@ if [ -n "${PANE_DASH_NPA_ROOT:-}" ]; then
   preserve_npa=1
 fi
 
-tool_names=(NODE_20_BIN NPM_20_CLI OPENCODE_1_17_20_BIN OPENCODE_LATEST_BIN TMUX_BIN)
+tool_names=(NODE_20_BIN NPM_20_CLI OPENCODE_1_17_20_BIN OPENCODE_LATEST_BIN TMUX_BIN RUSTUP_BOOTSTRAP BUN_BOOTSTRAP)
 tool_values=()
 tmux_bin=''
 if [ -z "${TMUX_BIN:-}" ]; then

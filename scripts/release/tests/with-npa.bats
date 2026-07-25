@@ -149,7 +149,7 @@ SH
 @test "with-npa eight contenders install once and execute overlapping children after unlock" {
   tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"; marks="$BATS_TEST_TMPDIR/marks"; mkdir -p "$tmp" "$marks"; tmp="$(cd "$tmp" && pwd -P)"; make_fake_bun "$bin"
   for n in 1 2 3 4 5 6 7 8; do env TMPDIR="$tmp" BUN_BOOTSTRAP="$bin/bun" MARKS="$marks" N="$n" "$wrapper" -- sh -c 'touch "$MARKS/$N"; while [ ! -e "$MARKS/release" ]; do sleep .05; done' & done
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ "$(ls "$marks" | wc -l | tr -d ' ')" -eq 8 ] && break; sleep .1; done
+  for _ in $(seq 1 100); do [ "$(ls "$marks" | wc -l | tr -d ' ')" -eq 8 ] && break; sleep .1; done
   [ "$(ls "$marks" | wc -l | tr -d ' ')" -eq 8 ]; touch "$marks/release"; wait
   state="$tmp/tmux-pane-dash-release-$(id -u)"; result_root="$(awk -F= '/^ROOT=/{print $2}' "$state/npa13.env")"; [ "$(grep -c '^install$' "$result_root/fixture.log")" -eq 1 ]
 }
