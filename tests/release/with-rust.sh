@@ -33,7 +33,7 @@ valid_toolchain() {
   path="$root"
   IFS=/ read -r -a parts <<< "${candidate#"$root"/}"
   for part in "${parts[@]}"; do path="$path/$part"; [ ! -L "$path" ] || return 1; done
-  [ -x "$candidate/rustc" ] && [ -x "$candidate/cargo" ] && [ -x "$candidate/cargo-clippy" ] && [ -x "$candidate/rustfmt" ] || return 1
+  [ -x "$candidate/rustc" ] && [ -x "$candidate/cargo" ] && [ -x "$candidate/rustdoc" ] && [ -x "$candidate/cargo-clippy" ] && [ -x "$candidate/clippy-driver" ] && [ -x "$candidate/rustfmt" ] || return 1
   [ "$("$candidate/rustc" --version 2>/dev/null)" = "rustc 1.96.1 (31fca3adb 2026-06-26)" ] || return 1
   "$candidate/cargo" --version 2>/dev/null | grep -Eq '^cargo 1\.96\.1 \(' || return 1
 }
@@ -154,7 +154,20 @@ with_lock prepare "$result"
 root=''; toolchain_bin=''; descriptor="$result"
 read_descriptor || fail 'invalid Rust result handshake'
 rm -f -- "$result"; trap - EXIT HUP INT TERM
-unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY no_proxy RUSTUP_TOOLCHAIN CARGO_BUILD_TARGET CARGO_TARGET_DIR CARGO_NET_OFFLINE CARGO_HOME RUSTUP_HOME
-for variable in $(env | cut -d= -f1); do case "$variable" in *_TOKEN|*_PASSWORD|*_SECRET|*_API_KEY|AWS_*|AZURE_*|CARGO_REGISTRIES_*|CARGO_REGISTRY_*|CARGO_CONFIG_*|RUSTUP_*|npm_config_*) unset "$variable" ;; esac; done
-export PANE_DASH_ISOLATED_RUST_ROOT="$root" RUSTUP_HOME="$root/rustup" CARGO_HOME="$root/cargo" PATH="$toolchain_bin:${PATH:-/usr/bin:/bin}"
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY no_proxy
+unset CARGO RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTDOC RUSTDOCFLAGS RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTUP_TOOLCHAIN CARGO_BUILD_TARGET CARGO_TARGET_DIR CARGO_NET_OFFLINE CARGO_HOME RUSTUP_HOME RUSTFMT CLIPPY_DRIVER CC CXX AR LD
+for variable in $(env | cut -d= -f1); do
+  case "$variable" in
+    *_TOKEN|*_token|*_PASSWORD|*_password|*_SECRET|*_secret|*_API_KEY|*_api_key|*AUTH*|*auth*|\
+    DOCKER_*|docker_*|GIT_ASKPASS|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|SSH_*|\
+    NPM_CONFIG_*|npm_config_*|YARN_*|yarn_*|NETRC|KUBECONFIG|\
+    AWS_*|aws_*|AZURE_*|azure_*|GOOGLE_*|google_*|GCP_*|gcp_*|OCI_*|VAULT_*|\
+    CARGO_REGISTRIES_*|CARGO_REGISTRY_*|CARGO_CONFIG_*|RUSTUP_*|CARGO_TARGET_*_LINKER|CARGO_TARGET_*_RUSTFLAGS)
+      unset "$variable"
+      ;;
+  esac
+done
+export PANE_DASH_ISOLATED_RUST_ROOT="$root" RUSTUP_HOME="$root/rustup" CARGO_HOME="$root/cargo"
+export CARGO="$toolchain_bin/cargo" RUSTC="$toolchain_bin/rustc" RUSTDOC="$toolchain_bin/rustdoc" RUSTFMT="$toolchain_bin/rustfmt" CLIPPY_DRIVER="$toolchain_bin/clippy-driver"
+export PATH="$toolchain_bin:${PATH:-/usr/bin:/bin}"
 exec "$@"

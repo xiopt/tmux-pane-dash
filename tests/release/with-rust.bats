@@ -19,7 +19,7 @@ EOF
 #!/bin/sh
 case "${1:-}" in --version) echo 'cargo 1.96.1 (fixture)' ;; fetch) printf 'fetch\n' >> "${RUSTUP_HOME%/rustup}/fixture.log" ;; esac
 EOF
-    for tool in cargo-clippy rustfmt; do printf '#!/bin/sh\nexit 0\n' > "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; done
+    for tool in cargo-clippy rustfmt rustdoc clippy-driver; do printf '#!/bin/sh\nexit 0\n' > "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; done
     chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/rustc" "$RUSTUP_HOME/toolchains/1.96.1/bin/cargo" ;;
   which) echo "$RUSTUP_HOME/toolchains/1.96.1/bin/$2" ;;
 esac
@@ -59,7 +59,7 @@ SH
 set -eu
 root=$RUSTUP_HOME/..
 case "$1" in
-  toolchain) mkdir -p "$RUSTUP_HOME/toolchains/1.96.1/bin"; for tool in rustc cargo cargo-clippy rustfmt; do cat > "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool" <<EOF
+  toolchain) mkdir -p "$RUSTUP_HOME/toolchains/1.96.1/bin"; for tool in rustc cargo cargo-clippy rustfmt rustdoc clippy-driver; do cat > "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool" <<EOF
 #!/bin/sh
 test "\${1:-}" = --version || exit 0
 echo '${tool} 1.96.1 (31fca3adb 2026-06-26)'
@@ -97,7 +97,7 @@ EOF
 #!/bin/sh
 echo 'cargo 1.96.1 (fixture)'
 EOF
-    for tool in cargo-clippy rustfmt; do printf '#!/bin/sh\nexit 0\n' > "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; done
+    for tool in cargo-clippy rustfmt rustdoc clippy-driver; do printf '#!/bin/sh\nexit 0\n' > "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; done
     chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/rustc" "$RUSTUP_HOME/toolchains/1.96.1/bin/cargo" ;;
   which) echo "$RUSTUP_HOME/toolchains/1.96.1/bin/$2" ;;
 esac
@@ -286,14 +286,26 @@ SH
   done
 }
 
-@test "with-rust strips credentials preserves caller home and forwards child status while cleanup keeps a sentinel" {
-  root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"; tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"; home="$BATS_TEST_TMPDIR/home"
-  mkdir -p "$tmp" "$home"; tmp="$(cd "$tmp" && pwd -P)"; make_fake_rustup "$bin"
-  run env TMPDIR="$tmp" HOME="$home" EXPECTED_HOME="$home" RUSTUP_BOOTSTRAP="$bin/rustup" NPM_TOKEN=x HTTPS_PROXY=x CARGO_REGISTRIES_X_INDEX=x "$root/tests/release/with-rust.sh" -- sh -c 'test "$HOME" = "$EXPECTED_HOME"; test -z "${NPM_TOKEN+x}${HTTPS_PROXY+x}${CARGO_REGISTRIES_X_INDEX+x}"'
+@test "with-rust exports validated absolute tools and rejects ambient compiler overrides" {
+  root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"; tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"; trap_bin="$BATS_TEST_TMPDIR/trap-bin"; fake_tmux="$BATS_TEST_TMPDIR/tmux"
+  mkdir -p "$tmp" "$trap_bin"; tmp="$(cd "$tmp" && pwd -P)"; make_fake_rustup "$bin"
+  printf '#!/bin/sh\nprintf "tmux 3.7\\n"\n' > "$fake_tmux"; chmod +x "$fake_tmux"
+  for tool in cargo rustc rustdoc rustfmt clippy-driver; do printf '#!/bin/sh\nprintf trapped >&2\nexit 97\n' > "$trap_bin/$tool"; chmod +x "$trap_bin/$tool"; done
+  run env TMPDIR="$tmp" RUSTUP_BOOTSTRAP="$bin/rustup" TMUX_BIN="$fake_tmux" PATH="$trap_bin:$PATH" \
+    CARGO="$trap_bin/cargo" RUSTC="$trap_bin/rustc" RUSTDOC="$trap_bin/rustdoc" RUSTFMT="$trap_bin/rustfmt" CLIPPY_DRIVER="$trap_bin/clippy-driver" \
+    RUSTC_WRAPPER="$trap_bin/rustc" RUSTC_WORKSPACE_WRAPPER="$trap_bin/rustc" RUSTDOCFLAGS=bad RUSTFLAGS=bad CARGO_ENCODED_RUSTFLAGS=bad \
+    CARGO_BUILD_TARGET=bad CARGO_TARGET_DIR=bad CC="$trap_bin/rustc" CXX="$trap_bin/rustc" AR="$trap_bin/rustc" LD="$trap_bin/rustc" CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$trap_bin/rustc" CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=bad \
+    DOCKER_AUTH_CONFIG=x GIT_ASKPASS=x SSH_ASKPASS=x SSH_ASKPASS_REQUIRE=x NPM_CONFIG_REGISTRY=x NPM_CONFIG_USERCONFIG=x npm_config_registry=x npm_config_userconfig=x NODE_AUTH_TOKEN=x YARN_NPM_AUTH_TOKEN=x YARN_RC_FILENAME=x NETRC=x KUBECONFIG=x AWS_ACCESS_KEY_ID=x SERVICE_TOKEN=x service_token=x SERVICE_PASSWORD=x SERVICE_SECRET=x SERVICE_API_KEY=x SERVICE_AUTH_CONFIG=x service_auth_config=x \
+    "$root/tests/release/with-rust.sh" -- "$root/scripts/release/clean-room.sh" -- sh -c '
+      set -e
+      test "$CARGO" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup/toolchains/1.96.1/bin/cargo"
+      test "$RUSTC" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup/toolchains/1.96.1/bin/rustc"
+      test "$RUSTDOC" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup/toolchains/1.96.1/bin/rustdoc"
+      test "$RUSTFMT" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup/toolchains/1.96.1/bin/rustfmt"
+      test "$CLIPPY_DRIVER" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup/toolchains/1.96.1/bin/clippy-driver"
+      ! env | grep -Eq "^(RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOCFLAGS|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_TARGET|CARGO_TARGET_DIR|CC|CXX|AR|LD|CARGO_TARGET_.*_(LINKER|RUSTFLAGS))="
+      ! env | grep -Eq "^(DOCKER_AUTH_CONFIG|GIT_ASKPASS|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|NPM_CONFIG_|npm_config_|NODE_AUTH_TOKEN|YARN_|NETRC|KUBECONFIG|AWS_ACCESS_KEY_ID|SERVICE_)="
+      cargo --version >/dev/null
+    '
   [ "$status" -eq 0 ]
-  run env TMPDIR="$tmp" RUSTUP_BOOTSTRAP="$bin/rustup" "$root/tests/release/with-rust.sh" -- sh -c 'exit 42'; [ "$status" -eq 42 ]
-  run env TMPDIR="$tmp" RUSTUP_BOOTSTRAP="$bin/rustup" "$root/tests/release/with-rust.sh" -- sh -c 'kill -TERM $$'; [ "$status" -eq 143 ]
-  state="$tmp/tmux-pane-dash-release-$(id -u)"; : > "$state/sentinel"
-  run env TMPDIR="$tmp" "$root/tests/release/with-rust.sh" --cleanup; [ "$status" -eq 0 ]; [ -e "$state/sentinel" ]
-  run env TMPDIR="$tmp" "$root/tests/release/with-rust.sh" --cleanup; [ "$status" -eq 0 ]; [ -e "$state/sentinel" ]
 }

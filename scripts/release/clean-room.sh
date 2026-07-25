@@ -28,12 +28,21 @@ validate_isolated_root() {
     path_under "$root" "$forbidden" && return 1
   done
 }
+validate_isolated_rust_state() {
+  local root=${PANE_DASH_ISOLATED_RUST_ROOT:-}
+  validate_isolated_root "$root" "${TMPDIR:-/tmp}" || return 1
+  [ "${RUSTUP_HOME:-}" = "$root/rustup" ] && [ "${CARGO_HOME:-}" = "$root/cargo" ] || return 1
+  [ -d "$RUSTUP_HOME" ] && [ -d "$CARGO_HOME" ] || return 1
+  case "${CARGO:-}" in "$root"/rustup/toolchains/*/bin/cargo) ;; *) return 1 ;; esac
+  rust_toolchain_bin=${CARGO%/cargo}
+  [ "${RUSTC:-}" = "$rust_toolchain_bin/rustc" ] && [ "${RUSTDOC:-}" = "$rust_toolchain_bin/rustdoc" ] && [ "${RUSTFMT:-}" = "$rust_toolchain_bin/rustfmt" ] && [ "${CLIPPY_DRIVER:-}" = "$rust_toolchain_bin/clippy-driver" ] || return 1
+  [ -x "$CARGO" ] && [ -x "$RUSTC" ] && [ -x "$RUSTDOC" ] && [ -x "$RUSTFMT" ] && [ -x "$CLIPPY_DRIVER" ] || return 1
+  [ "$("$RUSTC" --version 2>/dev/null)" = "rustc 1.96.1 (31fca3adb 2026-06-26)" ] || return 1
+  "$CARGO" --version 2>/dev/null | grep -Eq '^cargo 1\.96\.1 \('
+}
 preserve_rust=0 preserve_npa=0
 if [ -n "${PANE_DASH_ISOLATED_RUST_ROOT:-}${RUSTUP_HOME:-}${CARGO_HOME:-}" ]; then
-  validate_isolated_root "${PANE_DASH_ISOLATED_RUST_ROOT:-}" "${TMPDIR:-/tmp}" &&
-    [ "${RUSTUP_HOME:-}" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup" ] &&
-    [ "${CARGO_HOME:-}" = "$PANE_DASH_ISOLATED_RUST_ROOT/cargo" ] &&
-    [ -d "$RUSTUP_HOME" ] && [ -d "$CARGO_HOME" ] || { printf '%s\n' 'clean-room: invalid isolated Rust state' >&2; exit 64; }
+  validate_isolated_rust_state || { printf '%s\n' 'clean-room: invalid isolated Rust state' >&2; exit 64; }
   preserve_rust=1
 fi
 if [ -n "${PANE_DASH_NPA_ROOT:-}" ]; then
@@ -120,12 +129,14 @@ trap 'exit 143' TERM
 
 unset TMUX TMUX_PANE TMUX_TMPDIR TMUX_PLUGIN_MANAGER_PATH SSH_AUTH_SOCK SSH_AGENT_PID
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY no_proxy
-unset npm_config_userconfig npm_config_globalconfig npm_config_prefix npm_config_cache npm_config_registry
-unset BUN_INSTALL BUN_INSTALL_CACHE_DIR DOCKER_CONFIG KUBECONFIG NETRC GOOGLE_APPLICATION_CREDENTIALS
-unset GH_TOKEN GITHUB_TOKEN NPM_TOKEN NODE_AUTH_TOKEN
+unset CARGO RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTDOC RUSTDOCFLAGS RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTUP_TOOLCHAIN CARGO_BUILD_TARGET CARGO_TARGET_DIR RUSTFMT CLIPPY_DRIVER CC CXX AR LD
 for variable in $(env | cut -d= -f1); do
   case "$variable" in
-    *_TOKEN|*_PASSWORD|*_SECRET|*_API_KEY|AWS_*|AZURE_*|CARGO_REGISTRIES_*|CARGO_REGISTRY_*|BUN_CONFIG_*|npm_config_*) unset "$variable" ;;
+    *_TOKEN|*_token|*_PASSWORD|*_password|*_SECRET|*_secret|*_API_KEY|*_api_key|*AUTH*|*auth*|\
+    DOCKER_*|docker_*|GIT_ASKPASS|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|SSH_*|\
+    NPM_CONFIG_*|npm_config_*|YARN_*|yarn_*|NETRC|KUBECONFIG|\
+    AWS_*|aws_*|AZURE_*|azure_*|GOOGLE_*|google_*|GCP_*|gcp_*|OCI_*|VAULT_*|\
+    CARGO_REGISTRIES_*|CARGO_REGISTRY_*|CARGO_CONFIG_*|BUN_*|bun_*|RUSTUP_*|CARGO_TARGET_*_LINKER|CARGO_TARGET_*_RUSTFLAGS) unset "$variable" ;;
   esac
 done
 for tool in "${tool_names[@]}"; do unset "$tool"; done
@@ -148,6 +159,7 @@ export BUN_INSTALL_CACHE_DIR="$root/bun-cache"
 export TMPDIR="$tmp_root"
 export TMUX_TMPDIR="$tmux_root"
 export PANE_DASH_TMUX_SOCKET="$socket"
+[ "$preserve_rust" -eq 1 ] && export PANE_DASH_ISOLATED_RUST_ROOT RUSTUP_HOME CARGO_HOME CARGO="$rust_toolchain_bin/cargo" RUSTC="$rust_toolchain_bin/rustc" RUSTDOC="$rust_toolchain_bin/rustdoc" RUSTFMT="$rust_toolchain_bin/rustfmt" CLIPPY_DRIVER="$rust_toolchain_bin/clippy-driver" PATH="$rust_toolchain_bin:${PATH:-/usr/bin:/bin}"
 mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$npm_config_cache" "$BUN_INSTALL_CACHE_DIR" "$TMPDIR" "$TMUX_TMPDIR"
 
 # Job control gives the child its own process group, including descendants.

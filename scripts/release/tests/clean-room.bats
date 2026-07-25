@@ -81,9 +81,10 @@ setup() {
 
 @test "strips ambient credential, registry, and proxy variables" {
   observed="$BATS_TEST_TMPDIR/observed"
-  run env OBSERVED="$observed" GH_TOKEN=sentinel NPM_TOKEN=sentinel SERVICE_PASSWORD=sentinel SERVICE_SECRET=sentinel SERVICE_API_KEY=sentinel AWS_PROFILE=sentinel GOOGLE_APPLICATION_CREDENTIALS=sentinel AZURE_TOKEN=sentinel DOCKER_CONFIG=sentinel KUBECONFIG=sentinel NETRC=sentinel npm_config_registry=sentinel CARGO_REGISTRIES_X_INDEX=sentinel HTTPS_PROXY=sentinel SSH_AUTH_SOCK=sentinel "$repo_root/scripts/release/clean-room.sh" -- sh -c 'env | grep -E "^(GH_TOKEN|NPM_TOKEN|SERVICE_PASSWORD|SERVICE_SECRET|SERVICE_API_KEY|AWS_|GOOGLE_APPLICATION_CREDENTIALS|AZURE_|DOCKER_CONFIG|KUBECONFIG|NETRC|npm_config_registry|CARGO_REGISTRIES_|HTTPS_PROXY|SSH_AUTH_SOCK)=" > "$OBSERVED" || true; test ! -s "$OBSERVED"'
+  run env OBSERVED="$observed" GH_TOKEN=sentinel NPM_TOKEN=sentinel SERVICE_PASSWORD=sentinel SERVICE_SECRET=sentinel SERVICE_API_KEY=sentinel AWS_PROFILE=sentinel GOOGLE_APPLICATION_CREDENTIALS=sentinel AZURE_TOKEN=sentinel DOCKER_CONFIG=sentinel DOCKER_AUTH_CONFIG=sentinel GIT_ASKPASS=sentinel SSH_ASKPASS=sentinel SSH_ASKPASS_REQUIRE=sentinel KUBECONFIG=sentinel NETRC=sentinel NPM_CONFIG_REGISTRY=sentinel NPM_CONFIG_USERCONFIG=sentinel npm_config_registry=sentinel npm_config_userconfig=sentinel NODE_AUTH_TOKEN=sentinel YARN_NPM_AUTH_TOKEN=sentinel YARN_RC_FILENAME=sentinel SERVICE_TOKEN=sentinel service_token=sentinel SERVICE_AUTH_CONFIG=sentinel service_auth_config=sentinel CARGO_REGISTRIES_X_INDEX=sentinel HTTPS_PROXY=sentinel SSH_AUTH_SOCK=sentinel "$repo_root/scripts/release/clean-room.sh" -- sh -c 'env | grep -E "^(GH_TOKEN|NPM_TOKEN|SERVICE_|AWS_|GOOGLE_APPLICATION_CREDENTIALS|AZURE_|DOCKER_|GIT_ASKPASS|SSH_|KUBECONFIG|NETRC|NPM_CONFIG_|npm_config_|NODE_AUTH_TOKEN|YARN_|CARGO_REGISTRIES_|HTTPS_PROXY)=" > "$OBSERVED" || true; test ! -s "$OBSERVED"'
   [ "$status" -eq 0 ]
 }
+
 
 @test "uses and removes a short isolated TMPDIR for tmux socket consumers" {
   observed="$BATS_TEST_TMPDIR/tmpdir"

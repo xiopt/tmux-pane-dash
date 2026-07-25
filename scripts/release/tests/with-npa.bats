@@ -128,11 +128,12 @@ SH
 
 @test "with-npa first and fresh reuse install exactly once without credentials or proxies" {
   tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"; mkdir -p "$tmp"; tmp="$(cd "$tmp" && pwd -P)"; make_fake_bun "$bin"
-  run env TMPDIR="$tmp" BUN_BOOTSTRAP="$bin/bun" NPM_TOKEN=x HTTPS_PROXY=x npm_config_registry=x "$wrapper" -- sh -c 'test -z "${NPM_TOKEN+x}${HTTPS_PROXY+x}${npm_config_registry+x}"; printf %s "$PANE_DASH_NPA_ROOT"'
+  run env TMPDIR="$tmp" BUN_BOOTSTRAP="$bin/bun" NPM_TOKEN=x HTTPS_PROXY=x npm_config_registry=x DOCKER_AUTH_CONFIG=x GIT_ASKPASS=x SSH_ASKPASS=x SSH_ASKPASS_REQUIRE=x NPM_CONFIG_REGISTRY=x NPM_CONFIG_USERCONFIG=x npm_config_userconfig=x NODE_AUTH_TOKEN=x YARN_NPM_AUTH_TOKEN=x YARN_RC_FILENAME=x NETRC=x KUBECONFIG=x AWS_ACCESS_KEY_ID=x SERVICE_TOKEN=x service_token=x SERVICE_PASSWORD=x SERVICE_SECRET=x SERVICE_API_KEY=x SERVICE_AUTH_CONFIG=x service_auth_config=x "$wrapper" -- sh -c '! env | grep -Eq "^(NPM_TOKEN|HTTPS_PROXY|npm_config_registry|DOCKER_AUTH_CONFIG|GIT_ASKPASS|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|NPM_CONFIG_|NODE_AUTH_TOKEN|YARN_|NETRC|KUBECONFIG|AWS_ACCESS_KEY_ID|SERVICE_)="; printf %s "$PANE_DASH_NPA_ROOT"'
   [ "$status" -eq 0 ]; first="${output##*$'\n'}"
   run env TMPDIR="$tmp" BUN_BOOTSTRAP="$bin/bun" "$wrapper" -- sh -c 'printf %s "$PANE_DASH_NPA_ROOT"'
   [ "$status" -eq 0 ]; [ "$output" = "$first" ]; [ "$(grep -c '^install$' "$first/fixture.log")" -eq 1 ]
 }
+
 
 @test "with-npa eight contenders install once and execute overlapping children after unlock" {
   tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"; marks="$BATS_TEST_TMPDIR/marks"; mkdir -p "$tmp" "$marks"; tmp="$(cd "$tmp" && pwd -P)"; make_fake_bun "$bin"

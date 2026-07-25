@@ -152,7 +152,16 @@ with_lock prepare "$result"
 root=''; descriptor="$result"
 read_descriptor || fail 'invalid parser result handshake'
 rm -f -- "$result"; trap - EXIT HUP INT TERM
-unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY no_proxy NPM_TOKEN NODE_AUTH_TOKEN GH_TOKEN GITHUB_TOKEN npm_config_userconfig npm_config_globalconfig npm_config_prefix npm_config_cache npm_config_registry
-for variable in $(env | cut -d= -f1); do case "$variable" in *_TOKEN|*_PASSWORD|*_SECRET|*_API_KEY|AWS_*|AZURE_*|BUN_CONFIG_*|npm_config_*) unset "$variable" ;; esac; done
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY no_proxy
+for variable in $(env | cut -d= -f1); do
+  case "$variable" in
+    *_TOKEN|*_token|*_PASSWORD|*_password|*_SECRET|*_secret|*_API_KEY|*_api_key|*AUTH*|*auth*|\
+    DOCKER_*|docker_*|GIT_ASKPASS|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|SSH_*|\
+    NPM_CONFIG_*|npm_config_*|YARN_*|yarn_*|NETRC|KUBECONFIG|\
+    AWS_*|aws_*|AZURE_*|azure_*|GOOGLE_*|google_*|GCP_*|gcp_*|OCI_*|VAULT_*|BUN_*|bun_*|CARGO_REGISTRIES_*|CARGO_REGISTRY_*|CARGO_CONFIG_*)
+      unset "$variable"
+      ;;
+  esac
+done
 export PANE_DASH_NPA_ROOT="$root" PANE_DASH_NPA_TMP_PREFIX="$tmp_prefix"
 exec "$@"
