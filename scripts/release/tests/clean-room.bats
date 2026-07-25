@@ -73,10 +73,44 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-@test "rejects an explicit invalid isolated Rust root instead of preserving it" {
+@test "accepts valid isolated roots outside HOME and XDG state and rejects forbidden roots" {
   run env PANE_DASH_ISOLATED_RUST_ROOT="$ambient/home" RUSTUP_HOME="$ambient/home/rustup" CARGO_HOME="$ambient/home/cargo" "$repo_root/scripts/release/clean-room.sh" -- true
   [ "$status" -eq 64 ]
   [[ "$output" == *"isolated Rust state"* ]]
+
+  tmp="$BATS_TEST_TMPDIR/tmp"
+  mkdir -p "$tmp"
+  tmp="$(cd "$tmp" && pwd -P)"
+  ambient_root="$(cd "$ambient" && pwd -P)"
+  valid="$tmp/isolated"
+  mkdir -p "$valid/node_modules/npm-package-arg" "$ambient_root/home" "$ambient_root/xdg-data" "$ambient_root/xdg-config" "$ambient_root/xdg-cache"
+  printf '{}\n' > "$valid/node_modules/npm-package-arg/package.json"
+
+  run env \
+    HOME="$ambient_root/home" \
+    XDG_DATA_HOME="$ambient_root/xdg-data" \
+    XDG_CONFIG_HOME="$ambient_root/xdg-config" \
+    XDG_CACHE_HOME="$ambient_root/xdg-cache" \
+    PANE_DASH_NPA_ROOT="$valid" \
+    PANE_DASH_NPA_TMP_PREFIX="$tmp" \
+    "$repo_root/scripts/release/clean-room.sh" -- true
+  [ "$status" -eq 0 ]
+
+  for forbidden in "$ambient_root/home" "$ambient_root/xdg-data" "$ambient_root/xdg-config" "$ambient_root/xdg-cache"; do
+    root="$forbidden/isolated"
+    mkdir -p "$root/node_modules/npm-package-arg"
+    printf '{}\n' > "$root/node_modules/npm-package-arg/package.json"
+    run env \
+      HOME="$ambient_root/home" \
+      XDG_DATA_HOME="$ambient_root/xdg-data" \
+      XDG_CONFIG_HOME="$ambient_root/xdg-config" \
+      XDG_CACHE_HOME="$ambient_root/xdg-cache" \
+      PANE_DASH_NPA_ROOT="$root" \
+      PANE_DASH_NPA_TMP_PREFIX="$forbidden" \
+      "$repo_root/scripts/release/clean-room.sh" -- true
+    [ "$status" -eq 64 ]
+    [[ "$output" == *"invalid isolated NPA state"* ]]
+  done
 }
 
 @test "strips ambient credential, registry, and proxy variables" {

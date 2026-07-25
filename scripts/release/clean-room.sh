@@ -27,6 +27,7 @@ validate_isolated_root() {
     forbidden=$(canonical_dir "$forbidden") || return 1
     path_under "$root" "$forbidden" && return 1
   done
+  return 0
 }
 validate_isolated_rust_state() {
   local root=${PANE_DASH_ISOLATED_RUST_ROOT:-}
