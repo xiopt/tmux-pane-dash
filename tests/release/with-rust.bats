@@ -19,6 +19,7 @@ EOF
 #!/bin/sh
 case "${1:-}" in --version) echo 'cargo 1.96.1 (fixture)' ;; fetch) printf 'fetch\n' >> "${RUSTUP_HOME%/rustup}/fixture.log" ;; esac
 EOF
+    for tool in cargo-clippy rustfmt; do printf '#!/bin/sh\nexit 0\n' > "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; done
     chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/rustc" "$RUSTUP_HOME/toolchains/1.96.1/bin/cargo" ;;
   which) echo "$RUSTUP_HOME/toolchains/1.96.1/bin/$2" ;;
 esac
@@ -29,6 +30,12 @@ SH
 @test "with-rust rejects ambient state and provides exact isolated Rust" {
   root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
   run "$root/tests/release/with-rust.sh" -- sh -c 'test "$(cargo --version | awk "{print \$2}")" = 1.96.1 && test -n "$RUSTUP_HOME" && test -n "$CARGO_HOME"'
+  [ "$status" -eq 0 ]
+}
+
+@test "with-rust provides the pinned Clippy and rustfmt components" {
+  root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+  run "$root/tests/release/with-rust.sh" -- sh -c 'cargo-clippy --version >/dev/null && rustfmt --version >/dev/null'
   [ "$status" -eq 0 ]
 }
 
@@ -52,7 +59,7 @@ SH
 set -eu
 root=$RUSTUP_HOME/..
 case "$1" in
-  toolchain) mkdir -p "$RUSTUP_HOME/toolchains/1.96.1/bin"; for tool in rustc cargo; do cat > "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool" <<EOF
+  toolchain) mkdir -p "$RUSTUP_HOME/toolchains/1.96.1/bin"; for tool in rustc cargo cargo-clippy rustfmt; do cat > "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool" <<EOF
 #!/bin/sh
 test "\${1:-}" = --version || exit 0
 echo '${tool} 1.96.1 (31fca3adb 2026-06-26)'
@@ -90,6 +97,7 @@ EOF
 #!/bin/sh
 echo 'cargo 1.96.1 (fixture)'
 EOF
+    for tool in cargo-clippy rustfmt; do printf '#!/bin/sh\nexit 0\n' > "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/$tool"; done
     chmod +x "$RUSTUP_HOME/toolchains/1.96.1/bin/rustc" "$RUSTUP_HOME/toolchains/1.96.1/bin/cargo" ;;
   which) echo "$RUSTUP_HOME/toolchains/1.96.1/bin/$2" ;;
 esac

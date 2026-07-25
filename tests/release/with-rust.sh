@@ -33,7 +33,7 @@ valid_toolchain() {
   path="$root"
   IFS=/ read -r -a parts <<< "${candidate#"$root"/}"
   for part in "${parts[@]}"; do path="$path/$part"; [ ! -L "$path" ] || return 1; done
-  [ -x "$candidate/rustc" ] && [ -x "$candidate/cargo" ] || return 1
+  [ -x "$candidate/rustc" ] && [ -x "$candidate/cargo" ] && [ -x "$candidate/cargo-clippy" ] && [ -x "$candidate/rustfmt" ] || return 1
   [ "$("$candidate/rustc" --version 2>/dev/null)" = "rustc 1.96.1 (31fca3adb 2026-06-26)" ] || return 1
   "$candidate/cargo" --version 2>/dev/null | grep -Eq '^cargo 1\.96\.1 \(' || return 1
 }
@@ -72,7 +72,7 @@ provision() {
   valid_root "$root" || { rm -rf -- "$root_tmp"; fail 'unsafe Rust root'; }
   mkdir -p "$root/rustup" "$root/cargo" "$root/home" "$root/data" "$root/config" "$root/cache"
   incomplete_root=$root
-  run_owned env -i PATH="$(dirname "$bootstrap"):/usr/bin:/bin" HOME="$root/home" XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME="$root/cache" RUSTUP_HOME="$root/rustup" CARGO_HOME="$root/cargo" RUSTUP_NO_SELF_UPDATE=1 "$bootstrap" toolchain install 1.96.1 --profile minimal --no-self-update || fail 'Rust 1.96.1 installation failed'
+  run_owned env -i PATH="$(dirname "$bootstrap"):/usr/bin:/bin" HOME="$root/home" XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME="$root/cache" RUSTUP_HOME="$root/rustup" CARGO_HOME="$root/cargo" RUSTUP_NO_SELF_UPDATE=1 "$bootstrap" toolchain install 1.96.1 --profile minimal --component clippy --component rustfmt --no-self-update || fail 'Rust 1.96.1 installation failed'
   rustc=$(run_owned env -i PATH="$(dirname "$bootstrap"):/usr/bin:/bin" HOME="$root/home" RUSTUP_HOME="$root/rustup" CARGO_HOME="$root/cargo" "$bootstrap" which rustc --toolchain 1.96.1) || fail 'Rust 1.96.1 rustc path unavailable'
   cargo=$(run_owned env -i PATH="$(dirname "$bootstrap"):/usr/bin:/bin" HOME="$root/home" RUSTUP_HOME="$root/rustup" CARGO_HOME="$root/cargo" "$bootstrap" which cargo --toolchain 1.96.1) || fail 'Rust 1.96.1 cargo path unavailable'
   toolchain_bin=$(dirname "$rustc")
