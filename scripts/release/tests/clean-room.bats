@@ -119,6 +119,22 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "strips ambient Node, TLS, and Git configuration while restoring only the pinned Node binary" {
+  node="$BATS_TEST_TMPDIR/node20"
+  printf '#!/bin/sh\nexit 0\n' > "$node"
+  chmod +x "$node"
+  run env \
+    EXPECTED_NODE="$node" NODE_20_BIN="$node" NODE_OPTIONS=sentinel NODE_PATH=sentinel NODE_EXTRA_CA_CERTS=sentinel NODE_REPL_HISTORY=sentinel NODE_CONFIG=sentinel node_config=sentinel \
+    SSL_CERT_FILE=sentinel SSL_CERT_DIR=sentinel CURL_CA_BUNDLE=sentinel REQUESTS_CA_BUNDLE=sentinel \
+    GIT_CONFIG_GLOBAL=sentinel GIT_CONFIG_SYSTEM=sentinel GIT_CONFIG_NOSYSTEM=sentinel GIT_SSH=sentinel GIT_SSH_COMMAND=sentinel \
+    "$repo_root/scripts/release/clean-room.sh" -- sh -c '
+      test "$NODE_20_BIN" = "$EXPECTED_NODE"
+      test -n "$NODE_20_BIN"
+      ! env | grep -Eq "^(NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|NODE_REPL_HISTORY|NODE_CONFIG|node_config|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM|GIT_SSH|GIT_SSH_COMMAND)="
+    '
+  [ "$status" -eq 0 ]
+}
+
 
 @test "uses and removes a short isolated TMPDIR for tmux socket consumers" {
   observed="$BATS_TEST_TMPDIR/tmpdir"

@@ -153,10 +153,13 @@ root=''; descriptor="$result"
 read_descriptor || fail 'invalid parser result handshake'
 rm -f -- "$result"; trap - EXIT HUP INT TERM
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY no_proxy
+unset CARGO RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTDOC RUSTDOCFLAGS RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTUP_TOOLCHAIN CARGO_BUILD_TARGET CARGO_TARGET_DIR CARGO_NET_OFFLINE CARGO_HOME RUSTUP_HOME RUSTFMT CLIPPY_DRIVER CC CXX AR LD
 for variable in $(env | cut -d= -f1); do
   case "$variable" in
     *_TOKEN|*_token|*_PASSWORD|*_password|*_SECRET|*_secret|*_API_KEY|*_api_key|*AUTH*|*auth*|\
     DOCKER_*|docker_*|GIT_ASKPASS|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|SSH_*|\
+    GIT_CONFIG_*|git_config_*|GIT_SSH|git_ssh|GIT_SSH_COMMAND|git_ssh_command|\
+    NODE_*|node_*|SSL_CERT_*|ssl_cert_*|CURL_CA_BUNDLE|curl_ca_bundle|REQUESTS_CA_BUNDLE|requests_ca_bundle|\
     NPM_CONFIG_*|npm_config_*|YARN_*|yarn_*|NETRC|KUBECONFIG|\
     AWS_*|aws_*|AZURE_*|azure_*|GOOGLE_*|google_*|GCP_*|gcp_*|OCI_*|VAULT_*|BUN_*|bun_*|CARGO_REGISTRIES_*|CARGO_REGISTRY_*|CARGO_CONFIG_*)
       unset "$variable"

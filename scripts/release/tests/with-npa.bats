@@ -134,6 +134,17 @@ SH
   [ "$status" -eq 0 ]; [ "$output" = "$first" ]; [ "$(grep -c '^install$' "$first/fixture.log")" -eq 1 ]
 }
 
+@test "with-npa strips ambient Node, TLS, and Git executable configuration" {
+  tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"; mkdir -p "$tmp"; tmp="$(cd "$tmp" && pwd -P)"; make_fake_bun "$bin"
+  run env TMPDIR="$tmp" BUN_BOOTSTRAP="$bin/bun" \
+    NODE_20_BIN=sentinel NODE_OPTIONS=sentinel NODE_PATH=sentinel NODE_EXTRA_CA_CERTS=sentinel NODE_REPL_HISTORY=sentinel NODE_CONFIG=sentinel node_config=sentinel \
+    SSL_CERT_FILE=sentinel SSL_CERT_DIR=sentinel CURL_CA_BUNDLE=sentinel REQUESTS_CA_BUNDLE=sentinel \
+    GIT_CONFIG_GLOBAL=sentinel GIT_CONFIG_SYSTEM=sentinel GIT_CONFIG_NOSYSTEM=sentinel GIT_SSH=sentinel GIT_SSH_COMMAND=sentinel \
+    CC=sentinel CXX=sentinel AR=sentinel LD=sentinel \
+    "$wrapper" -- sh -c '! env | grep -Eq "^(NODE_20_BIN|NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|NODE_REPL_HISTORY|NODE_CONFIG|node_config|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM|GIT_SSH|GIT_SSH_COMMAND|CC|CXX|AR|LD)="'
+  [ "$status" -eq 0 ]
+}
+
 
 @test "with-npa eight contenders install once and execute overlapping children after unlock" {
   tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"; marks="$BATS_TEST_TMPDIR/marks"; mkdir -p "$tmp" "$marks"; tmp="$(cd "$tmp" && pwd -P)"; make_fake_bun "$bin"

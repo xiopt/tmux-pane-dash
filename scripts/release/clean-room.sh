@@ -42,8 +42,11 @@ validate_isolated_rust_state() {
   "$CARGO" --version 2>/dev/null | grep -Eq '^cargo 1\.96\.1 \('
 }
 preserve_rust=0 preserve_npa=0
+isolated_rust_root='' rust_toolchain_bin=''
 if [ -n "${PANE_DASH_ISOLATED_RUST_ROOT:-}${RUSTUP_HOME:-}${CARGO_HOME:-}" ]; then
   validate_isolated_rust_state || { printf '%s\n' 'clean-room: invalid isolated Rust state' >&2; exit 64; }
+  isolated_rust_root=$PANE_DASH_ISOLATED_RUST_ROOT
+  rust_toolchain_bin=${CARGO%/cargo}
   preserve_rust=1
 fi
 if [ -n "${PANE_DASH_NPA_ROOT:-}" ]; then
@@ -135,6 +138,8 @@ for variable in $(env | cut -d= -f1); do
   case "$variable" in
     *_TOKEN|*_token|*_PASSWORD|*_password|*_SECRET|*_secret|*_API_KEY|*_api_key|*AUTH*|*auth*|\
     DOCKER_*|docker_*|GIT_ASKPASS|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|SSH_*|\
+    GIT_CONFIG_*|git_config_*|GIT_SSH|git_ssh|GIT_SSH_COMMAND|git_ssh_command|\
+    NODE_*|node_*|SSL_CERT_*|ssl_cert_*|CURL_CA_BUNDLE|curl_ca_bundle|REQUESTS_CA_BUNDLE|requests_ca_bundle|\
     NPM_CONFIG_*|npm_config_*|YARN_*|yarn_*|NETRC|KUBECONFIG|\
     AWS_*|aws_*|AZURE_*|azure_*|GOOGLE_*|google_*|GCP_*|gcp_*|OCI_*|VAULT_*|\
     CARGO_REGISTRIES_*|CARGO_REGISTRY_*|CARGO_CONFIG_*|BUN_*|bun_*|RUSTUP_*|CARGO_TARGET_*_LINKER|CARGO_TARGET_*_RUSTFLAGS) unset "$variable" ;;
@@ -160,7 +165,7 @@ export BUN_INSTALL_CACHE_DIR="$root/bun-cache"
 export TMPDIR="$tmp_root"
 export TMUX_TMPDIR="$tmux_root"
 export PANE_DASH_TMUX_SOCKET="$socket"
-[ "$preserve_rust" -eq 1 ] && export PANE_DASH_ISOLATED_RUST_ROOT RUSTUP_HOME CARGO_HOME CARGO="$rust_toolchain_bin/cargo" RUSTC="$rust_toolchain_bin/rustc" RUSTDOC="$rust_toolchain_bin/rustdoc" RUSTFMT="$rust_toolchain_bin/rustfmt" CLIPPY_DRIVER="$rust_toolchain_bin/clippy-driver" PATH="$rust_toolchain_bin:${PATH:-/usr/bin:/bin}"
+[ "$preserve_rust" -eq 1 ] && export PANE_DASH_ISOLATED_RUST_ROOT="$isolated_rust_root" RUSTUP_HOME="$isolated_rust_root/rustup" CARGO_HOME="$isolated_rust_root/cargo" CARGO="$rust_toolchain_bin/cargo" RUSTC="$rust_toolchain_bin/rustc" RUSTDOC="$rust_toolchain_bin/rustdoc" RUSTFMT="$rust_toolchain_bin/rustfmt" CLIPPY_DRIVER="$rust_toolchain_bin/clippy-driver" PATH="$rust_toolchain_bin:/usr/bin:/bin:/usr/sbin:/sbin"
 mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$npm_config_cache" "$BUN_INSTALL_CACHE_DIR" "$TMPDIR" "$TMUX_TMPDIR"
 
 # Job control gives the child its own process group, including descendants.

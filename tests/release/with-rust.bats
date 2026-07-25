@@ -290,22 +290,43 @@ SH
   root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"; tmp="$BATS_TEST_TMPDIR/tmp"; bin="$BATS_TEST_TMPDIR/bin"; trap_bin="$BATS_TEST_TMPDIR/trap-bin"; fake_tmux="$BATS_TEST_TMPDIR/tmux"
   mkdir -p "$tmp" "$trap_bin"; tmp="$(cd "$tmp" && pwd -P)"; make_fake_rustup "$bin"
   printf '#!/bin/sh\nprintf "tmux 3.7\\n"\n' > "$fake_tmux"; chmod +x "$fake_tmux"
-  for tool in cargo rustc rustdoc rustfmt clippy-driver; do printf '#!/bin/sh\nprintf trapped >&2\nexit 97\n' > "$trap_bin/$tool"; chmod +x "$trap_bin/$tool"; done
+  for tool in cargo rustc rustdoc rustfmt clippy-driver cc ld helper; do printf '#!/bin/sh\nprintf trapped >&2\nexit 97\n' > "$trap_bin/$tool"; chmod +x "$trap_bin/$tool"; done
   run env TMPDIR="$tmp" RUSTUP_BOOTSTRAP="$bin/rustup" TMUX_BIN="$fake_tmux" PATH="$trap_bin:$PATH" \
     CARGO="$trap_bin/cargo" RUSTC="$trap_bin/rustc" RUSTDOC="$trap_bin/rustdoc" RUSTFMT="$trap_bin/rustfmt" CLIPPY_DRIVER="$trap_bin/clippy-driver" \
     RUSTC_WRAPPER="$trap_bin/rustc" RUSTC_WORKSPACE_WRAPPER="$trap_bin/rustc" RUSTDOCFLAGS=bad RUSTFLAGS=bad CARGO_ENCODED_RUSTFLAGS=bad \
     CARGO_BUILD_TARGET=bad CARGO_TARGET_DIR=bad CC="$trap_bin/rustc" CXX="$trap_bin/rustc" AR="$trap_bin/rustc" LD="$trap_bin/rustc" CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$trap_bin/rustc" CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=bad \
+    NODE_OPTIONS=bad NODE_PATH=bad NODE_EXTRA_CA_CERTS=bad NODE_REPL_HISTORY=bad NODE_CONFIG=bad node_config=bad SSL_CERT_FILE=bad SSL_CERT_DIR=bad CURL_CA_BUNDLE=bad REQUESTS_CA_BUNDLE=bad GIT_CONFIG_GLOBAL=bad GIT_CONFIG_SYSTEM=bad GIT_CONFIG_NOSYSTEM=bad GIT_SSH=bad GIT_SSH_COMMAND=bad \
     DOCKER_AUTH_CONFIG=x GIT_ASKPASS=x SSH_ASKPASS=x SSH_ASKPASS_REQUIRE=x NPM_CONFIG_REGISTRY=x NPM_CONFIG_USERCONFIG=x npm_config_registry=x npm_config_userconfig=x NODE_AUTH_TOKEN=x YARN_NPM_AUTH_TOKEN=x YARN_RC_FILENAME=x NETRC=x KUBECONFIG=x AWS_ACCESS_KEY_ID=x SERVICE_TOKEN=x service_token=x SERVICE_PASSWORD=x SERVICE_SECRET=x SERVICE_API_KEY=x SERVICE_AUTH_CONFIG=x service_auth_config=x \
     "$root/tests/release/with-rust.sh" -- "$root/scripts/release/clean-room.sh" -- sh -c '
       set -e
+      toolchain="$PANE_DASH_ISOLATED_RUST_ROOT/rustup/toolchains/1.96.1/bin"
+      test -n "$PANE_DASH_ISOLATED_RUST_ROOT"
+      test "$RUSTUP_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup"
+      test "$CARGO_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/cargo"
       test "$CARGO" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup/toolchains/1.96.1/bin/cargo"
       test "$RUSTC" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup/toolchains/1.96.1/bin/rustc"
       test "$RUSTDOC" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup/toolchains/1.96.1/bin/rustdoc"
       test "$RUSTFMT" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup/toolchains/1.96.1/bin/rustfmt"
       test "$CLIPPY_DRIVER" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup/toolchains/1.96.1/bin/clippy-driver"
+      test "$PATH" = "$toolchain:/usr/bin:/bin:/usr/sbin:/sbin"
+      test "$(command -v cc)" = /usr/bin/cc
+      ! command -v helper
       ! env | grep -Eq "^(RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOCFLAGS|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_TARGET|CARGO_TARGET_DIR|CC|CXX|AR|LD|CARGO_TARGET_.*_(LINKER|RUSTFLAGS))="
+      ! env | grep -Eq "^(NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|NODE_REPL_HISTORY|NODE_CONFIG|node_config|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM|GIT_SSH|GIT_SSH_COMMAND)="
       ! env | grep -Eq "^(DOCKER_AUTH_CONFIG|GIT_ASKPASS|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|NPM_CONFIG_|npm_config_|NODE_AUTH_TOKEN|YARN_|NETRC|KUBECONFIG|AWS_ACCESS_KEY_ID|SERVICE_)="
       cargo --version >/dev/null
     '
+  [ "$status" -eq 0 ]
+}
+
+@test "with-rust uses the system compiler for an isolated cargo check despite caller PATH traps" {
+  root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"; trap_bin="$BATS_TEST_TMPDIR/trap-bin"; target_dir="$BATS_TEST_TMPDIR/cargo-target"
+  mkdir -p "$trap_bin"
+  for tool in cc ld helper; do printf '#!/bin/sh\nprintf trapped >&2\nexit 97\n' > "$trap_bin/$tool"; chmod +x "$trap_bin/$tool"; done
+  run env PATH="$trap_bin:$PATH" CC="$trap_bin/cc" LD="$trap_bin/ld" "$root/tests/release/with-rust.sh" -- sh -c '
+    test "$(command -v cc)" = /usr/bin/cc
+    ! command -v helper
+    exec cargo check --manifest-path "$1/pane-dash/Cargo.toml" --target-dir "$2"
+  ' sh "$root" "$target_dir"
   [ "$status" -eq 0 ]
 }

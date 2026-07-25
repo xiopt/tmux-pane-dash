@@ -160,6 +160,8 @@ for variable in $(env | cut -d= -f1); do
   case "$variable" in
     *_TOKEN|*_token|*_PASSWORD|*_password|*_SECRET|*_secret|*_API_KEY|*_api_key|*AUTH*|*auth*|\
     DOCKER_*|docker_*|GIT_ASKPASS|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|SSH_*|\
+    GIT_CONFIG_*|git_config_*|GIT_SSH|git_ssh|GIT_SSH_COMMAND|git_ssh_command|\
+    NODE_*|node_*|SSL_CERT_*|ssl_cert_*|CURL_CA_BUNDLE|curl_ca_bundle|REQUESTS_CA_BUNDLE|requests_ca_bundle|\
     NPM_CONFIG_*|npm_config_*|YARN_*|yarn_*|NETRC|KUBECONFIG|\
     AWS_*|aws_*|AZURE_*|azure_*|GOOGLE_*|google_*|GCP_*|gcp_*|OCI_*|VAULT_*|\
     CARGO_REGISTRIES_*|CARGO_REGISTRY_*|CARGO_CONFIG_*|RUSTUP_*|CARGO_TARGET_*_LINKER|CARGO_TARGET_*_RUSTFLAGS)
@@ -169,5 +171,5 @@ for variable in $(env | cut -d= -f1); do
 done
 export PANE_DASH_ISOLATED_RUST_ROOT="$root" RUSTUP_HOME="$root/rustup" CARGO_HOME="$root/cargo"
 export CARGO="$toolchain_bin/cargo" RUSTC="$toolchain_bin/rustc" RUSTDOC="$toolchain_bin/rustdoc" RUSTFMT="$toolchain_bin/rustfmt" CLIPPY_DRIVER="$toolchain_bin/clippy-driver"
-export PATH="$toolchain_bin:${PATH:-/usr/bin:/bin}"
+export PATH="$toolchain_bin:/usr/bin:/bin:/usr/sbin:/sbin"
 exec "$@"
