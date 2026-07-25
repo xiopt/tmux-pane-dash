@@ -48,6 +48,21 @@ read_descriptor() {
   done < "$descriptor"
   [ "$count" -eq 3 ] && valid_toolchain "$toolchain_bin"
 }
+parse_safe_discard_root() {
+  local key value count=0 schema_seen=0 root_seen=0 toolchain_seen=0 candidate=''
+  [ -f "$descriptor" ] && [ ! -L "$descriptor" ] || return 1
+  [ "$(stat_mode "$descriptor")" = 600 ] && [ "$(stat_uid "$descriptor")" = "$(id -u)" ] || return 1
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    count=$((count + 1))
+    case "$key" in
+      SCHEMA) [ "$schema_seen" -eq 0 ] || return 1; schema_seen=1 ;;
+      ROOT) [ "$root_seen" -eq 0 ] || return 1; root_seen=1; candidate=$value ;;
+      TOOLCHAIN_BIN) [ "$toolchain_seen" -eq 0 ] || return 1; toolchain_seen=1 ;;
+      *) return 1 ;;
+    esac
+  done < "$descriptor"
+  [ "$count" -eq 3 ] && [ "$schema_seen" -eq 1 ] && [ "$root_seen" -eq 1 ] && [ "$toolchain_seen" -eq 1 ] && valid_root "$candidate" && root=$candidate
+}
 provision() {
   local bootstrap rustc cargo root_tmp
   bootstrap=${RUSTUP_BOOTSTRAP:-$(command -v rustup || true)}
@@ -100,7 +115,17 @@ run_owned() {
 }
 locked() {
   case "$1" in
-    prepare) read_descriptor || { [ ! -e "$descriptor" ] || fail 'invalid descriptor refuses replacement'; provision; }; write_result "$2" ;;
+    prepare)
+      if ! read_descriptor; then
+        if [ -e "$descriptor" ] || [ -L "$descriptor" ]; then
+          parse_safe_discard_root || fail 'invalid descriptor refuses replacement'
+          rm -rf -- "$root"
+          rm -f -- "$descriptor"
+        fi
+        provision
+      fi
+      write_result "$2"
+      ;;
     cleanup) if [ -e "$descriptor" ]; then read_descriptor || fail 'invalid descriptor refuses cleanup'; rm -rf -- "$root"; rm -f -- "$descriptor"; fi; rmdir "$state_dir" 2>/dev/null || true ;;
     *) fail 'invalid private action' ;;
   esac

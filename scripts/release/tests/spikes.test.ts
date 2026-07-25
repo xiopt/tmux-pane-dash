@@ -130,6 +130,25 @@ test("refuses an unvalidated ambient npm-package-arg root", async () => {
   }
 })
 
+test("fails closed when the Seatbelt parser returns malformed or noncanonical package observations", async () => {
+  const parserRoot = join(root, "parser-root")
+  const packageRoot = join(parserRoot, "node_modules", "npm-package-arg")
+  await mkdir(packageRoot, { recursive: true })
+  await writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "npm-package-arg", version: "13.0.2" }))
+  const previous = process.env.PANE_DASH_NPA_ROOT
+  process.env.PANE_DASH_NPA_ROOT = parserRoot
+  try {
+    for (const result of ["not json", JSON.stringify({ version: "13.0.1", module: join(packageRoot, "index.js"), name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.0" }), JSON.stringify({ version: "13.0.2", module: join(packageRoot, "index.js"), name: "wrong", rawSpec: "0.1.0" }), JSON.stringify({ version: "13.0.2", module: join(packageRoot, "index.js"), name: "@xiopt/pane-dash-opencode", rawSpec: "latest" })]) {
+      await writeFile(join(packageRoot, "index.js"), `module.exports = () => (${JSON.stringify(result === "not json" ? {} : JSON.parse(result))});`)
+      if (result === "not json") await writeFile(join(packageRoot, "index.js"), "module.exports = () => { throw new Error('malformed parser fixture') }")
+      await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.0")).rejects.toThrow()
+    }
+  } finally {
+    if (previous === undefined) delete process.env.PANE_DASH_NPA_ROOT
+    else process.env.PANE_DASH_NPA_ROOT = previous
+  }
+})
+
 test("accepts only the local companion and scoped-plugin registry inventory", () => {
   const origin = "http://127.0.0.1:54321"
   expect(() => assertOpenCodeRegistryRequests([
