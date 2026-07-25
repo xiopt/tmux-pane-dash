@@ -69,6 +69,10 @@ for tool in "${tool_names[@]}"; do
     /*) [ -x "$value" ] || { printf 'clean-room: %s is not executable: %s\n' "$tool" "$value" >&2; exit 64; } ;;
     *) printf 'clean-room: %s must be an absolute executable path\n' "$tool" >&2; exit 64 ;;
   esac
+  if [ "$tool" = BUN_BOOTSTRAP ] && [ "$("$value" --version 2>/dev/null)" != 1.3.14 ]; then
+    printf '%s\n' 'clean-room: BUN_BOOTSTRAP must be an exact Bun 1.3.14 executable' >&2
+    exit 64
+  fi
   [ "$tool" = TMUX_BIN ] && tmux_bin=$value
 done
 
