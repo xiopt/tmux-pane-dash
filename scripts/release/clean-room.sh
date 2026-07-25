@@ -11,6 +11,36 @@ usage() {
 shift
 [ "$#" -gt 0 ] || { printf '%s\n' 'clean-room: command required' >&2; exit 64; }
 
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
+canonical_dir() { (cd "$1" && pwd -P); }
+path_under() { [ "$1" = "$2" ] || [[ "$1" == "$2/"* ]]; }
+validate_isolated_root() {
+  local root=$1 prefix=$2
+  case "$root" in /*) ;; *) return 1 ;; esac
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  [ "$(canonical_dir "$root")" = "$root" ] || return 1
+  prefix=$(canonical_dir "$prefix") || return 1
+  path_under "$root" "$prefix" || return 1
+  path_under "$root" "$repo_root" && return 1
+  for forbidden in "${HOME:-}" "${XDG_DATA_HOME:-}" "${XDG_CONFIG_HOME:-}" "${XDG_CACHE_HOME:-}"; do
+    [ -n "$forbidden" ] && [ -e "$forbidden" ] || continue
+    forbidden=$(canonical_dir "$forbidden") || return 1
+    path_under "$root" "$forbidden" && return 1
+  done
+}
+preserve_rust=0 preserve_npa=0
+if [ -n "${PANE_DASH_ISOLATED_RUST_ROOT:-}${RUSTUP_HOME:-}${CARGO_HOME:-}" ]; then
+  validate_isolated_root "${PANE_DASH_ISOLATED_RUST_ROOT:-}" "${TMPDIR:-/tmp}" &&
+    [ "${RUSTUP_HOME:-}" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup" ] &&
+    [ "${CARGO_HOME:-}" = "$PANE_DASH_ISOLATED_RUST_ROOT/cargo" ] &&
+    [ -d "$RUSTUP_HOME" ] && [ -d "$CARGO_HOME" ] || { printf '%s\n' 'clean-room: invalid isolated Rust state' >&2; exit 64; }
+  preserve_rust=1
+fi
+if [ -n "${PANE_DASH_NPA_ROOT:-}" ]; then
+  validate_isolated_root "$PANE_DASH_NPA_ROOT" "${TMPDIR:-/tmp}" && [ -f "$PANE_DASH_NPA_ROOT/node_modules/npm-package-arg/package.json" ] || { printf '%s\n' 'clean-room: invalid isolated NPA state' >&2; exit 64; }
+  preserve_npa=1
+fi
+
 tool_names=(NODE_20_BIN NPM_20_CLI OPENCODE_1_17_20_BIN OPENCODE_LATEST_BIN TMUX_BIN)
 tool_values=()
 tmux_bin=''
@@ -105,7 +135,8 @@ for index in "${!tool_names[@]}"; do
   [ -n "$value" ] && export "$tool=$value"
 done
 
-unset RUSTUP_HOME CARGO_HOME
+[ "$preserve_rust" -eq 1 ] || unset RUSTUP_HOME CARGO_HOME PANE_DASH_ISOLATED_RUST_ROOT
+[ "$preserve_npa" -eq 1 ] || unset PANE_DASH_NPA_ROOT
 
 export HOME="$root/home"
 export XDG_DATA_HOME="$root/xdg-data"

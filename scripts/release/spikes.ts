@@ -1,8 +1,8 @@
-import { chmod, copyFile, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
-import { basename, isAbsolute, join, resolve } from "node:path"
+import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { DEBIAN_PLATFORM_MANIFESTS, OPENCODE_PACKAGE_FILES, RUST_ALPINE_BUILDERS, TMUX_RUNTIME } from "./contracts"
 import { startLocalRegistry, type LocalPackage } from "./local-registry"
 
@@ -108,11 +108,25 @@ export function normalizeOpenCodeVersion(output: string): string {
 }
 
 export async function observeOpenCodePluginSpec(value: string): Promise<{ readonly name: "@xiopt/pane-dash-opencode"; readonly rawSpec: "0.1.0" }> {
-  const fixture = new URL("fixtures/npm-package-arg-13/package.json", import.meta.url)
-  const require = createRequire(fixture)
+  const root = process.env.PANE_DASH_NPA_ROOT
+  if (!root || !isAbsolute(root)) throw new Error("PANE_DASH_NPA_ROOT must name a validated absolute parser root")
+  const packageRoot = join(root, "node_modules", "npm-package-arg")
+  const [tempRoot, physicalRoot, rootStat, packageStat, packagePath] = await Promise.all([
+    realpath(tmpdir()),
+    realpath(root),
+    lstat(root),
+    lstat(packageRoot),
+    realpath(join(packageRoot, "package.json")),
+  ]).catch(() => { throw new Error("PANE_DASH_NPA_ROOT must name a validated parser root") })
+  if (physicalRoot !== root || relative(tempRoot, root).startsWith("..") || !rootStat.isDirectory() || rootStat.isSymbolicLink() || !packageStat.isDirectory() || packageStat.isSymbolicLink() || relative(root, packagePath).startsWith("..")) {
+    throw new Error("PANE_DASH_NPA_ROOT must name a validated parser root")
+  }
+  const require = createRequire(join(root, "package.json"))
   const packageJson = require("npm-package-arg/package.json") as { version?: unknown }
   if (packageJson.version !== "13.0.2") throw new Error("npm-package-arg fixture must be exact 13.0.2")
   const npa = require("npm-package-arg") as (spec: string) => { name?: unknown; rawSpec?: unknown }
+  const modulePath = await realpath(require.resolve("npm-package-arg"))
+  if (relative(packageRoot, modulePath).startsWith("..")) throw new Error("PANE_DASH_NPA_ROOT resolved npm-package-arg outside its validated root")
   const parsed = npa(value)
   if (parsed.name !== "@xiopt/pane-dash-opencode" || parsed.rawSpec !== "0.1.0") throw new Error("exact scoped package observation required")
   return { name: parsed.name, rawSpec: parsed.rawSpec }

@@ -119,6 +119,17 @@ test("observes the exact scoped OpenCode plugin spec with npm-package-arg", asyn
   }
 })
 
+test("refuses an unvalidated ambient npm-package-arg root", async () => {
+  const previous = process.env.PANE_DASH_NPA_ROOT
+  process.env.PANE_DASH_NPA_ROOT = "/not-a-validated-npa-root"
+  try {
+    await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.0")).rejects.toThrow("PANE_DASH_NPA_ROOT")
+  } finally {
+    if (previous === undefined) delete process.env.PANE_DASH_NPA_ROOT
+    else process.env.PANE_DASH_NPA_ROOT = previous
+  }
+})
+
 test("accepts only the local companion and scoped-plugin registry inventory", () => {
   const origin = "http://127.0.0.1:54321"
   expect(() => assertOpenCodeRegistryRequests([
