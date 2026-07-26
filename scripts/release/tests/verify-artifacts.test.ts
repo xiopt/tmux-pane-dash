@@ -8,6 +8,7 @@ import { TARGETS } from "../contracts"
 import { verifyReleaseDirectory } from "../verify-artifacts"
 
 const decoder = new TextDecoder()
+const epoch = 1784813242
 
 async function buildRelease(root: string): Promise<void> {
   const child = Bun.spawn([process.execPath, "scripts/release/build.ts", "--local-fixtures", "--tag-commit", "7bc976a", "--output", root], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" })
@@ -37,7 +38,7 @@ async function replaceArchive(root: string, key: keyof typeof TARGETS, change: (
 test("verifier requires exactly four archives plus release manifest and checksums", async () => {
   const root = await mkdtemp(join(tmpdir(), "pane-dash-release-"))
   try {
-    await expect(verifyReleaseDirectory(root)).rejects.toThrow("exactly six release assets")
+    await expect(verifyReleaseDirectory(root, epoch)).rejects.toThrow("exactly six release assets")
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -52,7 +53,25 @@ test("verifier rejects a binary whose regenerated metadata names the wrong archi
       record.files.find((file) => file.path === "bin/pane-dash")!.sha256 = sha256(tar.subarray(binary.content, binary.content + binary.size))
       tar.set(canonicalJson(record), manifest.content)
     })
-    await expect(verifyReleaseDirectory(root)).rejects.toThrow("architecture")
+    await expect(verifyReleaseDirectory(root, epoch)).rejects.toThrow("architecture")
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test("verifier rejects a host-matching binary that cannot report its exact version in tmux", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pane-dash-release-"))
+  try {
+    await buildRelease(root)
+    const key = process.platform === "darwin" ? process.arch === "arm64" ? "darwin-arm64" : "darwin-x64" : process.arch === "arm64" ? "linux-arm64" : "linux-x64"
+    await replaceArchive(root, key, (tar) => {
+      const binary = tarEntry(tar, "bin/pane-dash"), manifest = tarEntry(tar, "manifest.json")
+      tar.fill(0, binary.content, binary.content + binary.size)
+      if (process.platform === "darwin") tar.set(process.arch === "arm64" ? [0xcf, 0xfa, 0xed, 0xfe, 12, 0, 0, 1] : [0xcf, 0xfa, 0xed, 0xfe, 7, 0, 0, 1], binary.content)
+      else tar.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, process.arch === "arm64" ? 0xb7 : 0x3e, 0], binary.content)
+      const record = JSON.parse(decoder.decode(tar.subarray(manifest.content, manifest.content + manifest.size))) as { files: Array<{ path: string; sha256: string }> }
+      record.files.find((file) => file.path === "bin/pane-dash")!.sha256 = sha256(tar.subarray(binary.content, binary.content + binary.size))
+      tar.set(canonicalJson(record), manifest.content)
+    })
+    await expect(verifyReleaseDirectory(root, epoch)).rejects.toThrow("version")
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -67,6 +86,6 @@ test("verifier requires a complete canonical internal manifest and path-specific
       const bytes = canonicalJson(record).subarray(0, -1)
       tar.set(bytes, manifest.content); tar.set(new TextEncoder().encode(`${bytes.length.toString(8).padStart(11, "0")}\0`), manifest.header + 124)
     })
-    await expect(verifyReleaseDirectory(root)).rejects.toThrow("invalid internal manifest")
+    await expect(verifyReleaseDirectory(root, epoch)).rejects.toThrow("invalid internal manifest")
   } finally { await rm(root, { recursive: true, force: true }) }
 })

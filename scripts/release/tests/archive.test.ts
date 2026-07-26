@@ -16,7 +16,7 @@ test("archive inventory and metadata are exact and reproducible", async () => {
     const a = join(root, "a.tar.gz"), b = join(root, "b.tar.gz")
     await buildArchive({ target: TARGETS["darwin-arm64"].rustTarget, binary, output: a, epoch: 1721740800, root })
     await buildArchive({ target: TARGETS["darwin-arm64"].rustTarget, binary, output: b, epoch: 1721740800, root })
-    expect(await inspectArchive(a)).toEqual([
+    expect(await inspectArchive(a, 1721740800)).toEqual([
       ["bin/pane-dash", "file", "0755"], ["pane_dash.tmux", "file", "0755"],
       ["scripts/open.sh", "file", "0755"], ["scripts/tag.sh", "file", "0755"],
       ["README.md", "file", "0644"], ["LICENSE", "file", "0644"],
@@ -36,6 +36,26 @@ test("archive inspection rejects non-normalized header metadata", async () => {
     await buildArchive({ target: TARGETS["darwin-arm64"].rustTarget, binary, output: archive, epoch: 1721740800, root })
     const tar = gunzipSync(await readFile(archive)); tar.set(new TextEncoder().encode("0000001\0"), 108)
     await writeFile(archive, gzipSync(tar, { mtime: 0, filename: "" }))
-    await expect(inspectArchive(archive)).rejects.toThrow("metadata")
+    await expect(inspectArchive(archive, 1721740800)).rejects.toThrow("metadata")
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test("archive inspection requires the tag commit epoch rather than matching entry mtimes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pane-dash-archive-"))
+  try {
+    await mkdir(join(root, "scripts"), { recursive: true })
+    for (const path of ["pane_dash.tmux", "README.md", "LICENSE", "VERSION", "scripts/open.sh", "scripts/tag.sh"]) await writeFile(join(root, path), `${path}\n`)
+    const binary = join(root, "pane-dash"), archive = join(root, "archive.tar.gz")
+    await writeFile(binary, new Uint8Array([0xcf, 0xfa, 0xed, 0xfe, 12, 0, 0, 1]))
+    await buildArchive({ target: TARGETS["darwin-arm64"].rustTarget, binary, output: archive, epoch: 1721740800, root })
+    const tar = gunzipSync(await readFile(archive))
+    for (let offset = 0; offset + 512 <= tar.length; ) {
+      const header = tar.subarray(offset, offset + 512); if (header.every((byte) => byte === 0)) break
+      const size = Number.parseInt(new TextDecoder().decode(header.subarray(124, 136)).replace(/\0.*$/, "").trim(), 8)
+      tar.set(new TextEncoder().encode("14675204000\0"), offset + 136)
+      offset += 512 + Math.ceil(size / 512) * 512
+    }
+    await writeFile(archive, gzipSync(tar, { mtime: 0, filename: "" }))
+    await expect(inspectArchive(archive, 1721740800)).rejects.toThrow("epoch")
   } finally { await rm(root, { recursive: true, force: true }) }
 })

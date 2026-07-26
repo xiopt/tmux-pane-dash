@@ -33,15 +33,16 @@ export async function buildArchive(input: { target: RustTarget; binary: string; 
   return input.output
 }
 
-export async function inspectArchive(path: string): Promise<Array<[string, "file", string]>> {
-  const tar = gunzipSync(await readFile(path)); const entries: Array<[string, "file", string]> = []; let epoch: number | undefined
+export async function inspectArchive(path: string, expectedEpoch: number): Promise<Array<[string, "file", string]>> {
+  if (!Number.isSafeInteger(expectedEpoch) || expectedEpoch < 0) throw new Error("invalid archive epoch")
+  const tar = gunzipSync(await readFile(path)); const entries: Array<[string, "file", string]> = []
   const field = (header: Uint8Array, offset: number, length: number) => new TextDecoder().decode(header.subarray(offset, offset + length)).replace(/\0.*$/, "").trim()
   for (let offset = 0; offset + 512 <= tar.length;) {
     const header = tar.subarray(offset, offset + 512); if (header.every((byte) => byte === 0)) break
     const name = field(header, 0, 100), size = Number.parseInt(field(header, 124, 12), 8), mode = Number.parseInt(field(header, 100, 8), 8), uid = Number.parseInt(field(header, 108, 8), 8), gid = Number.parseInt(field(header, 116, 8), 8), mtime = Number.parseInt(field(header, 136, 12), 8)
     if (header[156] !== 48) throw new Error("archive entry is not a regular file")
     if (!Number.isSafeInteger(size) || size < 0 || !Number.isSafeInteger(mode) || !Number.isSafeInteger(uid) || !Number.isSafeInteger(gid) || !Number.isSafeInteger(mtime) || mtime < 0 || uid !== 0 || gid !== 0 || field(header, 265, 32) || field(header, 297, 32)) throw new Error("archive header metadata is not normalized")
-    if (epoch === undefined) epoch = mtime; else if (mtime !== epoch) throw new Error("archive header metadata is not normalized")
+    if (mtime !== expectedEpoch) throw new Error("archive header epoch does not match tag commit")
     entries.push([name, "file", mode.toString(8).padStart(4, "0")]); offset += 512 + Math.ceil(size / 512) * 512
   }
   const expected = new Map(ARCHIVE_PAYLOAD); if (entries.length !== expected.size || new Set(entries.map(([name]) => name)).size !== entries.length || entries.some(([name, , mode]) => expected.get(name) !== mode)) throw new Error("archive inventory is not exact")

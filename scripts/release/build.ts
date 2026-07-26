@@ -7,7 +7,8 @@ import { releaseManifest, sha256Sums, type VerifiedAsset } from "./manifest"
 import { verifyReleaseDirectory } from "./verify-artifacts"
 
 const git: GitReader = { async run(args) { const child = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" }); const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]); if (code !== 0) throw new Error(stderr.trim()); return stdout } }
-const fixture = (target: string) => target.startsWith("aarch64-apple") ? new Uint8Array([0xcf, 0xfa, 0xed, 0xfe, 12, 0, 0, 1]) : target.startsWith("x86_64-apple") ? new Uint8Array([0xcf, 0xfa, 0xed, 0xfe, 7, 0, 0, 1]) : new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, target.startsWith("aarch64") ? 0xb7 : 0x3e, 0, 0, 0, ...new Array(48).fill(0)])
+const hostTarget = () => process.platform === "darwin" ? process.arch === "arm64" ? "aarch64-apple-darwin" : process.arch === "x64" ? "x86_64-apple-darwin" : undefined : process.platform === "linux" ? process.arch === "arm64" ? "aarch64-unknown-linux-musl" : process.arch === "x64" ? "x86_64-unknown-linux-musl" : undefined : undefined
+const fixture = async (target: string) => target === hostTarget() ? readFile("bin/pane-dash") : target.startsWith("aarch64-apple") ? new Uint8Array([0xcf, 0xfa, 0xed, 0xfe, 12, 0, 0, 1]) : target.startsWith("x86_64-apple") ? new Uint8Array([0xcf, 0xfa, 0xed, 0xfe, 7, 0, 0, 1]) : new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, target.startsWith("aarch64") ? 0xb7 : 0x3e, 0, 0, 0, ...new Array(48).fill(0)])
 
 async function epoch(tagCommit: string): Promise<number> {
   const resolved = (await git.run(["rev-parse", `${tagCommit}^{commit}`])).trim()
@@ -21,11 +22,11 @@ async function build(output: string, tagCommit: string, localFixtures: boolean):
     const root = join(output, `.stage-${key}`); await mkdir(join(root, "scripts"), { recursive: true }); await mkdir(join(root, "bin"), { recursive: true })
     try {
       for (const path of ["pane_dash.tmux", "README.md", "LICENSE", "VERSION", "scripts/open.sh", "scripts/tag.sh"]) await cp(path, join(root, path))
-      const binary = join(root, "fixture"); await writeFile(binary, fixture(target.rustTarget)); const archive = join(output, target.asset)
+      const binary = join(root, "fixture"); await writeFile(binary, await fixture(target.rustTarget)); const archive = join(output, target.asset)
       await buildArchive({ target: target.rustTarget, binary, output: archive, epoch: sourceEpoch, root }); const bytes = await readFile(archive); assets.push({ key, target: target.rustTarget, asset: target.asset, sha256: sha256(bytes), size: (await stat(archive)).size })
     } finally { await rm(root, { recursive: true, force: true }) }
   }
-  await writeFile(join(output, "release-manifest.json"), canonicalJson(await releaseManifest(assets))); await writeFile(join(output, "SHA256SUMS"), sha256Sums(assets)); await verifyReleaseDirectory(output)
+  await writeFile(join(output, "release-manifest.json"), canonicalJson(await releaseManifest(assets))); await writeFile(join(output, "SHA256SUMS"), sha256Sums(assets)); await verifyReleaseDirectory(output, sourceEpoch)
 }
 
 if (import.meta.main) {
