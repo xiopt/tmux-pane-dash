@@ -261,8 +261,26 @@ impl Drop for TerminalGuard {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    match parse_args()? {
+        StartupArgs::Version => {
+            println!("pane-dash {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        StartupArgs::Run {
+            client_tty,
+            session_id,
+            pane_id: _,
+            bench_first_frame,
+        } => run_dashboard(client_tty, session_id, bench_first_frame).await,
+    }
+}
+
+async fn run_dashboard(
+    client_tty: String,
+    session_id: String,
+    bench_first_frame: bool,
+) -> Result<()> {
     let startup_started = Instant::now();
-    let (client_tty, session_id, _pane_id, bench_first_frame) = parse_args()?;
     let tmux = TmuxExec::new("tmux");
     let (snapshot_bytes, options_bytes) = tmux.startup().await?;
     let cfg = parse_show_options(&options_bytes);
@@ -1010,13 +1028,30 @@ where
     Ok(())
 }
 
-fn parse_args() -> Result<(String, String, String, bool)> {
+#[derive(Debug, PartialEq, Eq)]
+enum StartupArgs {
+    Version,
+    Run {
+        client_tty: String,
+        session_id: String,
+        pane_id: String,
+        bench_first_frame: bool,
+    },
+}
+
+fn parse_args() -> Result<StartupArgs> {
     parse_args_from(std::env::args().skip(1))
 }
 
-fn parse_args_from(
-    args: impl IntoIterator<Item = String>,
-) -> Result<(String, String, String, bool)> {
+fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<StartupArgs> {
+    let args: Vec<_> = args.into_iter().collect();
+    if args.first().is_some_and(|arg| arg == "--version") {
+        if args.len() == 1 {
+            return Ok(StartupArgs::Version);
+        }
+        anyhow::bail!("--version cannot be combined with other arguments");
+    }
+
     let mut positional = Vec::new();
     let mut bench_first_frame = false;
     for arg in args {
@@ -1033,12 +1068,12 @@ fn parse_args_from(
     if !is_safe_client_tty(&client_tty) {
         anyhow::bail!("invalid client tty");
     }
-    Ok((
+    Ok(StartupArgs::Run {
         client_tty,
-        positional.remove(0),
-        positional.remove(0),
+        session_id: positional.remove(0),
+        pane_id: positional.remove(0),
         bench_first_frame,
-    ))
+    })
 }
 
 fn now_secs() -> u64 {
@@ -1062,7 +1097,7 @@ fn install_panic_cleanup() {
 mod tests {
     use super::{
         ActionEffects, ConnectionMessageKind, ConnectionRoute, RuntimeTimer, SnapshotGeneration,
-        SnapshotInFlight, SnapshotSource, apply_event, bench_config_to_frame_message,
+        SnapshotInFlight, SnapshotSource, StartupArgs, apply_event, bench_config_to_frame_message,
         bench_first_frame_message, classify_connection_message, classify_snapshot_payload,
         cleanup_creation_task, clear_terminated_connection_state, dispatch_directives,
         next_runtime_timer, parse_args_from, preview_interval, process_action_effects, redraw,
@@ -2336,12 +2371,26 @@ mod tests {
                 "%3".to_owned(),
             ])
             .unwrap(),
-            (
-                "/dev/cu.usbserial-1".to_owned(),
-                "$7".to_owned(),
-                "%3".to_owned(),
-                false,
-            )
+            StartupArgs::Run {
+                client_tty: "/dev/cu.usbserial-1".to_owned(),
+                session_id: "$7".to_owned(),
+                pane_id: "%3".to_owned(),
+                bench_first_frame: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_version_before_identity_and_rejects_mixed_arguments() {
+        assert_eq!(
+            parse_args_from(["--version".to_owned()]).unwrap(),
+            StartupArgs::Version
+        );
+        assert!(
+            parse_args_from(["--version".to_owned(), "--bench-first-frame".to_owned()])
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be combined")
         );
     }
 

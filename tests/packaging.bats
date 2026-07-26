@@ -6,7 +6,8 @@ setup() {
   cp "$ROOT/pane-dash/Cargo.toml" "$ROOT/pane-dash/Cargo.lock" "$SCRATCH/pane-dash/"
   cp "$ROOT/pane-dash/src/main.rs" "$SCRATCH/pane-dash/src/"
   cp "$ROOT/README.md" "$SCRATCH/README.md"
-  cp "$ROOT/scripts/dash.sh" "$SCRATCH/scripts/"
+  cp "$ROOT/pane_dash.tmux" "$SCRATCH/"
+  cp "$ROOT/scripts/open.sh" "$ROOT/scripts/tag.sh" "$SCRATCH/scripts/"
   cp "$ROOT/docs/superpowers/specs/2026-07-22-v2-phase7-packaging-design.md" "$SCRATCH/docs/"
 
   FAKE_BIN="$BATS_TEST_TMPDIR/fake-bin"

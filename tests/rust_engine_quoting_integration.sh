@@ -41,9 +41,9 @@ EOF
   chmod +x "$1"
 }
 
-run_scenario() { # local|path
+run_scenario() { # local
   local mode=$1 socket wrapper log executed tmux_log
-  local local_sentinel="$TMP/$mode.local-sentinel" backtick_sentinel="$TMP/$mode.backtick-sentinel" engine_sentinel="$TMP/$mode.engine-sentinel" plugin path_dir='' binary hostile binding expected_tty expected_session expected_pane actual hostile_engine
+  local local_sentinel="$TMP/$mode.local-sentinel" backtick_sentinel="$TMP/$mode.backtick-sentinel" plugin binary hostile binding expected_tty expected_session expected_pane actual
   socket="$TMP/$mode.socket"; wrapper="$TMP/$mode-wrapper"; log="$TMP/$mode.argv"; executed="$TMP/$mode.executed"; tmux_log="$TMP/$mode.tmux.log"
   SOCKETS+=("$socket")
   mkdir -p "$wrapper"
@@ -60,37 +60,17 @@ EOF
   mkdir -p "$plugin/scripts"
   cp "$ROOT/pane_dash.tmux" "$plugin/"
   cp "$ROOT/scripts/open.sh" "$plugin/scripts/"
-  if [ "$mode" = local ]; then
-    mkdir -p "$plugin/bin"
-    binary="$plugin/bin/pane-dash"
-  else
-    # shellcheck disable=SC2016 # These command substitutions are hostile literal path bytes.
-    printf -v path_dir '%s/path space " $(touch %s) ;#`touch %s`' "$TMP" "$local_sentinel" "$backtick_sentinel"
-    mkdir -p "$path_dir"
-    binary="$path_dir/pane-dash"
-  fi
+  mkdir -p "$plugin/bin"
+  binary="$plugin/bin/pane-dash"
   write_recorder "$binary" "$log" "$executed"
 
   TMUX='' "$TMUX_BIN" -S "$socket" -f /dev/null new-session -d -s one 'exec cat'
   TMUX='' "$TMUX_BIN" -S "$socket" new-session -d -s two 'exec cat'
   start_clients "$socket"
 
-  # The substitution payload deliberately names an absolute, scenario-local path.
-  printf -v hostile_engine $'bad\n\033[31m;$(touch %s);`touch %s`\047' "$engine_sentinel" "$engine_sentinel"
-  ! [ -e "$engine_sentinel" ] || fail "$mode hostile engine sentinel existed before load"
-  TMUX='' "$TMUX_BIN" -S "$socket" set-option -g @pane-dash-engine "$hostile_engine"
-  TMUX='' PATH="$wrapper:$path_dir:$PATH" "$plugin/pane_dash.tmux"
-  grep -Fqx $'display-message\037pane-dash: invalid @pane-dash-engine value; using Rust-first resolution\037' "$tmux_log" || fail "$mode hostile engine warning"
-  ! grep -F "$engine_sentinel" "$tmux_log" || fail "$mode hostile engine payload echoed"
-  ! [ -e "$engine_sentinel" ] || fail "$mode hostile engine executed during load"
-  TMUX='' "$TMUX_BIN" -S "$socket" set-option -gu @pane-dash-engine
-  TMUX='' PATH="$wrapper:$path_dir:$PATH" "$plugin/pane_dash.tmux"
+  TMUX='' PATH="$wrapper:$PATH" "$plugin/pane_dash.tmux"
 
   binding="$(TMUX='' "$TMUX_BIN" -S "$socket" list-keys -T prefix | awk '$4 == "D" { print; exit }')"
-  if [ "$mode" = path ]; then
-    [[ "$binding" == *"'/"* ]] || fail "$mode binding omitted absolute binary"
-    [[ "$binding" == *'/pane-dash'* ]] || fail "$mode binding omitted pane-dash filename"
-  fi
   [[ "$binding" != *dash.sh* ]] || fail "$mode unexpectedly bound legacy dashboard"
   ! [ -e "$local_sentinel" ] || fail "$mode dollar command substitution executed"
   ! [ -e "$backtick_sentinel" ] || fail "$mode backtick substitution executed"
@@ -106,11 +86,9 @@ EOF
   [ -e "$executed" ] || fail "$mode recorder marker did not prove invocation"
   binding="$(TMUX='' "$TMUX_BIN" -S "$socket" list-keys -T prefix | awk '$4 == "D" { print; exit }')"
   [[ "$binding" != *dash.sh* ]] || fail "$mode runtime failure rebound dashboard"
-  ! [ -e "$engine_sentinel" ] || fail "$mode hostile engine executed during key routing"
   ! [ -e "$local_sentinel" ] || fail "$mode substitution executed on launch"
   ! [ -e "$backtick_sentinel" ] || fail "$mode backtick executed on launch"
   printf 'ok: hostile %s route captured exact second-client argv\n' "$mode"
 }
 
 run_scenario local
-run_scenario path

@@ -12,7 +12,7 @@ CLIENT2_PID=""
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 cleanup() {
-  kill "$CLIENT1_PID" "$CLIENT2_PID" 2>/dev/null || true
+  kill -- "-$CLIENT1_PID" "-$CLIENT2_PID" 2>/dev/null || true
   wait "$CLIENT1_PID" 2>/dev/null || true
   wait "$CLIENT2_PID" 2>/dev/null || true
   TMUX='' "$TMUX_BIN" -L "$SOCK" kill-server 2>/dev/null || true
@@ -39,18 +39,16 @@ chmod +x "$WRAPPER/tmux"
 
 TMUX='' PATH="$WRAPPER:$PATH" "$TMUX_BIN" -L "$SOCK" -f /dev/null new-session -d -s one 'sleep 120'
 TMUX='' PATH="$WRAPPER:$PATH" "$TMUX_BIN" -L "$SOCK" new-session -d -s two 'sleep 120'
-absent_engine="$(TMUX='' "$TMUX_BIN" -L "$SOCK" show-option -gq @pane-dash-engine)"
-[[ -z "$absent_engine" ]] || fail "absent engine serialized as [$absent_engine]"
-TMUX='' "$TMUX_BIN" -L "$SOCK" set-option -g @pane-dash-engine ''
-empty_engine="$(TMUX='' "$TMUX_BIN" -L "$SOCK" show-option -gq @pane-dash-engine)"
-[[ "$empty_engine" = "@pane-dash-engine ''" ]] || fail "explicit empty serialized as [$empty_engine]"
-TMUX='' "$TMUX_BIN" -L "$SOCK" set-option -gu @pane-dash-engine
 TMUX='' PATH="$WRAPPER:$PATH" bash "$PLUGIN/pane_dash.tmux"
 
-{ sleep 2; printf '\002'; sleep 118; } | TMUX='' script -q /dev/null "$TMUX_BIN" -L "$SOCK" attach-session -t one >/dev/null 2>&1 &
-CLIENT1_PID=$!
-{ sleep 120; } | TMUX='' script -q /dev/null "$TMUX_BIN" -L "$SOCK" attach-session -t two >/dev/null 2>&1 &
-CLIENT2_PID=$!
+start_client() { # variable session input script
+  python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    bash -c "$3 | exec script -q /dev/null \"$TMUX_BIN\" -L \"$SOCK\" attach-session -t \"$2\" >/dev/null 2>&1" &
+  printf -v "$1" '%s' "$!"
+}
+
+start_client CLIENT1_PID one "{ sleep 2; printf '\\002'; sleep 118; }"
+start_client CLIENT2_PID two '{ sleep 120; }'
 
 for _ in $(seq 1 30); do
   client_count="$(TMUX='' "$TMUX_BIN" -L "$SOCK" list-clients 2>/dev/null | wc -l | tr -d ' ')"

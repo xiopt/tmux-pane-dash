@@ -28,6 +28,10 @@ path = "tests/creation_integration.rs"
 name = "config_startup"
 path = "tests/config_startup.rs"
 
+[[test]]
+name = "version"
+path = "tests/version.rs"
+
 [dependencies]
 ansi-to-tui = "8.0.1"
 anyhow = "1"

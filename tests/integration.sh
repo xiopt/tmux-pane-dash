@@ -61,22 +61,14 @@ T set-option -pu -t "$pane" @pane_dash_status
   || fail "pane option unset"
 pass "pane user options"
 
-# 3. list.sh against the real server: default grouping emits a session header and child row
-T set-option -p -t "$pane" @pane_dash_tag itest
-row="$(TMUX='' PATH="$PATH" bash -c "cd '$ROOT' && tmux() { command tmux -L '$SOCK' \"\$@\"; }; export -f tmux; scripts/list.sh")"
-[ "$(printf '%s\n' "$row" | wc -l | tr -d ' ')" = "2" ] || fail "list.sh grouped row count"
-printf '%s\n' "$row" | sed -n '1p' | grep -Eq '^\$[0-9]+\t' || fail "list.sh session header key"
-printf '%s\n' "$row" | sed -n '2p' | grep -q "^$pane	" || fail "list.sh pane id field"
-pass "list.sh against real server"
-
-# 4. capture: normal vs alternate screen
+# 3. capture: normal vs alternate screen
 T send-keys -t "$pane" 'printf NORMALMARKER; sleep 0.2' Enter
 sleep 1
 T capture-pane -ep -t "$pane" | grep -q NORMALMARKER || fail "normal capture"
 [ "$(T display-message -p -t "$pane" '#{alternate_on}')" = "0" ] || fail "alternate_on flag 0"
 pass "capture normal screen"
 
-# 5. switch-client requires a client. A script(1)-backed PTY is not reliable
+# 4. switch-client requires a client. A script(1)-backed PTY is not reliable
 #    here because this non-interactive test runner closes its stdin, so assert
 #    tmux's documented detached-server failure precisely instead.
 # Use an unconfigured shell so this timing gate measures tmux delivery, not
@@ -93,7 +85,7 @@ case "$switch_error" in
 esac
 pass "switch-client detached failure"
 
-# 6. send-keys -l literal: C-c must arrive as text, not as a key
+# 5. send-keys -l literal: C-c must arrive as text, not as a key
 T send-keys -t "$pane_b" cat Enter
 wait_for "cat did not start" "$pane_b" pane_has_command "$pane_b" cat
 T send-keys -l -t "$pane_b" -- 'C-c'

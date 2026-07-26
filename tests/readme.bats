@@ -31,19 +31,15 @@ check_requirements() {
   printf '%s\n' "$rows" | grep -Fxq '| tmux | >=3.6 | Always; v2 wire-format support floor |' || return
   printf '%s\n' "$rows" | grep -Fxq '| Rust + Cargo | toolchain supporting Rust edition 2024 | Source build only |' || return
   printf '%s\n' "$rows" | grep -Fxq '| make + standard `install` utility | Available locally | Source packaging |' || return
-  printf '%s\n' "$rows" | grep -Fxq '| fzf | >=0.73.0 | Explicit legacy engine or missing-binary fallback only |' || return
   printf '%s\n' "$rows" | grep -Fxq '| OpenCode | optional | Companion status producer only |'
 }
 
 check_legacy_drift() {
-  local file=$1 requirements options status fzf_row obsolete
-  fzf_row='| fzf | >=0.73.0 | Explicit legacy engine or missing-binary fallback only |'
+  local file=$1 requirements options status obsolete
   requirements="$(section "$file" Requirements)"
   options="$(section "$file" 'tmux options')"
   status="$(section "$file" 'Status legend')"
 
-  [ "$(printf '%s\n' "$requirements" | grep -Fxc -- "$fzf_row")" -eq 1 ] || return
-  [ "$(printf '%s\n' "$requirements" | grep -Ec '^\| fzf \|')" -eq 1 ] || return
   ! grep -Eiq '^\| tmux \| .*3\.2' <<<"$requirements" || return
   ! grep -Eq '^\| `⊘ stale` \|.*~' <<<"$status" || return
   ! grep -Fq '✖' "$file" || return
@@ -72,7 +68,6 @@ check_options() {
     '| `@pane-dash-stale-secs` | `60` | Positive heartbeat staleness threshold; invalid or nonpositive uses default |' \
     '| `@pane-dash-new-command` | `opencode` | Initial command for new panes; explicit empty creates a plain pane and sends no Enter |' \
     '| `@pane-dash-theme` | `dark` | `dark`, `light`, or `terminal-native`; invalid or empty warns and uses dark before TOML |' \
-    '| `@pane-dash-engine` | absent = Rust-first | `rust`, deprecated `fzf`, or absent; explicit empty is invalid |' \
     '| `@pane_dash_group` | `1` | `1` grouped, `0` flat; shared server state updated by `s` |'; do
     require_row "$file" "$row" || return
   done
@@ -217,8 +212,7 @@ PY
   check_keys "$README"
 }
 
-@test "engine and config policies include exact contracts" {
-  check_engine_policy "$README"
+@test "config policy includes exact contracts" {
   check_config "$README"
 }
 
@@ -279,9 +273,6 @@ CASES
   ! check_status "$mutated"
 
   cp "$README" "$mutated"
-  replace_once "$mutated" 'removed no earlier than v3.0' 'removed in v2.1'
-  ! check_engine_policy "$mutated" 3>/dev/null
-
   cp "$README" "$mutated"
   replace_once "$mutated" 'pane-dash intentionally does not paint a terminal background. The `light` theme expects a light terminal background. On a dark terminal background, use `dark` or `terminal-native`; selecting `light` may make dark foreground text appear blank or low contrast.' ''
   ! check_config "$mutated" 3>/dev/null
