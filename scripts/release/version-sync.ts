@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises"
 import { join, relative } from "node:path"
+import { TAG, VERSION } from "./contracts"
 
 type JsonRecord = Record<string, unknown>
 
@@ -25,13 +26,14 @@ async function readJson(path: string): Promise<JsonRecord | undefined> {
 
 async function packageVersion(path: string, display: string, version: string, mismatches: string[]) {
   const pkg = await readJson(path)
-  if (pkg === undefined) return
+  if (pkg === undefined) {
+    mismatches.push(`${display}: missing`)
+    return
+  }
   if (pkg.version !== version) mismatches.push(`${display}: version ${String(pkg.version)} !== VERSION ${version}`)
 }
 
-async function cargoLockVersion(path: string): Promise<string | undefined> {
-  const lock = await readText(path)
-  if (lock === undefined) return undefined
+function cargoLockVersion(lock: string): string | undefined {
   const match = /\[\[package\]\]\s+name = "pane-dash"\s+version = "([^"]+)"/.exec(lock)
   return match?.[1]
 }
@@ -82,13 +84,21 @@ export async function inspectVersions(root: string): Promise<VersionInspection> 
   const version = versionText?.endsWith("\n") ? versionText.slice(0, -1) : versionText ?? ""
   const tag = `v${version}`
   const mismatches: string[] = []
+  if (versionText === undefined) mismatches.push("VERSION: missing")
+  if (VERSION !== version) mismatches.push(`scripts/release/contracts.ts: VERSION ${VERSION} !== VERSION ${version}`)
+  if (TAG !== tag) mismatches.push(`scripts/release/contracts.ts: TAG ${TAG} !== ${tag}`)
 
   await packageVersion(join(root, "package.json"), "package.json", version, mismatches)
   const cargoToml = await readText(join(root, "pane-dash", "Cargo.toml"))
   const cargoVersion = /^version = "([^"]+)"$/m.exec(cargoToml ?? "")?.[1]
-  if (cargoToml !== undefined && cargoVersion !== version) mismatches.push(`pane-dash/Cargo.toml: version ${String(cargoVersion)} !== VERSION ${version}`)
-  const lockVersion = await cargoLockVersion(join(root, "pane-dash", "Cargo.lock"))
-  if (lockVersion !== undefined && lockVersion !== version) mismatches.push(`pane-dash/Cargo.lock: pane-dash version ${lockVersion} !== VERSION ${version}`)
+  if (cargoToml === undefined) mismatches.push("pane-dash/Cargo.toml: missing")
+  else if (cargoVersion !== version) mismatches.push(`pane-dash/Cargo.toml: version ${String(cargoVersion)} !== VERSION ${version}`)
+  const cargoLock = await readText(join(root, "pane-dash", "Cargo.lock"))
+  if (cargoLock === undefined) mismatches.push("pane-dash/Cargo.lock: missing")
+  else {
+    const lockVersion = cargoLockVersion(cargoLock)
+    if (lockVersion !== version) mismatches.push(`pane-dash/Cargo.lock: pane-dash version ${String(lockVersion)} !== VERSION ${version}`)
+  }
 
   for (const path of ["opencode-plugin/package.json", "packages/tmux-pane-dash/package.json"]) {
     const pkg = await readJson(join(root, path))
