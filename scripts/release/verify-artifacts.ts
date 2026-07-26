@@ -2,8 +2,8 @@ import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { gunzipSync } from "node:zlib"
-import { ARCHIVE_PAYLOAD, RELEASE_ASSETS, TAG_COMMIT, TARGETS } from "./contracts"
-import { canonicalJson, sha256, sourceDateEpoch } from "./canonical-json"
+import { ARCHIVE_PAYLOAD, RELEASE_ASSETS, TAG, TAG_COMMIT, TARGETS } from "./contracts"
+import { canonicalJson, sha256 } from "./canonical-json"
 import { inspectArchive } from "./archive"
 import { inspectBinary } from "./inspect-binary"
 
@@ -47,14 +47,22 @@ async function runtimeSmoke(binary: string): Promise<void> {
   }
 }
 
-async function tagEpoch(tag: string): Promise<number> {
+async function tagEpoch(): Promise<number> {
   const git = { run: async (args: string[]) => {
     const result = await command(["git", ...args])
     if (result.code !== 0) throw new Error(result.stderr.trim())
     return result.stdout
   } }
   const expected = await git.run(["rev-parse", `${TAG_COMMIT}^{commit}`])
-  return sourceDateEpoch(git, tag, expected.trim())
+  const expectedCommit = expected.trim()
+  const timestamp = await git.run(["show", "-s", "--format=%ct", expectedCommit])
+  if (!/^[0-9]+\n$/.test(timestamp)) throw new Error("tag commit has invalid committer timestamp")
+  const tag = await command(["git", "rev-parse", "--verify", "--quiet", `refs/tags/${TAG}`])
+  if (tag.code === 0) {
+    const observed = (await git.run(["rev-parse", `${TAG}^{commit}`])).trim()
+    if (observed !== expectedCommit) throw new Error(`tag ${TAG} does not resolve to supplied tag commit ${expectedCommit}`)
+  }
+  return Number(timestamp)
 }
 
 export async function verifyReleaseDirectory(path: string, expectedEpoch?: number): Promise<void> {
@@ -63,7 +71,7 @@ export async function verifyReleaseDirectory(path: string, expectedEpoch?: numbe
   const releaseBytes = await readFile(join(path, "release-manifest.json")); const sums = await readFile(join(path, "SHA256SUMS")); const release = parseJson(releaseBytes)
   if (!hasExactKeys(release, ["schemaVersion", "repository", "version", "tag", "assets"]) || !releaseBytes.equals(Buffer.from(canonicalJson(release))) || release.schemaVersion !== 1 || release.repository !== "xiopt/tmux-pane-dash" || release.version !== "0.1.0" || release.tag !== "v0.1.0" || !hasExactKeys(release.assets, ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"])) throw new Error("invalid release manifest")
   if (Object.keys(release.assets as object).join(",") !== "darwin-arm64,darwin-x64,linux-arm64,linux-x64") throw new Error("release manifest keys are not exact")
-  const epoch = expectedEpoch ?? await tagEpoch(release.tag as string)
+  const epoch = expectedEpoch ?? await tagEpoch()
   const checksumLines: Array<{ asset: string; line: string }> = []
   for (const [key, target] of Object.entries(TARGETS)) {
     const asset = (release.assets as Record<string, Record<string, unknown>>)[key]; const archive = await readFile(join(path, target.asset)); const info = await stat(join(path, target.asset))

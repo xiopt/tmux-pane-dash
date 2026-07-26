@@ -99,14 +99,38 @@ test("verifier rejects a release tag that no longer resolves to the expected com
     await writeFile(git, `#!/bin/sh
 case "$*" in
   'rev-parse 7bc976a^{commit}') printf '%s\\n' expected-release-commit ;;
+  'show -s --format=%ct expected-release-commit') printf '%s\\n' ${epoch} ;;
+  'rev-parse --verify --quiet refs/tags/v0.1.0') printf '%s\\n' release-tag-ref ;;
   'rev-parse v0.1.0^{commit}') printf '%s\\n' moved-release-tag ;;
-  'show -s --format=%ct moved-release-tag') printf '%s\\n' ${epoch} ;;
   *) exit 1 ;;
 esac
 `)
     await chmod(git, 0o755)
     process.env.PATH = `${bin}:${previousPath}`
     await expect(verifyReleaseDirectory(root)).rejects.toThrow("tag v0.1.0 does not resolve to supplied tag commit")
+  } finally {
+    process.env.PATH = previousPath
+    await rm(root, { recursive: true, force: true })
+    await rm(bin, { recursive: true, force: true })
+  }
+})
+
+test("verifier uses the expected commit epoch before the release tag exists", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pane-dash-release-")), bin = await mkdtemp(join(tmpdir(), "pane-dash-git-"))
+  const git = join(bin, "git")
+  const previousPath = process.env.PATH
+  try {
+    await buildRelease(root)
+    await writeFile(git, `#!/bin/sh
+case "$*" in
+  'rev-parse 7bc976a^{commit}') printf '%s\\n' expected-release-commit ;;
+  'show -s --format=%ct expected-release-commit') printf '%s\\n' ${epoch} ;;
+  *) exit 1 ;;
+esac
+`)
+    await chmod(git, 0o755)
+    process.env.PATH = `${bin}:${previousPath}`
+    await expect(verifyReleaseDirectory(root)).resolves.toBeUndefined()
   } finally {
     process.env.PATH = previousPath
     await rm(root, { recursive: true, force: true })
