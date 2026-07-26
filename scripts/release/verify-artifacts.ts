@@ -9,6 +9,7 @@ import { inspectBinary } from "./inspect-binary"
 
 const decoder = new TextDecoder()
 const parseJson = (bytes: Uint8Array) => JSON.parse(decoder.decode(bytes)) as Record<string, unknown>
+const hasExactKeys = (value: unknown, keys: readonly string[]) => typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
 
 function tarFiles(bytes: Uint8Array): Map<string, Uint8Array> {
   const tar = gunzipSync(bytes); const files = new Map<string, Uint8Array>()
@@ -52,30 +53,27 @@ async function tagEpoch(tag: string): Promise<number> {
     if (result.code !== 0) throw new Error(result.stderr.trim())
     return result.stdout
   } }
-  const resolved = await command(["git", "rev-parse", `${tag}^{commit}`])
-  if (resolved.code === 0) return sourceDateEpoch(git, tag, resolved.stdout.trim())
-  const timestamp = await git.run(["show", "-s", "--format=%ct", TAG_COMMIT])
-  if (!/^[0-9]+\n$/.test(timestamp)) throw new Error("tag commit has invalid committer timestamp")
-  return Number(timestamp)
+  const expected = await git.run(["rev-parse", `${TAG_COMMIT}^{commit}`])
+  return sourceDateEpoch(git, tag, expected.trim())
 }
 
 export async function verifyReleaseDirectory(path: string, expectedEpoch?: number): Promise<void> {
   const names = (await readdir(path)).sort((a, b) => Buffer.from(a).compare(Buffer.from(b)))
   if (names.length !== 6 || names.some((name) => !RELEASE_ASSETS.includes(name as never))) throw new Error("expected exactly six release assets")
   const releaseBytes = await readFile(join(path, "release-manifest.json")); const sums = await readFile(join(path, "SHA256SUMS")); const release = parseJson(releaseBytes)
-  if (!releaseBytes.equals(Buffer.from(canonicalJson(release))) || release.schemaVersion !== 1 || release.repository !== "xiopt/tmux-pane-dash" || release.version !== "0.1.0" || release.tag !== "v0.1.0" || typeof release.assets !== "object" || release.assets === null) throw new Error("invalid release manifest")
+  if (!hasExactKeys(release, ["schemaVersion", "repository", "version", "tag", "assets"]) || !releaseBytes.equals(Buffer.from(canonicalJson(release))) || release.schemaVersion !== 1 || release.repository !== "xiopt/tmux-pane-dash" || release.version !== "0.1.0" || release.tag !== "v0.1.0" || !hasExactKeys(release.assets, ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"])) throw new Error("invalid release manifest")
   if (Object.keys(release.assets as object).join(",") !== "darwin-arm64,darwin-x64,linux-arm64,linux-x64") throw new Error("release manifest keys are not exact")
   const epoch = expectedEpoch ?? await tagEpoch(release.tag as string)
   const checksumLines: Array<{ asset: string; line: string }> = []
   for (const [key, target] of Object.entries(TARGETS)) {
     const asset = (release.assets as Record<string, Record<string, unknown>>)[key]; const archive = await readFile(join(path, target.asset)); const info = await stat(join(path, target.asset))
-    if (!asset || asset.target !== target.rustTarget || asset.asset !== target.asset || asset.url !== `https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/${target.asset}` || asset.sha256 !== sha256(archive) || asset.size !== info.size) throw new Error(`invalid release asset ${key}`)
+    if (!hasExactKeys(asset, ["target", "asset", "url", "sha256", "size"]) || asset.target !== target.rustTarget || asset.asset !== target.asset || asset.url !== `https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/${target.asset}` || asset.sha256 !== sha256(archive) || asset.size !== info.size) throw new Error(`invalid release asset ${key}`)
     await inspectArchive(join(path, target.asset), epoch); const files = tarFiles(archive); const internalBytes = files.get("manifest.json"), binary = files.get("bin/pane-dash")
     if (!internalBytes) throw new Error("missing internal manifest")
-    const internal = parseJson(internalBytes); if (!Buffer.from(internalBytes).equals(Buffer.from(canonicalJson(internal))) || internal.schemaVersion !== 1 || internal.product !== "tmux-pane-dash" || internal.version !== "0.1.0" || internal.target !== target.rustTarget || internal.asset !== target.asset || !Array.isArray(internal.files) || internal.files.length !== 7) throw new Error("invalid internal manifest")
+    const internal = parseJson(internalBytes); if (!hasExactKeys(internal, ["schemaVersion", "product", "version", "target", "asset", "files"]) || !Buffer.from(internalBytes).equals(Buffer.from(canonicalJson(internal))) || internal.schemaVersion !== 1 || internal.product !== "tmux-pane-dash" || internal.version !== "0.1.0" || internal.target !== target.rustTarget || internal.asset !== target.asset || !Array.isArray(internal.files) || internal.files.length !== 7) throw new Error("invalid internal manifest")
     const expected = ARCHIVE_PAYLOAD.filter(([name]) => name !== "manifest.json").map(([name]) => name).sort((a, b) => Buffer.from(a).compare(Buffer.from(b)))
     if ((internal.files as Array<Record<string, unknown>>).map((file) => file.path).join(",") !== expected.join(",")) throw new Error("internal manifest inventory is not exact")
-    for (const file of internal.files as Array<Record<string, unknown>>) { const content = files.get(file.path as string); if (!content || file.sha256 !== sha256(content) || file.size !== content.length || file.mode !== ARCHIVE_PAYLOAD.find(([name]) => name === file.path)?.[1]) throw new Error("invalid internal file record") }
+    for (const file of internal.files as Array<Record<string, unknown>>) { const content = files.get(file.path as string); if (!hasExactKeys(file, ["path", "sha256", "size", "mode"]) || !content || file.sha256 !== sha256(content) || file.size !== content.length || file.mode !== ARCHIVE_PAYLOAD.find(([name]) => name === file.path)?.[1]) throw new Error("invalid internal file record") }
     if (!binary) throw new Error("missing pane-dash binary")
     const binaryPath = join(path, `.${target.asset}.pane-dash`); await writeFile(binaryPath, binary); await chmod(binaryPath, 0o755)
     try { await inspectBinary(binaryPath, target.rustTarget); if (target.rustTarget === hostTarget()) await runtimeSmoke(binaryPath) } finally { await rm(binaryPath, { force: true }) }
