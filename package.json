@@ -6,6 +6,7 @@
   "workspaces": ["packages/*", "opencode-plugin"],
   "scripts": {
     "test": "bun test scripts/release/tests opencode-plugin/tests",
+    "build": "bun scripts/release/build.ts",
     "version:check": "bun scripts/release/version-sync.ts --check"
   }
 }
