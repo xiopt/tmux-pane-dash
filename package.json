@@ -1,0 +1,11 @@
+{
+  "name": "tmux-pane-dash-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "bun@1.3.14",
+  "workspaces": ["packages/*", "opencode-plugin"],
+  "scripts": {
+    "test": "bun test scripts/release/tests opencode-plugin/tests",
+    "version:check": "bun scripts/release/version-sync.ts --check"
+  }
+}

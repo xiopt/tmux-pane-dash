@@ -1,6 +1,25 @@
 {
-  "name": "pane-dash-opencode-plugin",
-  "private": true,
+  "name": "@xiopt/pane-dash-opencode",
+  "version": "0.1.0",
   "type": "module",
-  "scripts": { "test": "bun test" }
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./server": "./dist/index.js"
+  },
+  "files": ["dist/index.js", "README.md", "LICENSE"],
+  "engines": {
+    "opencode": ">=1.17.20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiopt/tmux-pane-dash.git"
+  },
+  "homepage": "https://github.com/xiopt/tmux-pane-dash#readme",
+  "bugs": {
+    "url": "https://github.com/xiopt/tmux-pane-dash/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

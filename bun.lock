@@ -1,0 +1,16 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "tmux-pane-dash-workspace",
+    },
+    "opencode-plugin": {
+      "name": "@xiopt/pane-dash-opencode",
+      "version": "0.1.0",
+    },
+  },
+  "packages": {
+    "@xiopt/pane-dash-opencode": ["@xiopt/pane-dash-opencode@workspace:opencode-plugin"],
+  }
+}
