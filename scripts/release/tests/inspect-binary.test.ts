@@ -22,3 +22,14 @@ test("Linux inspection rejects interpreter and dynamic dependencies", async () =
     await expect(inspectBinary(elf, "aarch64-unknown-linux-musl")).resolves.toBeUndefined()
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test("Linux inspection rejects DT_NEEDED entries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pane-dash-binary-"))
+  try {
+    const elf = new Uint8Array(136), view = new DataView(elf.buffer)
+    elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0); view.setUint16(18, 183, true); view.setBigUint64(32, 64n, true); view.setUint16(54, 56, true); view.setUint16(56, 1, true)
+    view.setUint32(64, 2, true); view.setBigUint64(72, 120n, true); view.setBigUint64(96, 16n, true); view.setBigUint64(120, 1n, true)
+    const binary = join(root, "binary"); await writeFile(binary, elf)
+    await expect(inspectBinary(binary, "aarch64-unknown-linux-musl")).rejects.toThrow("DT_NEEDED")
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

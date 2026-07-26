@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { gunzipSync, gzipSync } from "node:zlib"
 import { buildArchive, inspectArchive } from "../archive"
 import { TARGETS } from "../contracts"
 
@@ -22,5 +23,19 @@ test("archive inventory and metadata are exact and reproducible", async () => {
       ["VERSION", "file", "0644"], ["manifest.json", "file", "0644"],
     ])
     expect(await readFile(a)).toEqual(await readFile(b))
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test("archive inspection rejects non-normalized header metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pane-dash-archive-"))
+  try {
+    await mkdir(join(root, "scripts"), { recursive: true })
+    for (const path of ["pane_dash.tmux", "README.md", "LICENSE", "VERSION", "scripts/open.sh", "scripts/tag.sh"]) await writeFile(join(root, path), `${path}\n`)
+    const binary = join(root, "pane-dash"), archive = join(root, "archive.tar.gz")
+    await writeFile(binary, new Uint8Array([0xcf, 0xfa, 0xed, 0xfe, 12, 0, 0, 1]))
+    await buildArchive({ target: TARGETS["darwin-arm64"].rustTarget, binary, output: archive, epoch: 1721740800, root })
+    const tar = gunzipSync(await readFile(archive)); tar.set(new TextEncoder().encode("0000001\0"), 108)
+    await writeFile(archive, gzipSync(tar, { mtime: 0, filename: "" }))
+    await expect(inspectArchive(archive)).rejects.toThrow("metadata")
   } finally { await rm(root, { recursive: true, force: true }) }
 })

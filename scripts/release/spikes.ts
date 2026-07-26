@@ -2,7 +2,7 @@ import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, realpath, rm, stat, w
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
-import { DEBIAN_PLATFORM_MANIFESTS, OPENCODE_PACKAGE_FILES, RUST_ALPINE_BUILDERS, TMUX_RUNTIME } from "./contracts"
+import { DEBIAN_PLATFORM_MANIFESTS, OPENCODE_PACKAGE_FILES, RUST_ALPINE_BUILDERS, TMUX_RUNTIME, VERSION } from "./contracts"
 import { startLocalRegistry, type LocalPackage } from "./local-registry"
 
 export type MuslTarget = "aarch64-unknown-linux-musl" | "x86_64-unknown-linux-musl"
@@ -786,6 +786,8 @@ export async function runMuslSpike(input: MuslSpikeInput): Promise<MuslSpikeResu
     const ldd = await runtime(`ldd ${binary} || true`)
     const lddOutput = `${ldd.stdout}${ldd.stderr}`
     if (!/(not a dynamic executable|statically linked)/i.test(lddOutput)) throw new Error(`ldd did not prove static binary: ${lddOutput.trim()}`)
+    const version = await runtime(`${binary} --version`)
+    if (version.stdout !== `pane-dash ${VERSION}\n` || version.stderr !== "") throw new Error("pane-dash version output is not exact")
     const tmuxOutput = (await runtime("tmux -V")).stdout
     if (!/^tmux 3\.(6|[7-9]|[1-9][0-9])(?:\D|$)/.test(tmuxOutput.trim())) throw new Error(`tmux 3.6 required, got ${tmuxOutput.trim() || "empty"}`)
 

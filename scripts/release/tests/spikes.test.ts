@@ -76,6 +76,7 @@ function defaultStdout(argv: readonly string[]): string {
   if (command.includes("readelf -l")) return "\n"
   if (command.includes("readelf -d")) return "\n"
   if (command.includes("ldd /work/")) return "\tnot a dynamic executable\n"
+  if (command.includes("--version")) return "pane-dash 0.1.0\n"
   if (command.includes("tmux -V")) return "tmux 3.6\n"
   if (command.includes("timeout 20")) return "pane-dash coldframe_ms=1.000\n"
   return ""
@@ -711,9 +712,12 @@ test("accepts ldd's static diagnostic when it is written to stderr", async () =>
   })
 })
 
-test("rejects a runtime platform, tmux version, or bounded smoke timeout", async () => {
+test("rejects a runtime platform, binary version, tmux version, or bounded smoke timeout", async () => {
   const arch = runner({ "uname -m": "aarch64\n" })
   await expect(runMuslSpike({ target: "x86_64-unknown-linux-musl", sourceRoot: root, runner: arch.runner })).rejects.toThrow("runtime uname")
+
+  const version = runner({ "/work/x86_64-unknown-linux-musl/release/pane-dash --version": "pane-dash 0.1.1\n" })
+  await expect(runMuslSpike({ target: "x86_64-unknown-linux-musl", sourceRoot: root, runner: version.runner })).rejects.toThrow("version output")
 
   const tmux = runner({ "tmux -V": "tmux 3.5\n" })
   await expect(runMuslSpike({ target: "x86_64-unknown-linux-musl", sourceRoot: root, runner: tmux.runner })).rejects.toThrow("tmux 3.6")

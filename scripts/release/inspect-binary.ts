@@ -22,5 +22,13 @@ export async function inspectBinary(path: string, target: RustTarget): Promise<v
   if (bytes.length < 64) throw new Error("truncated ELF header")
   const phoff = read64(bytes, 32, little), phentsize = read16(bytes, 54, little), phnum = read16(bytes, 56, little)
   if (phoff + phentsize * phnum > bytes.length) throw new Error("truncated ELF program headers")
-  for (let index = 0; index < phnum; index += 1) if (read32(bytes, phoff + index * phentsize, little) === 3) throw new Error("Linux binary has PT_INTERP")
+  for (let index = 0; index < phnum; index += 1) {
+    const offset = phoff + index * phentsize, type = read32(bytes, offset, little)
+    if (type === 3) throw new Error("Linux binary has PT_INTERP")
+    if (type === 2) {
+      const dynamicOffset = read64(bytes, offset + 8, little), dynamicSize = read64(bytes, offset + 32, little)
+      if (dynamicOffset + dynamicSize > bytes.length || dynamicSize % 16 !== 0) throw new Error("truncated ELF dynamic section")
+      for (let entry = dynamicOffset; entry < dynamicOffset + dynamicSize; entry += 16) if (read64(bytes, entry, little) === 1) throw new Error("Linux binary has DT_NEEDED")
+    }
+  }
 }

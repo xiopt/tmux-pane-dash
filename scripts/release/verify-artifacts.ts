@@ -1,9 +1,10 @@
-import { readFile, readdir, stat } from "node:fs/promises"
+import { readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { gunzipSync } from "node:zlib"
 import { ARCHIVE_PAYLOAD, RELEASE_ASSETS, TARGETS } from "./contracts"
 import { canonicalJson, sha256 } from "./canonical-json"
 import { inspectArchive } from "./archive"
+import { inspectBinary } from "./inspect-binary"
 
 const decoder = new TextDecoder()
 const parseJson = (bytes: Uint8Array) => JSON.parse(decoder.decode(bytes)) as Record<string, unknown>
@@ -24,12 +25,15 @@ export async function verifyReleaseDirectory(path: string): Promise<void> {
   for (const [key, target] of Object.entries(TARGETS)) {
     const asset = (release.assets as Record<string, Record<string, unknown>>)[key]; const archive = await readFile(join(path, target.asset)); const info = await stat(join(path, target.asset))
     if (!asset || asset.target !== target.rustTarget || asset.asset !== target.asset || asset.url !== `https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/${target.asset}` || asset.sha256 !== sha256(archive) || asset.size !== info.size) throw new Error(`invalid release asset ${key}`)
-    await inspectArchive(join(path, target.asset)); const files = tarFiles(archive); const internalBytes = files.get("manifest.json")
+    await inspectArchive(join(path, target.asset)); const files = tarFiles(archive); const internalBytes = files.get("manifest.json"), binary = files.get("bin/pane-dash")
     if (!internalBytes) throw new Error("missing internal manifest")
-    const internal = parseJson(internalBytes); if (!internalBytes.every((byte, index) => byte === canonicalJson(internal)[index]) || internal.schemaVersion !== 1 || internal.product !== "tmux-pane-dash" || internal.version !== "0.1.0" || internal.target !== target.rustTarget || internal.asset !== target.asset || !Array.isArray(internal.files) || internal.files.length !== 7) throw new Error("invalid internal manifest")
+    const internal = parseJson(internalBytes); if (!Buffer.from(internalBytes).equals(Buffer.from(canonicalJson(internal))) || internal.schemaVersion !== 1 || internal.product !== "tmux-pane-dash" || internal.version !== "0.1.0" || internal.target !== target.rustTarget || internal.asset !== target.asset || !Array.isArray(internal.files) || internal.files.length !== 7) throw new Error("invalid internal manifest")
     const expected = ARCHIVE_PAYLOAD.filter(([name]) => name !== "manifest.json").map(([name]) => name).sort((a, b) => Buffer.from(a).compare(Buffer.from(b)))
     if ((internal.files as Array<Record<string, unknown>>).map((file) => file.path).join(",") !== expected.join(",")) throw new Error("internal manifest inventory is not exact")
-    for (const file of internal.files as Array<Record<string, unknown>>) { const content = files.get(file.path as string); if (!content || file.sha256 !== sha256(content) || file.size !== content.length || !["0755", "0644"].includes(file.mode as string)) throw new Error("invalid internal file record") }
+    for (const file of internal.files as Array<Record<string, unknown>>) { const content = files.get(file.path as string); if (!content || file.sha256 !== sha256(content) || file.size !== content.length || file.mode !== ARCHIVE_PAYLOAD.find(([name]) => name === file.path)?.[1]) throw new Error("invalid internal file record") }
+    if (!binary) throw new Error("missing pane-dash binary")
+    const binaryPath = join(path, `.${target.asset}.pane-dash`); await writeFile(binaryPath, binary)
+    try { await inspectBinary(binaryPath, target.rustTarget) } finally { await rm(binaryPath, { force: true }) }
     checksumLines.push({ asset: target.asset, line: `${sha256(archive)}  ${target.asset}` })
   }
   if (decoder.decode(sums) !== checksumLines.sort((a, b) => Buffer.from(a.asset).compare(Buffer.from(b.asset))).map(({ line }) => line).join("\n") + "\n") throw new Error("invalid SHA256SUMS")
