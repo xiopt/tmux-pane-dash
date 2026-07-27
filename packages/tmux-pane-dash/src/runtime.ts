@@ -21,6 +21,17 @@ export type Dependencies = {
   timers?: TimerOps
   signals?: SignalOps
   spawn?: (path: string, args: readonly string[], options: { timeoutMs: number; env: Record<string, string>; maxOutputBytes: number }) => Promise<{ code: number; stdout: string; stderr: string }>
+  /** Internal test seams; production supplies process values only. */
+  env?: Record<string, string | undefined>
+  pid?: () => number
+  uid?: () => number
+  isPidAlive?: (pid: number) => boolean
+  randomBytes?: (size: number) => Uint8Array
+  journalEvent?: (event: string) => void
+  faultPhase?: { phase: string; boundary: "before" | "after" }
+  crashPhase?: string
+  collisionAfterMutation?: boolean
+  signal?: "HUP" | "INT" | "TERM"
 }
 
 function versionParts(version: string): readonly [number, number, number] {

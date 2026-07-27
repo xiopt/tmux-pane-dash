@@ -11,5 +11,5 @@ export function nodeDependencies(): Dependencies {
     const timeout = setTimeout(() => { timedOut = true; process.kill("SIGKILL") }, options.timeoutMs); timeout.unref()
     process.stdout.on("data", receive(stdout)); process.stderr.on("data", receive(stderr)); process.once("error", reject); process.once("close", (code) => { clearTimeout(timeout); if (overflow) reject(new Error("E_BINARY_OUTPUT")); else if (timedOut) reject(new Error("E_BINARY_TIMEOUT")); else resolve({ code: code ?? 1, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() }) })
   })
-  return { manifest: releaseManifest, platform: process.platform, arch: process.arch, executingVersion: releaseManifest.version, ...( { fs: nodeFsOps(), nowMs: Date.now, fetch: globalThis.fetch.bind(globalThis), spawn: child } as any) }
+  return { manifest: releaseManifest, platform: process.platform, arch: process.arch, executingVersion: releaseManifest.version, ...( { fs: nodeFsOps(), nowMs: Date.now, fetch: globalThis.fetch.bind(globalThis), spawn: child, env: process.env, pid: process.pid.bind(process), uid: () => process.getuid?.() ?? 0, isPidAlive: (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } } } as any) }
 }

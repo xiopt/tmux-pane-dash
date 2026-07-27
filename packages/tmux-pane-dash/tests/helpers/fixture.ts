@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { gzipSync } from "node:zlib"
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { nodeFsOps, type FsOps } from "../../src/fs"
@@ -46,6 +46,12 @@ export function releaseArchive(version = "0.1.0", target = record.target, name =
 }
 
 export function archiveRecord(bytes = releaseArchive()) { return { ...record, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") } }
+export async function transactionFixture(input: { alive?: boolean } = {}) {
+  const root = await mkdtemp(join(tmpdir(), "pane-dash-transaction-")), outside = await mkdtemp(join(tmpdir(), "pane-dash-outside-"))
+  const h = fixtureDependencies()
+  const deps = { ...h.deps, env: { XDG_DATA_HOME: root }, pid: () => 42, uid: () => process.getuid?.() ?? 0, isPidAlive: () => input.alive ?? false, randomBytes: (size: number) => new Uint8Array(size).fill(0xab), journalEvent: (event: string) => h.operations.push({ name: event, args: [] }) }
+  return { ...h, root: join(root, "tmux-pane-dash"), outside, deps, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }) } }
+}
 export async function installedFixture(version = "0.1.0") {
   const root = await mkdtemp(join(tmpdir(), "pane-dash-acquire-")), versionDirectory = join(root, version); await mkdir(versionDirectory, { recursive: true })
   for (const [path, [content, mode]] of payload) { const file = join(versionDirectory, path); await mkdir(join(file, ".."), { recursive: true }); await writeFile(file, content, { mode }) }
