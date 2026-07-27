@@ -8,6 +8,10 @@
     "test": "bun test scripts/release/tests opencode-plugin/tests packages/tmux-pane-dash/tests",
     "build": "bun scripts/release/build.ts",
     "version:check": "bun scripts/release/version-sync.ts --check",
-    "pack:check": "bun scripts/release/verify-artifacts.ts --packages"
+    "pack:check": "bun scripts/release/verify-artifacts.ts --packages",
+    "release:dry-run": "bun scripts/release/dry-run.ts"
+  },
+  "devDependencies": {
+    "sigstore": "4.1.1"
   }
 }

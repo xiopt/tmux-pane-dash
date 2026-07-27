@@ -5,6 +5,7 @@ import { gunzipSync, gzipSync } from "node:zlib"
 import { TAG } from "./contracts"
 
 export const SOURCE_ROOTS = [
+  ".github",
   ".gitignore",
   "LICENSE",
   "Makefile",
@@ -17,6 +18,7 @@ export const SOURCE_ROOTS = [
   "packages",
   "pane-dash",
   "pane_dash.tmux",
+  "release",
   "scripts",
   "spike",
   "tests",
@@ -34,6 +36,7 @@ export const SOURCE_EXECUTABLES = [
   "pane_dash.tmux",
   "scripts/open.sh",
   "scripts/release/clean-room.sh",
+  "scripts/release/public-smoke.sh",
   "scripts/tag.sh",
   "spike/lib.sh",
   "spike/perf/coldframe.sh",
@@ -122,7 +125,6 @@ function isGeneratedPath(path: string): boolean {
   const parts = path.split("/")
   const name = parts.at(-1) ?? ""
   if (parts.some((part) => [".git", ".cortexkit", "node_modules", ".npm", ".npm-cache", "npm-cache", "bun-cache", ".cache", "target"].includes(part))) return true
-  if (parts[0] === "release") return true
   if (parts.includes("dist")) return true
   if (parts[0] === "bin") return true
   if (name === ".DS_Store" || name.startsWith("._")) return true
@@ -132,7 +134,7 @@ function isGeneratedPath(path: string): boolean {
 }
 
 function isIgnorableTopLevel(name: string): boolean {
-  return name === ".git" || name === ".cortexkit" || name === "node_modules" || name === ".npm" || name === ".npm-cache" || name === "npm-cache" || name === "bun-cache" || name === "target" || name === "release" || name === "dist" || name === "bin" || name === ".DS_Store" || name.startsWith("._") || /\.(?:tar|tar\.gz|tgz|zip|sha256)$/i.test(name)
+  return name === ".git" || name === ".cortexkit" || name === "node_modules" || name === ".npm" || name === ".npm-cache" || name === "npm-cache" || name === "bun-cache" || name === "target" || name === "dist" || name === "bin" || name === ".DS_Store" || name.startsWith("._") || /\.(?:tar|tar\.gz|tgz|zip|sha256)$/i.test(name)
 }
 
 async function canonicalRoot(input: string): Promise<string> {
@@ -150,7 +152,6 @@ async function validateTopLevel(root: string): Promise<void> {
   for (const entry of entries) {
     if (isSensitivePath(entry.name)) fail(`sensitive source path: ${entry.name}`)
     if (rootSet.has(entry.name) || isIgnorableTopLevel(entry.name)) continue
-    if (entry.name === ".github") fail(".github is not part of the Task 13 source manifest")
     fail(`unlisted source root: ${entry.name}`)
   }
 }

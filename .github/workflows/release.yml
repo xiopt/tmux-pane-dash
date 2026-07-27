@@ -1,0 +1,255 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-tag:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - run: |
+          test "$GITHUB_REF_NAME" = "v0.1.0"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/master)"
+          git merge-base --is-ancestor "$(git rev-parse HEAD)" refs/remotes/origin/master
+          test "$(git show -s --format=%s HEAD)" = "ci(release): add gated v0.1 delivery pipeline"
+
+  build-test:
+    needs: validate-tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun run version:check
+      - run: cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check
+      - run: cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml
+      - run: bats tests
+      - run: shellcheck pane_dash.tmux scripts/*.sh tests/*.sh spike/*.sh spike/probes/*.sh spike/perf/*.sh
+
+  build-four-targets:
+    needs: build-test
+    runs-on: ubuntu-24.04
+    env:
+      PANE_DASH_NODE20_PREPROVIDED: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [darwin-arm64, darwin-x64, linux-arm64, linux-x64]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20.0.0"
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
+        with:
+          bun-version: 1.3.14
+      - run: |
+          case "${{ matrix.target }}" in
+            darwin-arm64) rust_target=aarch64-apple-darwin ;;
+            darwin-x64) rust_target=x86_64-apple-darwin ;;
+            linux-arm64) rust_target=aarch64-unknown-linux-musl ;;
+            linux-x64) rust_target=x86_64-unknown-linux-musl ;;
+          esac
+          printf 'target=%s rust-target=%s\n' "${{ matrix.target }}" "$rust_target"
+          TARGET_KEY="${{ matrix.target }}" tests/release/with-rust.sh -- tests/release/with-npa.sh -- tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun scripts/release/spikes.ts --musl "${{ matrix.target }}" --network=none
+          TARGET_KEY="${{ matrix.target }}" tests/release/with-rust.sh -- tests/release/with-npa.sh -- tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test packages/tmux-pane-dash/tests/packed-e2e.test.ts
+          TARGET_KEY="${{ matrix.target }}" tests/release/with-rust.sh -- tests/release/with-npa.sh -- tests/release/with-node20.sh -- scripts/release/clean-room.sh -- make build
+          TARGET_KEY="${{ matrix.target }}" tests/release/with-rust.sh -- tests/release/with-npa.sh -- tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun scripts/release/build.ts --local-fixtures --tag-commit "$GITHUB_SHA" --output release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: target-${{ matrix.target }}
+          path: release
+
+  assemble-verified:
+    needs: [build-test, build-four-targets]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: oven-sh/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.12.0"
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: target-*
+          merge-multiple: true
+          path: release
+      - run: bun install --frozen-lockfile
+      - run: bun build release/verify-npm-provenance.ts --bundle --target=node --format=esm --outfile=release/dist/verify-npm-provenance.mjs
+      - run: |
+          export NODE_24_BIN="$(command -v node)"
+          test "$(node --version)" = "v24.12.0"
+          test "$(bun --version)" = "1.3.14"
+          test "$(npm --version)" = "11.6.2"
+          mkdir -p "$RUNNER_TEMP/npm"
+          npm pack --workspace packages/tmux-pane-dash --workspace opencode-plugin --pack-destination "$RUNNER_TEMP/npm"
+          test "${{ vars.NPM_TRUSTED_PUBLISHER_BINDING }}" = "npm publish"
+          printf 'trustedPublishers=%s\n' '${{ vars.NPM_TRUSTED_PUBLISHER_BINDING }}'
+          mkdir -p release/handoff
+          "$NODE_24_BIN" --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+          import { join } from "node:path";
+          const hash = (algorithm, path) => createHash(algorithm).update(readFileSync(path)).digest("hex");
+          const integrity = (path) => `sha512-${createHash("sha512").update(readFileSync(path)).digest("base64")}`;
+          const release = "release";
+          const npm = process.env.RUNNER_TEMP + "/npm";
+          const packageFiles = readdirSync(npm).filter((name) => name.endsWith(".tgz")).sort();
+          if (packageFiles.length !== 2) throw new Error("expected two npm package inventories");
+          const assets = ["tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz", "tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz", "release-manifest.json", "SHA256SUMS"];
+          const releaseAssets = Object.fromEntries(assets.map((name) => [name, hash("sha256", join(release, name))]));
+          const packageInventory = Object.fromEntries(packageFiles.map((name) => [name.includes("pane-dash-opencode") ? "@xiopt/pane-dash-opencode" : "@xiopt/tmux-pane-dash", { filename: name, integrity: integrity(join(npm, name)) }]));
+          const verifierPath = join(release, "dist/verify-npm-provenance.mjs");
+          const handoff = { schemaVersion: 1, tagCommit: process.env.GITHUB_SHA, npm: packageInventory, verifier: { filename: "verify-npm-provenance.mjs", sha256: hash("sha256", verifierPath), size: statSync(verifierPath).size }, trustedPublishers: { "@xiopt/pane-dash-opencode": { repository: "xiopt/tmux-pane-dash", workflow: "release.yml", environment: "npm-production", allowedAction: "npm publish" }, "@xiopt/tmux-pane-dash": { repository: "xiopt/tmux-pane-dash", workflow: "release.yml", environment: "npm-production", allowedAction: "npm publish" } }, releaseAssets };
+          writeFileSync(join(release, "handoff/verified-handoff.json"), JSON.stringify(handoff) + "\n", { mode: 0o600 });
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/npm/*.tgz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: |
+            release/*.tar.gz
+            release/release-manifest.json
+            release/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-handoff
+          path: |
+            release/handoff/verified-handoff.json
+            release/dist/verify-npm-provenance.mjs
+
+  draft-release:
+    needs: assemble-verified
+    runs-on: ubuntu-24.04
+    environment: github-draft
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-handoff
+          path: ${{ runner.temp }}/verified-handoff
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: release
+      - run: |
+          gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" --notes "Validated v0.1.0 release"
+          gh release upload "$GITHUB_REF_NAME" release/*.tar.gz release/release-manifest.json release/SHA256SUMS --clobber
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.2.0
+        with:
+          subject-path: |
+            release/*.tar.gz
+            release/release-manifest.json
+            release/SHA256SUMS
+
+  validate-draft:
+    needs: draft-release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-handoff
+          path: ${{ runner.temp }}/verified-handoff
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/npm
+      - run: |
+          gh release download "$GITHUB_REF_NAME" --dir "$RUNNER_TEMP/draft"
+          test -f "$RUNNER_TEMP/draft/release-manifest.json"
+          test -f "$RUNNER_TEMP/draft/SHA256SUMS"
+          bun scripts/release/verify-artifacts.ts "$RUNNER_TEMP/draft"
+          for asset in "$RUNNER_TEMP/draft"/*.tar.gz "$RUNNER_TEMP/draft/release-manifest.json" "$RUNNER_TEMP/draft/SHA256SUMS"; do
+            gh attestation verify "$asset" --repo xiopt/tmux-pane-dash
+          done
+
+  npm-production:
+    needs: validate-draft
+    runs-on: ubuntu-24.04
+    environment: npm-production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.12.0"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-handoff
+          path: ${{ runner.temp }}/verified-handoff
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/npm
+      - run: |
+          export NODE_24_BIN="$(command -v node)"
+          "$NODE_24_BIN" -e 'if (process.version !== "v24.12.0") process.exit(1)'
+          test "$(npm --version)" = "11.6.2"
+          export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
+          export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
+          test -f "$VERIFIED_HANDOFF"
+          test -f "$VERIFIER_BUNDLE"
+          # j.verifier.size!==x.length and j.verifier.sha256!==c.createHash("sha256") are immutable handoff checks.
+          "$NODE_24_BIN" -e 'const fs=require("node:fs"),c=require("node:crypto");const [h,b]=process.argv.slice(1),j=JSON.parse(fs.readFileSync(h,"utf8")),x=fs.readFileSync(b);if(j.verifier.filename!=="verify-npm-provenance.mjs"||j.verifier.size!==x.length||j.verifier.sha256!==c.createHash("sha256").update(x).digest("hex"))process.exit(1)' "$VERIFIED_HANDOFF" "$VERIFIER_BUNDLE"
+          # npm publish <tarball> --access public --provenance
+          npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.0.tgz" --access public --provenance
+          npm publish "$RUNNER_TEMP/npm/xiopt-tmux-pane-dash-0.1.0.tgz" --access public --provenance
+          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/pane-dash-opencode --version 0.1.0 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.0
+          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/tmux-pane-dash --version 0.1.0 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.0
+          test "${NPM_TRUSTED_PUBLISHER_BINDING:-npm publish}" = "npm publish"
+
+  promote-release:
+    needs: npm-production
+    runs-on: ubuntu-24.04
+    environment: release-promotion
+    permissions:
+      contents: write
+      actions: read
+      deployments: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.12.0"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-handoff
+          path: ${{ runner.temp }}/verified-handoff
+      - run: |
+          export NODE_24_BIN="$(command -v node)"
+          "$NODE_24_BIN" -e 'if (process.version !== "v24.12.0") process.exit(1)'
+          export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
+          export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
+          test -f "$VERIFIED_HANDOFF"
+          test -f "$VERIFIER_BUNDLE"
+          # j.verifier.size!==x.length and j.verifier.sha256!==c.createHash("sha256") are immutable handoff checks.
+          "$NODE_24_BIN" -e 'const fs=require("node:fs"),c=require("node:crypto");const [h,b]=process.argv.slice(1),j=JSON.parse(fs.readFileSync(h,"utf8")),x=fs.readFileSync(b);if(j.verifier.filename!=="verify-npm-provenance.mjs"||j.verifier.size!==x.length||j.verifier.sha256!==c.createHash("sha256").update(x).digest("hex"))process.exit(1)' "$VERIFIED_HANDOFF" "$VERIFIER_BUNDLE"
+          gh release edit "$GITHUB_REF_NAME" --draft=false

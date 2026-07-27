@@ -4,7 +4,7 @@ set -euo pipefail
 set -m
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-MANIFEST=(.gitignore Makefile README.md pane_dash.tmux scripts opencode-plugin pane-dash tests)
+MANIFEST=(.github .gitignore LICENSE Makefile README.md VERSION bun.lock package.json docs opencode-plugin packages pane-dash pane_dash.tmux release scripts spike tests tools)
 scratch_root="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/pane-dash-source-package.XXXXXX")" && pwd -P)"
 archive="$scratch_root/pane-dash-source.tar"
 scratch="$scratch_root/extracted source [*] (meta)"
@@ -52,6 +52,8 @@ source_tar() {
     --exclude='.git' --exclude='.git/*' --exclude='*/.git' --exclude='*/.git/*' \
     --exclude='.cortexkit' --exclude='.cortexkit/*' --exclude='*/.cortexkit' --exclude='*/.cortexkit/*' \
     --exclude='pane-dash/target' --exclude='pane-dash/target/*' --exclude='*/target' --exclude='*/target/*' \
+    --exclude='*/dist' --exclude='*/dist/*' --exclude='release/dist' --exclude='release/dist/*' \
+    --exclude='node_modules' --exclude='*/node_modules' --exclude='*.tgz' --exclude='*.tar.gz' --exclude='*.sha256' \
     --exclude='bin/pane-dash' --exclude='*/bin/pane-dash' --exclude='.pane-dash.tmp.*' --exclude='*/.pane-dash.tmp.*' \
     --exclude='.DS_Store' --exclude='*/.DS_Store' --exclude='._*' --exclude='*/._*' \
     "$@" "${MANIFEST[@]}"
@@ -70,7 +72,7 @@ def forbidden(relative):
     parts = relative.split(os.sep)
     name = parts[-1]
     return (
-        any(part in {".git", ".cortexkit", "target"} for part in parts)
+        any(part in {".git", ".cortexkit", "target", "dist", "node_modules"} for part in parts)
         or name == ".DS_Store"
         or fnmatch.fnmatch(name, ".pane-dash.tmp.*")
         or fnmatch.fnmatch(name, "._*")
@@ -145,7 +147,7 @@ PY
 assert_no_forbidden_paths() {
   local forbidden
   forbidden="$(find "$extracted" \( \
-    -name .git -o -name .cortexkit -o -name target -o -name pane-dash -path '*/bin/pane-dash' -o \
+    -name .git -o -name .cortexkit -o -name target -o -name dist -o -name node_modules -o -name pane-dash -path '*/bin/pane-dash' -o \
     -name '.pane-dash.tmp.*' -o -name .DS_Store -o -name '._*' \
   \) -print -quit)"
   [ -z "$forbidden" ] || fail "source archive contains forbidden path $forbidden"
@@ -265,6 +267,22 @@ trap 'exit 143' TERM
 
 assert_terminate_and_reap_regressions
 
+for credential in GH_TOKEN GITHUB_TOKEN NPM_TOKEN NODE_AUTH_TOKEN; do
+  [ -z "${!credential:-}" ] || fail "credential environment is present: $credential"
+done
+
+warm_root="$scratch_root/bun-warm"
+warm_cache="$scratch_root/bun-cache"
+bun_bin="${BUN_BOOTSTRAP:-$(command -v bun || true)}"
+case "$bun_bin" in /*) [ -x "$bun_bin" ] || fail 'Bun bootstrap is not executable' ;; *) fail 'Bun 1.3.14 is required for the source package gate' ;; esac
+[ "$($bun_bin --version 2>/dev/null)" = "1.3.14" ] || fail 'Bun 1.3.14 is required for the source package gate'
+mkdir -p "$warm_root/packages/tmux-pane-dash" "$warm_root/opencode-plugin" "$warm_cache"
+cp "$ROOT/package.json" "$ROOT/bun.lock" "$warm_root/"
+cp "$ROOT/packages/tmux-pane-dash/package.json" "$warm_root/packages/tmux-pane-dash/"
+cp "$ROOT/opencode-plugin/package.json" "$warm_root/opencode-plugin/"
+BUN_INSTALL_CACHE_DIR="$warm_cache" "$bun_bin" install --frozen-lockfile --ignore-scripts --cwd "$warm_root" >/dev/null
+printf 'bun-cache=warm-pass\n'
+
 before="$(source_fingerprint)"
 generated_before="$(generated_output_metadata)"
 source_tar -cf "$archive"
@@ -276,9 +294,17 @@ extracted="$scratch"
 for expected in "${MANIFEST[@]}"; do
   [ -e "$extracted/$expected" ] || fail "source archive is missing $expected"
 done
-[ -f "$extracted/pane-dash/Cargo.lock" ] || fail 'source archive is missing Cargo.lock'
-[ -d "$extracted/pane-dash/src" ] || fail 'source archive is missing Rust source'
-assert_no_forbidden_paths
+  [ -f "$extracted/pane-dash/Cargo.lock" ] || fail 'source archive is missing Cargo.lock'
+  [ -d "$extracted/pane-dash/src" ] || fail 'source archive is missing Rust source'
+  for workflow in ci.yml opencode-weekly.yml release.yml; do
+    [ -f "$extracted/.github/workflows/$workflow" ] || fail "source archive is missing .github/workflows/$workflow"
+  done
+  [ -f "$extracted/release/verify-npm-provenance.ts" ] || fail 'source archive is missing the release verifier source'
+  [ -f "$extracted/release/tests/verify-npm-provenance.test.ts" ] || fail 'source archive is missing the release verifier test'
+  [ ! -e "$extracted/release/dist" ] || fail 'source archive contains generated release/dist'
+  assert_no_forbidden_paths
+  BUN_INSTALL_CACHE_DIR="$warm_cache" "$bun_bin" install --frozen-lockfile --offline --ignore-scripts --cwd "$extracted" >/dev/null
+  printf 'offline=bun-warm-cache-pass\n'
 
 mkdir -p "$sentinel_bin"
 for command in git curl wget nc; do
@@ -443,5 +469,6 @@ archive_bytes="$(wc -c < "$archive" | tr -d ' ')"
 archive_run_sha256="$(sha256_file "$archive")"
 content_manifest_sha256="$(content_manifest_sha256)"
 [ "$before" = "$content_manifest_sha256" ] || fail 'source packaging changed the explicit source content manifest'
+printf 'github=required-after-task14\n'
 printf 'source-package archive_bytes=%s archive_run_sha256=%s content_manifest_sha256=%s mode=0755 offline=warm-cache-pass\n' \
   "$archive_bytes" "$archive_run_sha256" "$content_manifest_sha256"

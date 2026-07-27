@@ -46,6 +46,7 @@ async function temporaryFixture(): Promise<string> {
 test("the source manifest names the approved roots and executable policy", async () => {
   expect(SOURCE_MANIFEST).toEqual(SOURCE_ROOTS)
   expect(SOURCE_ROOTS).toEqual([
+    ".github",
     ".gitignore",
     "LICENSE",
     "Makefile",
@@ -58,12 +59,14 @@ test("the source manifest names the approved roots and executable policy", async
     "packages",
     "pane-dash",
     "pane_dash.tmux",
+    "release",
     "scripts",
     "spike",
     "tests",
     "tools",
   ])
   expect(SOURCE_EXECUTABLES).toContain("scripts/release/clean-room.sh")
+  expect(SOURCE_EXECUTABLES).toContain("scripts/release/public-smoke.sh")
   expect(SOURCE_EXECUTABLES).toContain("tests/source_package.sh")
   expect(SOURCE_EXECUTABLES).not.toContain("packages/tmux-pane-dash/dist/cli.js")
 })
@@ -75,10 +78,15 @@ test("the checked-in tree includes committed source roots and docs but no genera
   for (const path of SOURCE_ROOTS) expect(paths.some((entry) => entry === path || entry.startsWith(`${path}/`))).toBe(true)
   expect(paths).toContain("docs/superpowers/specs/2026-07-23-v0.1-release-distribution-design.md")
   expect(paths).toContain("scripts/release/clean-room.sh")
+  expect(paths).toContain(".github/workflows/ci.yml")
+  expect(paths).toContain(".github/workflows/opencode-weekly.yml")
+  expect(paths).toContain(".github/workflows/release.yml")
+  expect(paths).toContain("release/verify-npm-provenance.ts")
+  expect(paths).toContain("release/tests/verify-npm-provenance.test.ts")
   expect(paths).toContain("packages/tmux-pane-dash/src/cli.ts")
   expect(paths).toContain("opencode-plugin/src/state.ts")
   expect(paths.some((path) => path.includes("/dist/") || path.endsWith("/target") || path.includes("/target/"))).toBe(false)
-  expect(paths.some((path) => path.startsWith(".github/") || path.startsWith("release/"))).toBe(false)
+  expect(paths.some((path) => path.startsWith("release/dist/") || path.startsWith("release\\dist\\"))).toBe(false)
 })
 
 test("source archives are byte-identical across roots, with canonical root, paths, modes, order, and mtime", async () => {
@@ -105,7 +113,7 @@ test("source archives are byte-identical across roots, with canonical root, path
   }
 })
 
-test("source archives omit generated output, Cargo target, GitHub, and npm cache paths", async () => {
+test("source archives omit generated output, Cargo target, release dist, and npm cache paths", async () => {
   const root = await temporaryFixture()
   const output = join(root, "source.tar.gz")
   try {
@@ -119,9 +127,14 @@ test("source archives omit generated output, Cargo target, GitHub, and npm cache
     const paths = (await inspectSourceArchive(output, { tag: "v0.1.0", epoch: 1_721_728_000 })).map((entry) => entry.path)
     expect(paths.some((path) => path.includes("/dist/") || path.includes("/target/") || path.includes(".npm-cache"))).toBe(false)
 
-    await mkdir(join(root, ".github"), { recursive: true })
-    await writeFile(join(root, ".github", "workflow.yml"), "generated workflow\n")
-    await expect(buildSourceArchive({ root, output, tag: "v0.1.0", epoch: 1_721_728_000 })).rejects.toThrow(".github")
+    await mkdir(join(root, ".github", "workflows"), { recursive: true })
+    await writeFile(join(root, ".github", "workflows", "ci.yml"), "source workflow\n")
+    await mkdir(join(root, "release", "dist"), { recursive: true })
+    await writeFile(join(root, "release", "dist", "generated.mjs"), "generated\n")
+    await buildSourceArchive({ root, output, tag: "v0.1.0", epoch: 1_721_728_000 })
+    const updatedPaths = (await inspectSourceArchive(output, { tag: "v0.1.0", epoch: 1_721_728_000 })).map((entry) => entry.path)
+    expect(updatedPaths).toContain("tmux-pane-dash-v0.1.0/.github/workflows/ci.yml")
+    expect(updatedPaths.some((path) => path.includes("/release/dist/"))).toBe(false)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
