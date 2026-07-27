@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { dirname, join, relative, resolve } from "node:path"
 import { parseJsonc } from "../config-opencode"
-import { managedTmuxBlock, MANAGED_TMUX_BINDING_KEYS } from "../config-tmux"
+import { managedTmuxBlock } from "../config-tmux"
 import { managedRoot, type OwnershipRecord } from "../ownership"
 import type { Dependencies, DoctorFs } from "../runtime"
 
@@ -54,16 +54,16 @@ async function loadOwnership(fs: DoctorFs, installRoot: string): Promise<Ownersh
 function inRoot(installRoot: string, path: string): boolean { const rel = relative(resolve(installRoot), resolve(path)); return rel !== "" && !rel.startsWith("..") && !rel.includes("/../") }
 function tmuxVersion(value: string): boolean { const match = /^tmux\s+(\d+)\.(\d+)(?:\.|[a-z]|\s|$)/.exec(value.trim()); return !!match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 6) }
 async function run(deps: Dependencies, path: string, args: readonly string[]) { if (!deps.spawn) throw new Error("child execution unavailable"); return deps.spawn(path, args, { timeoutMs: 5_000, env: childEnv, maxOutputBytes: 8 * 1024 }) }
-type TmuxBinding = { key: string; action: string }
+type TmuxBinding = { action: string }
 function tmuxBindings(output: string): TmuxBinding[] {
   return output.split("\n").flatMap(line => {
-    const match = /^bind(?:-key)?\s+-T\s+prefix\s+(\S+)\s+(.+)$/.exec(line)
-    return match ? [{ key: match[1]!, action: match[2]! }] : []
+    const match = /^bind(?:-key)?\s+-T\s+prefix\s+\S+\s+(.+)$/.exec(line)
+    return match ? [{ action: match[1]! }] : []
   })
 }
-function hasSingleBinding(bindings: readonly TmuxBinding[], key: string, predicate: (action: string) => boolean): boolean {
-  const records = bindings.filter(binding => binding.key === key)
-  return records.length === 1 && predicate(records[0]!.action)
+function hasDistinctBindings(bindings: readonly TmuxBinding[], predicates: readonly ((action: string) => boolean)[]): boolean {
+  const matches = predicates.map(predicate => bindings.flatMap((binding, index) => predicate(binding.action) ? [index] : []))
+  return matches.every(records => records.length === 1) && new Set(matches.flat()).size === predicates.length
 }
 
 export async function doctor(deps: Dependencies): Promise<DoctorReport> {
@@ -129,10 +129,12 @@ export async function doctor(deps: Dependencies): Promise<DoctorReport> {
       if (result.code !== 0) checks.push(check("tmux.server", "warning", "W_TMUX_SERVER", "tmux server is not running"))
        else {
          const current = join(installRoot, "current"), bindings = tmuxBindings(result.stdout)
-         const dashboard = hasSingleBinding(bindings, MANAGED_TMUX_BINDING_KEYS.dashboard, action => action.includes("run-shell") && action.includes(`${current}/scripts/open.sh`))
-         const tag = hasSingleBinding(bindings, MANAGED_TMUX_BINDING_KEYS.tag, action => action.includes("run-shell") && action.includes(`${current}/scripts/tag.sh`) && /(?:^|\s)toggle(?:\s|$)/.test(action))
-         const label = hasSingleBinding(bindings, MANAGED_TMUX_BINDING_KEYS.label, action => action.includes("command-prompt") && action.includes(`${current}/scripts/tag.sh`) && /(?:^|\s)label-from-option(?:\s|$)/.test(action))
-         if (result.stderr || !dashboard || !tag || !label) checks.push(check("tmux.server", "error", "E_TMUX_BINDINGS", "tmux bindings do not match"))
+          const valid = hasDistinctBindings(bindings, [
+            action => action.includes("run-shell") && action.includes(`${current}/scripts/open.sh`),
+            action => action.includes("run-shell") && action.includes(`${current}/scripts/tag.sh`) && /\btoggle\b/.test(action),
+            action => action.includes("command-prompt") && action.includes(`${current}/scripts/tag.sh`) && /\blabel-from-option\b/.test(action),
+          ])
+          if (result.stderr || !valid) checks.push(check("tmux.server", "error", "E_TMUX_BINDINGS", "tmux bindings do not match"))
          else checks.push(check("tmux.server", "ok", null, "tmux bindings use current route"))
        }
     } catch { checks.push(check("tmux.server", "warning", "W_TMUX_SERVER", "tmux server is not running")) }

@@ -101,20 +101,35 @@ test("doctor detects changes to its exact managed markers and package entry", as
   expect((await doctor(opencode.deps)).checks.find(check => check.id === "opencode.config")?.status).toBe("error")
 })
 
-test("doctor validates distinct owned tmux binding records", async () => {
-  const valid = fixture()
-  expect((await doctor(valid.deps)).checks.find(check => check.id === "tmux.server")?.status).toBe("ok")
+test("doctor accepts distinct custom tmux binding records", async () => {
+  const h = fixture(), before = h.tree()
+  h.setBindings([
+    `bind-key -T prefix F run-shell '${root}/current/scripts/open.sh'`,
+    `bind-key -T prefix g run-shell \"${root}/current/scripts/tag.sh\" toggle`,
+    `bind-key -T prefix C-l command-prompt label-from-option '${root}/current/scripts/tag.sh'`,
+    `bind-key -T root D run-shell '${root}/old/current/scripts/open.sh'`,
+    `unbind-key -T prefix M`,
+  ].join("\n"))
+  expect((await doctor(h.deps)).checks.find(check => check.id === "tmux.server")?.status).toBe("ok")
+  expect(h.calls.fetch + h.calls.lock + h.calls.mutations).toBe(0)
+  expect(h.tree()).toBe(before)
+})
 
+test("doctor rejects invalid or non-distinct tmux binding records without mutation", async () => {
+  const dashboard = `bind-key -T prefix F run-shell '${root}/current/scripts/open.sh'`, tag = `bind-key -T prefix g run-shell \"${root}/current/scripts/tag.sh\" toggle`, label = `bind-key -T prefix C-l command-prompt label-from-option '${root}/current/scripts/tag.sh'`
   for (const [description, bindings] of [
-    ["missing label key", `bind-key -T prefix D run-shell '${root}/current/scripts/open.sh'\nbind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle`],
-    ["wrong label key", `bind-key -T prefix D run-shell '${root}/current/scripts/open.sh'\nbind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle\nbind-key -T prefix T command-prompt label-from-option '${root}/current/scripts/tag.sh'`],
-    ["stale dashboard route", `bind-key -T prefix D run-shell '${root}/old/current/scripts/open.sh'\nbind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle\nbind-key -T prefix M command-prompt label-from-option '${root}/current/scripts/tag.sh'`],
-    ["wrong tag action", `bind-key -T prefix D run-shell '${root}/current/scripts/open.sh'\nbind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\"\nbind-key -T prefix M command-prompt label-from-option '${root}/current/scripts/tag.sh'`],
-    ["duplicate dashboard key", `bind-key -T prefix D run-shell '${root}/current/scripts/open.sh'\nbind-key -T prefix D run-shell '${root}/current/scripts/open.sh'\nbind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle\nbind-key -T prefix M command-prompt label-from-option '${root}/current/scripts/tag.sh'`],
+    ["missing label", `${dashboard}\n${tag}`],
+    ["one record cannot satisfy actions", `bind-key -T prefix F run-shell '${root}/current/scripts/open.sh' command-prompt '${root}/current/scripts/tag.sh' toggle label-from-option`],
+    ["stale current route", `bind-key -T prefix F run-shell '${root}/old/current/scripts/open.sh'\n${tag}\n${label}`],
+    ["wrong tag action", `${dashboard}\nbind-key -T prefix g run-shell \"${root}/current/scripts/tag.sh\" toggles\n${label}`],
+    ["duplicate dashboard", `${dashboard}\n${dashboard}\n${tag}\n${label}`],
   ]) {
-    const h = fixture()
+    const h = fixture(), before = h.tree()
     h.setBindings(bindings)
-    expect((await doctor(h.deps)).checks.find(check => check.id === "tmux.server")?.status, description).toBe("error")
+    const report = await doctor(h.deps)
+    expect(report.checks.find(check => check.id === "tmux.server"), description).toMatchObject({ status: "error", code: "E_TMUX_BINDINGS" })
+    expect(h.calls.fetch + h.calls.lock + h.calls.mutations, description).toBe(0)
+    expect(h.tree(), description).toBe(before)
   }
 })
 

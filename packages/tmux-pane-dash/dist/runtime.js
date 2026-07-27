@@ -539,14 +539,13 @@ function planTmuxRemoval(input) {
   return { ...input, bytes: encoder2.encode(`${before.endsWith(`
 `) && !after ? before.slice(0, -1) : before}${after}`) };
 }
-var encoder2, decoder2, begin = "# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>", end = "# <<< tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 <<<", MANAGED_TMUX_BINDING_KEYS, conflict = (detail = "existing tmux-pane-dash configuration") => {
+var encoder2, decoder2, begin = "# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>", end = "# <<< tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 <<<", conflict = (detail = "existing tmux-pane-dash configuration") => {
   throw new CliError("E_CONFIG_CONFLICT", detail);
 };
 var init_config_tmux = __esm(() => {
   init_errors();
   encoder2 = new TextEncoder;
   decoder2 = new TextDecoder;
-  MANAGED_TMUX_BINDING_KEYS = { dashboard: "D", tag: "T", label: "M" };
 });
 
 // packages/tmux-pane-dash/src/ownership.ts
@@ -712,13 +711,13 @@ async function run(deps, path, args) {
 function tmuxBindings(output) {
   return output.split(`
 `).flatMap((line) => {
-    const match = /^bind(?:-key)?\s+-T\s+prefix\s+(\S+)\s+(.+)$/.exec(line);
-    return match ? [{ key: match[1], action: match[2] }] : [];
+    const match = /^bind(?:-key)?\s+-T\s+prefix\s+\S+\s+(.+)$/.exec(line);
+    return match ? [{ action: match[1] }] : [];
   });
 }
-function hasSingleBinding(bindings, key, predicate) {
-  const records = bindings.filter((binding) => binding.key === key);
-  return records.length === 1 && predicate(records[0].action);
+function hasDistinctBindings(bindings, predicates) {
+  const matches = predicates.map((predicate) => bindings.flatMap((binding, index) => predicate(binding.action) ? [index] : []));
+  return matches.every((records) => records.length === 1) && new Set(matches.flat()).size === predicates.length;
 }
 async function doctor(deps) {
   const fs = deps.doctorFs;
@@ -842,10 +841,12 @@ async function doctor(deps) {
         checks.push(check("tmux.server", "warning", "W_TMUX_SERVER", "tmux server is not running"));
       else {
         const current = join4(installRoot, "current"), bindings = tmuxBindings(result.stdout);
-        const dashboard = hasSingleBinding(bindings, MANAGED_TMUX_BINDING_KEYS.dashboard, (action) => action.includes("run-shell") && action.includes(`${current}/scripts/open.sh`));
-        const tag = hasSingleBinding(bindings, MANAGED_TMUX_BINDING_KEYS.tag, (action) => action.includes("run-shell") && action.includes(`${current}/scripts/tag.sh`) && /(?:^|\s)toggle(?:\s|$)/.test(action));
-        const label = hasSingleBinding(bindings, MANAGED_TMUX_BINDING_KEYS.label, (action) => action.includes("command-prompt") && action.includes(`${current}/scripts/tag.sh`) && /(?:^|\s)label-from-option(?:\s|$)/.test(action));
-        if (result.stderr || !dashboard || !tag || !label)
+        const valid = hasDistinctBindings(bindings, [
+          (action) => action.includes("run-shell") && action.includes(`${current}/scripts/open.sh`),
+          (action) => action.includes("run-shell") && action.includes(`${current}/scripts/tag.sh`) && /\btoggle\b/.test(action),
+          (action) => action.includes("command-prompt") && action.includes(`${current}/scripts/tag.sh`) && /\blabel-from-option\b/.test(action)
+        ]);
+        if (result.stderr || !valid)
           checks.push(check("tmux.server", "error", "E_TMUX_BINDINGS", "tmux bindings do not match"));
         else
           checks.push(check("tmux.server", "ok", null, "tmux bindings use current route"));
