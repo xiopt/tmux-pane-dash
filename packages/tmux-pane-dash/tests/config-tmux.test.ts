@@ -4,7 +4,8 @@ import { managedTmuxBlock, planTmuxEdit, shellQuote } from "../src/config-tmux"
 test("POSIX quote and managed block are exact for hostile install roots", () => {
   const root = "/tmp/a'b $(touch nope)"
   expect(shellQuote(root)).toBe("'/tmp/a'\\''b $(touch nope)'")
-  expect(managedTmuxBlock("/tmp/a'b")).toBe("# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>\nrun-shell '/tmp/a'\\''b/current/pane_dash.tmux'\n# <<< tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 <<<")
+  expect(managedTmuxBlock("/tmp/a'b $d;`tick`")).toBe("# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>\nrun-shell \"#{l:'/tmp/a'\\\\''b \\$d;`tick`/current/pane_dash.tmux'}\"\n# <<< tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 <<<")
+  for (const control of ["\0", "\n", "\u007f"]) expect(() => managedTmuxBlock(`/tmp/${control}`)).toThrow()
   for (const value of ["/tmp/a b", "/tmp/☃/$x;`whoami`", "$(touch sentinel)"]) expect(shellQuote(value)).toMatch(/^'.*'$/s)
 })
 

@@ -8,7 +8,13 @@ const end = "# <<< tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 <<<"
 export type TmuxEditInput = Omit<PlannedConfigMutation, "bytes"> & { bytes: Uint8Array; installRoot: string; migrate: boolean }
 
 export function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'` }
-export function managedTmuxBlock(installRoot: string): string { return `${begin}\nrun-shell ${shellQuote(`${installRoot}/current/pane_dash.tmux`)}\n${end}` }
+/** tmux consumes one escape layer before passing the POSIX word to /bin/sh. */
+function tmuxConfigEmbed(shellCommand: string): string {
+  if (/[\u0000-\u001f\u007f]/.test(shellCommand)) throw new CliError("E_CONFIG")
+  const literal = `#{l:${shellCommand.replaceAll("#", "##").replaceAll("}", "#}")}}`
+  return `"${literal.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("$", "\\$")}"`
+}
+export function managedTmuxBlock(installRoot: string): string { return `${begin}\nrun-shell ${tmuxConfigEmbed(shellQuote(`${installRoot}/current/pane_dash.tmux`))}\n${end}` }
 const conflict = (detail = "existing tmux-pane-dash configuration") => { throw new CliError("E_CONFIG_CONFLICT", detail) }
 
 function ownedRange(text: string, block: string): { start: number; end: number } | null {

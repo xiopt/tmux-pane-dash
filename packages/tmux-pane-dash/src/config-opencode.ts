@@ -1,5 +1,5 @@
-import { lstat } from "node:fs/promises"
-import { join } from "node:path"
+import { lstat, readdir, realpath } from "node:fs/promises"
+import { join, resolve } from "node:path"
 import { CliError } from "./errors"
 import { resolveConfigPath } from "./fs"
 import type { Dependencies } from "./runtime"
@@ -7,6 +7,7 @@ import type { PlannedConfigMutation } from "./transaction"
 
 const desired = "@xiopt/pane-dash-opencode@0.1.0", encoder = new TextEncoder(), decoder = new TextDecoder()
 export type OpenCodeEditInput = Omit<PlannedConfigMutation, "bytes"> & { bytes: Uint8Array; migrate: boolean; ownedEntries?: readonly string[] }
+export type PlannedOpenCodeMigration = { logicalPath: string; resolvedPath: string; action: "unlink" }
 const fail = (code = "E_CONFIG") => { throw new CliError(code) }
 const missing = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT"
 
@@ -22,6 +23,24 @@ export async function selectOpenCodeConfig(env: Dependencies["env"], deps: Depen
   const [leftInfo, rightInfo] = await Promise.all([lstat(left.resolvedPath), lstat(right.resolvedPath)])
   if (!leftInfo.isFile() || !rightInfo.isFile() || leftInfo.dev !== rightInfo.dev || leftInfo.ino !== rightInfo.ino) fail("E_CONFIG_AMBIGUOUS")
   return json
+}
+
+/** Plans, but never performs, removal of the one historical global plugin link. */
+export async function planOpenCodeMigration(input: { configDirectory: string; installRoot: string; migrate: boolean }): Promise<readonly PlannedOpenCodeMigration[]> {
+  const names = new Set(["pane-dash.ts", "pane-dash.js", "pane_dash.ts", "pane_dash.js"]), candidates: string[] = []
+  for (const directory of [join(input.configDirectory, "plugin"), join(input.configDirectory, "plugins")]) {
+    let entries: string[]
+    try { entries = await readdir(directory) } catch (error) { if (missing(error)) continue; throw error }
+    for (const name of entries) if (names.has(name)) candidates.push(join(directory, name))
+  }
+  if (!candidates.length) return []
+  if (!input.migrate || candidates.length !== 1) fail("E_CONFIG_CONFLICT")
+  const logicalPath = candidates[0]!, entry = await lstat(logicalPath)
+  if (!entry.isSymbolicLink()) fail("E_CONFIG_CONFLICT")
+  let resolvedPath: string, known: string
+  try { [resolvedPath, known] = await Promise.all([realpath(logicalPath), realpath(join(input.installRoot, "opencode-plugin", "pane-dash.ts"))]) } catch { fail("E_CONFIG_CONFLICT") }
+  if (resolvedPath! !== known!) fail("E_CONFIG_CONFLICT")
+  return [{ logicalPath, resolvedPath: resolvedPath!, action: "unlink" }]
 }
 
 function space(text: string, index: number): number { for (;;) { while (/\s/.test(text[index] ?? "")) index += 1; if (text.startsWith("//", index)) { const end = text.indexOf("\n", index + 2); index = end < 0 ? text.length : end + 1; continue } if (text.startsWith("/*", index)) { const end = text.indexOf("*/", index + 2); if (end < 0) fail(); index = end + 2; continue } return index } }
