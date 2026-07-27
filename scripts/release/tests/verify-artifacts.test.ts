@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { canonicalJson, sha256 } from "../canonical-json"
 import { TARGETS } from "../contracts"
-import { verifyPackages, verifyReleaseDirectory } from "../verify-artifacts"
+import { assertPackedNodeBundle, verifyPackages, verifyReleaseDirectory } from "../verify-artifacts"
 
 const decoder = new TextDecoder()
 const epoch = 1784813242
@@ -44,6 +44,12 @@ test("verifier requires exactly four archives plus release manifest and checksum
 
 test("package verifier requires exact immutable metadata and npm inventory", async () => {
   await expect(verifyPackages(process.cwd())).resolves.toBeUndefined()
+})
+
+test("packed override scanner permits internal names but rejects environment override access", () => {
+  expect(() => assertPackedNodeBundle("const installRoot = '/owned'; export { installRoot }")) .not.toThrow()
+  expect(() => assertPackedNodeBundle("const root = process.env.INSTALL_ROOT")) .toThrow("forbidden override")
+  expect(() => assertPackedNodeBundle("const env = { INSTALL_ROOT: '/tmp' }")) .toThrow("forbidden override")
 })
 
 test("package verifier executes and imports the packed Node artifact", async () => {

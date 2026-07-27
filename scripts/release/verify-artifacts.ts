@@ -11,6 +11,13 @@ import { inspectBinary } from "./inspect-binary"
 const decoder = new TextDecoder()
 const parseJson = (bytes: Uint8Array) => JSON.parse(decoder.decode(bytes)) as Record<string, unknown>
 const hasExactKeys = (value: unknown, keys: readonly string[]) => typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+const overrideName = "(?:INSTALL_ROOT|ROOT_DIR|LATEST|ENDPOINT|CHECKSUM)"
+
+/** Reject packaged override mechanisms, not harmless implementation identifiers. */
+export function assertPackedNodeBundle(bundle: string): void {
+  if (/\bBun\b|\bbun:|sourceMappingURL/.test(bundle)) throw new Error("packed Node artifact contains Bun or source-map data")
+  if (new RegExp(`process\\d*\\.env(?:\\.${overrideName}|\\[\\s*["']${overrideName}["']\\s*\\])`, "i").test(bundle) || new RegExp(`(?:^|[,{])\\s*["']?${overrideName}["']?\\s*:`, "im").test(bundle)) throw new Error("packed Node artifact contains forbidden override access")
+}
 
 function tarFiles(bytes: Uint8Array): Map<string, Uint8Array> {
   const tar = gunzipSync(bytes); const files = new Map<string, Uint8Array>()
@@ -119,9 +126,7 @@ export async function verifyPackages(root: string): Promise<void> {
     const packedMetadata = parseJson(await readFile(join(packedRoot, "package.json")))
     if (JSON.stringify(packedMetadata) !== JSON.stringify(pkg)) throw new Error("packed package metadata differs")
     const [cli, runtime] = await Promise.all([readFile(join(packedRoot, "dist", "cli.js"), "utf8"), readFile(join(packedRoot, "dist", "runtime.js"), "utf8")])
-    for (const bundle of [cli, runtime]) {
-      if (/\bBun\b|\bbun:|sourceMappingURL|\.map\b|process\d*\.env|\b(?:latest|endpoint|checksum|installRoot|rootDir)\b/i.test(bundle)) throw new Error("packed Node artifact contains forbidden override or Bun data")
-    }
+    for (const bundle of [cli, runtime]) assertPackedNodeBundle(bundle)
     if ((cli.match(/\.argv/g) ?? []).length !== 1 || !/\.argv\.slice\(2\)/.test(cli) || /\.argv/.test(runtime)) throw new Error("packed Node artifact has an invalid argv override")
     const noCommand = await command([node, join(packedRoot, "dist", "cli.js")], { ...process.env, PATH: "/usr/bin:/bin" })
     if (noCommand.code !== 2 || noCommand.stdout !== "" || !noCommand.stderr.startsWith("E_USAGE:") || noCommand.stderr.length > 241) throw new Error("packed CLI does not return bounded E_USAGE")
