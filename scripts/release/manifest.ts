@@ -4,20 +4,24 @@ import { ARCHIVE_PAYLOAD, RELEASE_DOWNLOAD_BASE, REPOSITORY, TAG, TARGETS, VERSI
 import { sha256 } from "./canonical-json"
 
 export type RustTarget = (typeof TARGETS)[keyof typeof TARGETS]["rustTarget"]
-export type InternalManifest = { schemaVersion: 1; product: "tmux-pane-dash"; version: typeof VERSION; target: RustTarget; asset: string; files: Array<{ path: string; sha256: string; size: number; mode: "0755" | "0644" }> }
+export type InternalManifest = { schemaVersion: 1; product: "tmux-pane-dash"; version: string; target: RustTarget; asset: string; files: Array<{ path: string; sha256: string; size: number; mode: "0755" | "0644" }> }
 export type VerifiedAsset = { key: string; target: RustTarget; asset: string; sha256: string; size: number }
 export type ReleaseManifest = { schemaVersion: 1; repository: typeof REPOSITORY; version: typeof VERSION; tag: typeof TAG; assets: Record<string, { target: RustTarget; asset: string; url: string; sha256: string; size: number }> }
 
 const modes = new Map(ARCHIVE_PAYLOAD.map(([path, mode]) => [path, mode] as const))
 
-export async function internalManifest(input: { target: RustTarget; asset: string; root: string }): Promise<InternalManifest> {
-  if (!Object.values(TARGETS).some((target) => target.rustTarget === input.target && target.asset === input.asset)) throw new Error("invalid target or asset")
+export async function internalManifest(input: { target: RustTarget; asset: string; root: string; version?: string }): Promise<InternalManifest> {
+  const target = Object.values(TARGETS).find((candidate) => candidate.rustTarget === input.target)
+  const version = input.version ?? VERSION
+  if (!/^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(version)) throw new Error("invalid version")
+  const asset = target?.asset.replace(`v${VERSION}`, `v${version}`)
+  if (!target || input.asset !== asset) throw new Error("invalid target or asset")
   const files = await Promise.all(ARCHIVE_PAYLOAD.filter(([path]) => path !== "manifest.json").map(async ([path]) => {
     const bytes = await readFile(join(input.root, path)); const info = await stat(join(input.root, path))
     return { path, sha256: sha256(bytes), size: info.size, mode: modes.get(path)! }
   }))
   files.sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)))
-  return { schemaVersion: 1, product: "tmux-pane-dash", version: VERSION, target: input.target, asset: input.asset, files }
+  return { schemaVersion: 1, product: "tmux-pane-dash", version, target: input.target, asset: input.asset, files }
 }
 
 export async function releaseManifest(assets: readonly VerifiedAsset[]): Promise<ReleaseManifest> {

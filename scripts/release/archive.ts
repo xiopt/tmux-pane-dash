@@ -16,7 +16,7 @@ function tarEntry(path: string, content: Uint8Array, mode: string, epoch: number
   const size = 512 + Math.ceil(content.length / 512) * 512; const entry = new Uint8Array(size); entry.set(header); entry.set(content, 512); return entry
 }
 
-export async function buildArchive(input: { target: RustTarget; binary: string; output: string; epoch: number; root?: string }): Promise<string> {
+export async function buildArchive(input: { target: RustTarget; binary: string; output: string; epoch: number; root?: string; version?: string }): Promise<string> {
   const config = Object.values(TARGETS).find((candidate) => candidate.rustTarget === input.target)
   if (!config || !Number.isSafeInteger(input.epoch) || input.epoch < 0) throw new Error("invalid archive input")
   const root = input.root ?? process.cwd(); const staging = await Bun.file(input.binary).arrayBuffer(); const stage = join(dirname(input.output), `.archive-${crypto.randomUUID()}`)
@@ -24,7 +24,8 @@ export async function buildArchive(input: { target: RustTarget; binary: string; 
   try {
     await writeFile(join(stage, "bin/pane-dash"), new Uint8Array(staging)); await chmod(join(stage, "bin/pane-dash"), 0o755)
     for (const [path, mode] of ARCHIVE_PAYLOAD) if (path !== "bin/pane-dash" && path !== "manifest.json") { await writeFile(join(stage, path), await readFile(join(root, path))); await chmod(join(stage, path), Number.parseInt(mode, 8)) }
-    await writeFile(join(stage, "manifest.json"), canonicalJson(await internalManifest({ target: input.target, asset: config.asset, root: stage })))
+    const asset = config.asset.replace("v0.1.0", `v${input.version ?? "0.1.0"}`)
+    await writeFile(join(stage, "manifest.json"), canonicalJson(await internalManifest({ target: input.target, asset, root: stage, version: input.version })))
     const paths = ARCHIVE_PAYLOAD.map(([path]) => path).sort((a, b) => Buffer.from(a).compare(Buffer.from(b)))
     const directories = [tarEntry("bin", new Uint8Array(), "0755", input.epoch, "5"), tarEntry("scripts", new Uint8Array(), "0755", input.epoch, "5")]
     const entries = [...directories, ...await Promise.all(paths.map(async (path) => tarEntry(path, await readFile(join(stage, path)), ARCHIVE_PAYLOAD.find(([name]) => name === path)![1], input.epoch)))]

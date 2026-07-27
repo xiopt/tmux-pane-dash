@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
-import { readFile } from "node:fs/promises"
-import { resolve } from "node:path"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { assertDowngradeAllowed, compareVersions, runCli } from "../src/runtime"
 import { nodeDependencies } from "../src/dependencies"
@@ -59,8 +60,11 @@ test("packages the unexported runtime only as an absolute file module", async ()
 
 test("production dependencies and packed CLI construct and execute a command path", async () => {
   expect(nodeDependencies().pid?.()).toBe(process.pid)
-  const child = Bun.spawn([process.execPath, resolve(import.meta.dir, "..", "dist", "cli.js"), "doctor", "--json"], { stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH!, HOME: resolve(import.meta.dir, "missing-home") } })
-  expect(await child.exited).toBe(1)
-  expect(JSON.parse(await new Response(child.stdout).text())).toMatchObject({ schemaVersion: 1, healthy: false })
-  expect(await new Response(child.stderr).text()).toBe("")
+  const home = await mkdtemp(join(tmpdir(), "pane-dash-runtime-home-"))
+  try {
+    const child = Bun.spawn([process.execPath, resolve(import.meta.dir, "..", "dist", "cli.js"), "doctor", "--json"], { stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH!, HOME: home } })
+    expect(await child.exited).toBe(1)
+    expect(JSON.parse(await new Response(child.stdout).text())).toMatchObject({ schemaVersion: 1, healthy: false })
+    expect(await new Response(child.stderr).text()).toBe("")
+  } finally { await rm(home, { recursive: true, force: true }) }
 })
