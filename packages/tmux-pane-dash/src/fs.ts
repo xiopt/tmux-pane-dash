@@ -58,7 +58,7 @@ function sameChain(left: readonly SymlinkRecord[], right: readonly SymlinkRecord
 }
 
 /** Performs the byte-exact, same-directory write used by both config editors. */
-export async function atomicConfigWrite(plan: PlannedConfigMutation & Partial<ResolvedConfigPath>, deps: { randomBytes?: (size: number) => Uint8Array; journalEvent?: (event: string) => void }): Promise<void> {
+export async function atomicConfigWrite(plan: PlannedConfigMutation & Partial<ResolvedConfigPath>, deps: { randomBytes?: (size: number) => Uint8Array; journalEvent?: (event: string) => void; beforeRename?: () => void | Promise<void> }): Promise<void> {
   const resolved = await resolveConfigPath(plan.logicalPath, deps)
   if (resolved.resolvedPath !== plan.resolvedPath || (plan.symlinkChain && !sameChain(plan.symlinkChain, resolved.symlinkChain))) throw new CliError("E_CONCURRENT_EDIT")
   const before = resolved.preimageHash
@@ -71,8 +71,9 @@ export async function atomicConfigWrite(plan: PlannedConfigMutation & Partial<Re
     try { await file.writeFile(plan.bytes); await chmod(temp, mode); await file.sync(); deps.journalEvent?.("fsync.file") } finally { await file.close() }
     const reread = new Uint8Array(await readFile(plan.resolvedPath).catch(error => missing(error) ? new Uint8Array() : Promise.reject(error)))
     if ((before ?? digest(new Uint8Array())) !== digest(reread)) throw new CliError("E_CONCURRENT_EDIT")
+    await deps.beforeRename?.()
     const checked = await resolveConfigPath(plan.logicalPath, deps)
-    if (checked.resolvedPath !== plan.resolvedPath || !sameChain(resolved.symlinkChain, checked.symlinkChain)) throw new CliError("E_CONCURRENT_EDIT")
+    if (checked.resolvedPath !== plan.resolvedPath || checked.mode !== resolved.mode || checked.preimageHash !== before || !sameChain(resolved.symlinkChain, checked.symlinkChain)) throw new CliError("E_CONCURRENT_EDIT")
     await rename(temp, plan.resolvedPath)
     const parent = await open(directory, "r"); try { await parent.sync(); deps.journalEvent?.("fsync.parent") } finally { await parent.close() }
   } catch (error) { await rm(temp, { force: true }); throw error }

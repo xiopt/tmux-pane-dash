@@ -20,11 +20,24 @@ test("OpenCode selection is deterministic for missing, one, and same-inode candi
   } finally { await Bun.$`rm -rf ${root}` }
 })
 
-test("JSONC editor changes only plugin array and detects plugin conflicts", () => {
-  const source = "{\r\n  // keep\r\n  \"x\": 1,\r\n  \"plugin\": [\"other\",],\r\n}\r\n"
+test("JSONC editor inserts a plugin without rewriting existing plugin-array bytes", () => {
+  const source = "{\r\n  // keep\r\n  \"x\": 1,\r\n  \"plugin\": [\r\n    /* before */ \"other\\u002fplugin\", // after\r\n  ],\r\n}\r\n"
   const input = { logicalPath: "/x/opencode.json", resolvedPath: "/x/opencode.json", bytes: new TextEncoder().encode(source), migrate: false }
   const planned = planOpenCodeEdit(input)
-  expect(decode(planned.bytes)).toBe("{\r\n  // keep\r\n  \"x\": 1,\r\n  \"plugin\": [\"other\", \"@xiopt/pane-dash-opencode@0.1.0\",],\r\n}\r\n")
+  expect(decode(planned.bytes)).toBe("{\r\n  // keep\r\n  \"x\": 1,\r\n  \"plugin\": [\r\n    /* before */ \"other\\u002fplugin\",\r\n    \"@xiopt/pane-dash-opencode@0.1.0\", // after\r\n  ],\r\n}\r\n")
   expect(planOpenCodeEdit({ ...input, bytes: planned.bytes }).bytes).toEqual(planned.bytes)
-  for (const bad of ["[]", "{\"plugin\":{}}", "{\"plugin\":[1]}", "{\"plugin\":[],\"plugin\":[]}", "{\"plugin\":[\"@xiopt/pane-dash-opencode@0.0.9\"]}"]) expect(() => planOpenCodeEdit({ ...input, bytes: new TextEncoder().encode(bad) })).toThrow()
+})
+
+test("JSONC editor replaces only one ownership-proven prior plugin string", () => {
+  const source = "{\n\t\"plugin\" : [ /* keep */ \"unrelated\\u002fplugin\" ,\n\t\t\"@xiopt/pane-dash-opencode@0.0.9\" /* tail */ ],\n\t\"odd\" : true\n}\n"
+  const input = { logicalPath: "/x/opencode.json", resolvedPath: "/x/opencode.json", bytes: new TextEncoder().encode(source), migrate: false, ownedEntries: ["@xiopt/pane-dash-opencode@0.0.9"] }
+  const planned = planOpenCodeEdit(input)
+  expect(decode(planned.bytes)).toBe("{\n\t\"plugin\" : [ /* keep */ \"unrelated\\u002fplugin\" ,\n\t\t\"@xiopt/pane-dash-opencode@0.1.0\" /* tail */ ],\n\t\"odd\" : true\n}\n")
+  expect(planOpenCodeEdit({ ...input, bytes: planned.bytes }).bytes).toEqual(planned.bytes)
+  for (const bad of [
+    "[]", "{\"plugin\":{}}", "{\"plugin\":[1]}", "{\"plugin\":[],\"plugin\":[]}",
+    "{\"plugin\":[\"@xiopt/pane-dash-opencode@0.0.8\"]}",
+    "{\"plugin\":[\"@xiopt/pane-dash-opencode@0.0.9\",\"@xiopt/pane-dash-opencode@0.0.8\"]}",
+    "{\"plugin\":[\"@xiopt/pane-dash-opencode@0.1.0\",\"@xiopt/pane-dash-opencode@0.0.9\"]}",
+  ]) expect(() => planOpenCodeEdit({ ...input, bytes: new TextEncoder().encode(bad), ownedEntries: ["@xiopt/pane-dash-opencode@0.0.9"] })).toThrow()
 })

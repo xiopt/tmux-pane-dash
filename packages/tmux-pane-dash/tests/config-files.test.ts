@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, mkdir, readFile, readlink, symlink, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, readdir, readlink, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { atomicConfigWrite, resolveConfigPath } from "../src/fs"
@@ -31,5 +31,22 @@ test("config resolution accepts missing files and rejects unsafe symlink outcome
       if (row === "directory") { await mkdir(join(root, "dir")); await symlink("dir", path) }
       await expect(resolveConfigPath(path, h.deps)).rejects.toThrow()
     }
+  } finally { await Bun.$`rm -rf ${root}` }
+})
+
+test("atomic writer rejects a same-size edit after its reread and removes its temporary file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pane-dash-config-")), path = join(root, "opencode.json"), h = fixtureDependencies(), events: string[] = []
+  try {
+    await writeFile(path, "before")
+    const resolved = await resolveConfigPath(path, h.deps)
+    await expect(atomicConfigWrite({ ...resolved, bytes: bytes("after!") }, {
+      ...h.deps,
+      randomBytes: size => new Uint8Array(size),
+      journalEvent: event => events.push(event),
+      beforeRename: async () => { await writeFile(path, "other!") },
+    })).rejects.toMatchObject({ code: "E_CONCURRENT_EDIT" })
+    expect(await readFile(path, "utf8")).toBe("other!")
+    expect(await readdir(root)).toEqual(["opencode.json"])
+    expect(events).toEqual(["fsync.file"])
   } finally { await Bun.$`rm -rf ${root}` }
 })

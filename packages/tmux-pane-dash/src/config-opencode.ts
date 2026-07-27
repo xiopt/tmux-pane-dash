@@ -44,32 +44,61 @@ export async function planOpenCodeMigration(input: { configDirectory: string; in
 }
 
 function space(text: string, index: number): number { for (;;) { while (/\s/.test(text[index] ?? "")) index += 1; if (text.startsWith("//", index)) { const end = text.indexOf("\n", index + 2); index = end < 0 ? text.length : end + 1; continue } if (text.startsWith("/*", index)) { const end = text.indexOf("*/", index + 2); if (end < 0) fail(); index = end + 2; continue } return index } }
-function stringAt(text: string, index: number): { value: string; end: number } { if (text[index] !== '"') fail(); let end = index + 1, escaped = false; while (end < text.length) { const char = text[end++]!; if (escaped) { escaped = false; continue } if (char === "\\") { escaped = true; continue } if (char === '"') { try { return { value: JSON.parse(text.slice(index, end)), end } } catch { fail() } } } fail() }
+function stringAt(text: string, index: number): { value: string; start: number; end: number } { if (text[index] !== '"') fail(); const start = index; let end = index + 1, escaped = false; while (end < text.length) { const char = text[end++]!; if (escaped) { escaped = false; continue } if (char === "\\") { escaped = true; continue } if (char === '"') { try { return { value: JSON.parse(text.slice(index, end)), start, end } } catch { fail() } } } fail() }
 function close(text: string, index: number, open: string, endChar: string) { let depth = 0; for (; index < text.length; index += 1) { index = space(text, index); if (text[index] === '"') { index = stringAt(text, index).end - 1; continue } if (text[index] === open) depth += 1; if (text[index] === endChar && --depth === 0) return index } fail() }
-type Plugin = { start: number; end: number; values: string[] }
+type PluginEntry = { value: string; start: number; end: number; comma?: number }
+type Plugin = { start: number; end: number; entries: PluginEntry[] }
 function rootPlugin(text: string): Plugin | null {
   let index = space(text, 0); if (text[index++] !== "{") fail(); let plugin: Plugin | null = null
   for (;;) { index = space(text, index); if (text[index] === "}") { if (space(text, index + 1) !== text.length) fail(); return plugin } const key = stringAt(text, index); index = space(text, key.end); if (text[index++] !== ":") fail(); index = space(text, index)
-    if (key.value === "plugin") { if (plugin || text[index] !== "[") fail(); const start = index, end = close(text, index, "[", "]"), values: string[] = []; let item = start + 1
-      for (;;) { item = space(text, item); if (text[item] === "]") break; const value = stringAt(text, item); values.push(value.value); item = space(text, value.end); if (text[item] === ",") { item += 1; continue } if (text[item] !== "]") fail() }
-      plugin = { start, end: end + 1, values }; index = end + 1
+    if (key.value === "plugin") {
+      if (plugin || text[index] !== "[") fail()
+      const start = index, end = close(text, index, "[", "]"), entries: PluginEntry[] = []
+      let item = start + 1
+      for (;;) {
+        item = space(text, item)
+        if (text[item] === "]") break
+        const value = stringAt(text, item)
+        item = space(text, value.end)
+        const comma = text[item] === "," ? item : undefined
+        if (comma !== undefined) item += 1
+        else if (text[item] !== "]") fail()
+        entries.push({ ...value, comma })
+      }
+      plugin = { start, end: end + 1, entries }; index = end + 1
     } else { if (text[index] === "[") index = close(text, index, "[", "]") + 1; else if (text[index] === "{") index = close(text, index, "{", "}") + 1; else if (text[index] === '"') index = stringAt(text, index).end; else { const match = /^(?:true|false|null|-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text.slice(index)); if (!match) fail(); index += match[0].length } }
     index = space(text, index); if (text[index] === ",") { index += 1; continue } if (text[index] !== "}") fail()
   }
 }
 function validPaneDash(value: string) { return /^@xiopt\/pane-dash-opencode(?:@[0-9]+\.[0-9]+\.[0-9]+)?$/.test(value) || /pane-dash/i.test(value) }
-function formatArray(old: string[], source: string): string {
-  const trailing = /,\s*\]$/.test(source), body = old.map(JSON.stringify).join(", ")
-  return `[${body}${body ? ", " : ""}${JSON.stringify(desired)}${trailing ? "," : ""}]`
+function insertionTrivia(text: string, plugin: Plugin): string {
+  const first = plugin.entries[0]
+  if (!first) return ""
+  const second = plugin.entries[1]
+  if (second && first.comma !== undefined) return text.slice(first.comma + 1, second.start).match(/^\s*$/)?.[0] ?? ""
+  return text.slice(plugin.start + 1, first.start).match(/^\s*/)?.[0] ?? ""
 }
-
+function insertPlugin(text: string, plugin: Plugin): string {
+  if (!plugin.entries.length) return `${text.slice(0, plugin.end - 1)}${JSON.stringify(desired)}${text.slice(plugin.end - 1)}`
+  const entry = plugin.entries[plugin.entries.length - 1]
+  if (!entry) fail()
+  const insertion = `,${insertionTrivia(text, plugin)}${JSON.stringify(desired)}`
+  return `${text.slice(0, entry.end)}${insertion}${text.slice(entry.end)}`
+}
 export function planOpenCodeEdit(input: OpenCodeEditInput): PlannedConfigMutation {
   const text = decoder.decode(input.bytes), plugin = rootPlugin(text)
   if (plugin) {
-    const matches = plugin.values.filter(value => value === desired)
-    if (matches.length === 1 && !plugin.values.some(value => value !== desired && validPaneDash(value))) return { ...input, bytes: input.bytes }
-    if (matches.length > 1 || plugin.values.some(value => value !== desired && validPaneDash(value)) && !input.ownedEntries?.some(value => plugin.values.includes(value))) fail("E_CONFIG_CONFLICT")
-    return { ...input, bytes: encoder.encode(`${text.slice(0, plugin.start)}${formatArray(plugin.values, text.slice(plugin.start, plugin.end))}${text.slice(plugin.end)}`) }
+    const managed = plugin.entries.filter(entry => validPaneDash(entry.value))
+    const desiredEntries = managed.filter(entry => entry.value === desired)
+    if (desiredEntries.length === 1 && managed.length === 1) return { ...input, bytes: input.bytes }
+    if (desiredEntries.length || managed.length > 1) fail("E_CONFIG_CONFLICT")
+    if (managed.length === 1) {
+      const owned = input.ownedEntries
+      const entry = managed[0]
+      if (owned?.length !== 1 || !entry || owned[0] !== entry.value) fail("E_CONFIG_CONFLICT")
+      return { ...input, bytes: encoder.encode(`${text.slice(0, entry.start)}${JSON.stringify(desired)}${text.slice(entry.end)}`) }
+    }
+    return { ...input, bytes: encoder.encode(insertPlugin(text, plugin)) }
   }
   const closeIndex = text.lastIndexOf("}"); if (closeIndex < 0) fail()
   const newline = text.includes("\r\n") ? "\r\n" : "\n", prefix = text.slice(0, closeIndex), indent = /(?:^|\n)([ \t]+)"/.exec(prefix)?.[1] ?? "  ", comma = /\{\s*$/.test(prefix) ? "" : ","
