@@ -20,7 +20,7 @@ const clean = (value: unknown) => String(value instanceof Error ? value.message 
 const missing = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT"
 const exactKeys = (value: unknown, keys: readonly string[]) => !!value && typeof value === "object" && Object.keys(value as object).sort().join("\0") === [...keys].sort().join("\0")
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
-const childEnv = { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" }
+const childEnv = (tmuxTmpdir: string | undefined) => ({ PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C", ...(tmuxTmpdir?.startsWith("/") ? { TMUX_TMPDIR: tmuxTmpdir } : {}) })
 
 function selectedTarget(deps: Dependencies): string | null {
   const assets = (deps.manifest as any)?.assets
@@ -53,7 +53,7 @@ async function loadOwnership(fs: DoctorFs, installRoot: string): Promise<Ownersh
 }
 function inRoot(installRoot: string, path: string): boolean { const rel = relative(resolve(installRoot), resolve(path)); return rel !== "" && !rel.startsWith("..") && !rel.includes("/../") }
 function tmuxVersion(value: string): boolean { const match = /^tmux\s+(\d+)\.(\d+)(?:\.|[a-z]|\s|$)/.exec(value.trim()); return !!match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 6) }
-async function run(deps: Dependencies, path: string, args: readonly string[]) { if (!deps.spawn) throw new Error("child execution unavailable"); return deps.spawn(path, args, { timeoutMs: 5_000, env: childEnv, maxOutputBytes: 8 * 1024 }) }
+async function run(deps: Dependencies, path: string, args: readonly string[]) { if (!deps.spawn) throw new Error("child execution unavailable"); return deps.spawn(path, args, { timeoutMs: 5_000, env: childEnv(deps.env?.TMUX_TMPDIR), maxOutputBytes: 8 * 1024 }) }
 type TmuxBinding = { action: string }
 function tmuxBindings(output: string): TmuxBinding[] {
   return output.split("\n").flatMap(line => {

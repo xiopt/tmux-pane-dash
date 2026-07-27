@@ -8,7 +8,7 @@ const root = "/data/tmux-pane-dash", version = "0.1.0", versionRoot = `${root}/v
 const digest = (value: string) => createHash("sha256").update(value).digest("hex")
 const payload = [["bin/pane-dash", "binary", 0o755], ["pane_dash.tmux", "tmux", 0o755], ["scripts/open.sh", "open", 0o755], ["scripts/tag.sh", "tag", 0o755], ["README.md", "readme", 0o644], ["LICENSE", "license", 0o644], ["VERSION", "0.1.0\n", 0o644]] as const
 
-function fixture(fault?: string) {
+function fixture(fault?: string, tmuxTmpdir?: string) {
   const marker = managedTmuxBlock(root)
   const files = payload.map(([path, content, mode]) => ({ logicalPath: `${versionRoot}/${path}`, resolvedPath: `${versionRoot}/${path}`, sha256: digest(content), mode, type: "file" as const }))
   if (fault === "ownership.paths" || fault === "ownership.managed-paths") files[0] = { ...files[0]!, logicalPath: "/outside/pane-dash", resolvedPath: "/outside/pane-dash" }
@@ -37,9 +37,10 @@ function fixture(fault?: string) {
     if (path === `${versionRoot}/scripts`) return ["open.sh", "tag.sh"]
     throw Object.assign(new Error(`missing ${path}`), { code: "ENOENT" })
   } }
-  const deps: Dependencies = { manifest: {}, platform: "linux", arch: "x64", executingVersion: version, env: { XDG_DATA_HOME: "/data", HOME: "/home", CALLER_LEAK: "must-not-reach-tmux" }, doctorFs: fs, fetch: async () => { calls.fetch += 1; throw new Error("fetch") }, lock: () => { calls.lock += 1 }, spawn: async (path, args, options) => {
-    calls.child += 1; expect(options.timeoutMs).toBe(5_000); expect(options.maxOutputBytes).toBe(8 * 1024); expect(options.env).toEqual({ PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" })
-    if (path === "tmux") tmuxEnvironments.push(options.env)
+  const expectedChildEnv = { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C", ...(tmuxTmpdir?.startsWith("/") ? { TMUX_TMPDIR: tmuxTmpdir } : {}) }
+  const deps: Dependencies = { manifest: {}, platform: "linux", arch: "x64", executingVersion: version, env: { XDG_DATA_HOME: "/data", HOME: "/home", CALLER_LEAK: "must-not-reach-tmux", ...(tmuxTmpdir === undefined ? {} : { TMUX_TMPDIR: tmuxTmpdir }) }, doctorFs: fs, fetch: async () => { calls.fetch += 1; throw new Error("fetch") }, lock: () => { calls.lock += 1 }, spawn: async (path, args, options) => {
+    calls.child += 1; if (path === "tmux") tmuxEnvironments.push(options.env)
+    expect(options.timeoutMs).toBe(5_000); expect(options.maxOutputBytes).toBe(8 * 1024); expect(options.env).toEqual(expectedChildEnv)
     if (fault === "binary.version" && path.includes("pane-dash")) return { code: 1, stdout: "bad\n", stderr: "" }
     if (fault === "tmux.version" && args[0] === "-V") return { code: 0, stdout: "tmux 3.5\n", stderr: "" }
     if (args[0] === "-V") return { code: 0, stdout: "tmux 3.6\n", stderr: "" }
@@ -66,6 +67,24 @@ test("doctor is offline read-only and stable", async () => {
     { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" },
   ])
   expect(h.tree()).toBe(before)
+})
+
+test.each([undefined, "", "relative/socket"]) ("doctor ignores non-absolute TMUX_TMPDIR values", async tmuxTmpdir => {
+  const h = fixture(undefined, tmuxTmpdir)
+  await doctor(h.deps)
+  expect(h.tmuxEnvironments).toEqual([
+    { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" },
+    { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" },
+  ])
+})
+
+test("doctor forwards only an absolute TMUX_TMPDIR to both tmux calls", async () => {
+  const h = fixture(undefined, "/private/tmp/tmux-501")
+  await doctor(h.deps)
+  expect(h.tmuxEnvironments).toEqual([
+    { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C", TMUX_TMPDIR: "/private/tmp/tmux-501" },
+    { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C", TMUX_TMPDIR: "/private/tmp/tmux-501" },
+  ])
 })
 
 test.each(["ownership.schema", "ownership.paths", "transaction.complete", "current.link", "current.target", "inventory.entries", "inventory.metadata", "binary.version", "tmux.version", "tmux.config", "opencode.config", "ownership.managed-paths"])("doctor records %s failures without mutation", async id => {

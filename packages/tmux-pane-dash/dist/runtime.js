@@ -14,7 +14,7 @@ var __export = (target, all) => {
 };
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 
-// src/errors.ts
+// packages/tmux-pane-dash/src/errors.ts
 var CliError;
 var init_errors = __esm(() => {
   CliError = class CliError extends Error {
@@ -27,7 +27,7 @@ var init_errors = __esm(() => {
   };
 });
 
-// src/args.ts
+// packages/tmux-pane-dash/src/args.ts
 function parseArgs(argv) {
   const [name, ...options] = argv;
   if (name === "setup") {
@@ -67,14 +67,14 @@ var init_args = __esm(() => {
   init_errors();
 });
 
-// src/contracts.ts
+// packages/tmux-pane-dash/src/contracts.ts
 var TARGET_KEYS, MAX_ARCHIVE_SIZE;
 var init_contracts = __esm(() => {
   TARGET_KEYS = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"];
   MAX_ARCHIVE_SIZE = 64 * 1024 * 1024;
 });
 
-// src/platform.ts
+// packages/tmux-pane-dash/src/platform.ts
 function selectTarget(platform, arch) {
   const target = `${platform}-${arch}`;
   if (target === "darwin-arm64" || target === "darwin-x64" || target === "linux-arm64" || target === "linux-x64")
@@ -85,7 +85,7 @@ var init_platform = __esm(() => {
   init_errors();
 });
 
-// src/manifest.ts
+// packages/tmux-pane-dash/src/manifest.ts
 function parseReleaseManifest(value) {
   if (!keys(value, ["schemaVersion", "repository", "version", "tag", "assets"]) || value.schemaVersion !== 1 || value.repository !== "xiopt/tmux-pane-dash" || typeof value.version !== "string" || !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value.version) || value.tag !== `v${value.version}` || !keys(value.assets, TARGET_KEYS))
     throw new CliError("E_MANIFEST", "invalid release manifest");
@@ -113,7 +113,7 @@ var init_manifest = __esm(() => {
   };
 });
 
-// src/fs.ts
+// packages/tmux-pane-dash/src/fs.ts
 import { chmod, lstat, mkdir, open, readdir, readFile, readlink, rename, rm } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -162,7 +162,7 @@ var init_fs = __esm(() => {
   init_errors();
 });
 
-// src/config-opencode.ts
+// packages/tmux-pane-dash/src/config-opencode.ts
 import { lstat as lstat2, readdir as readdir2, realpath } from "node:fs/promises";
 import { join as join2 } from "node:path";
 async function selectOpenCodeConfig(env, deps) {
@@ -471,7 +471,7 @@ var init_config_opencode = __esm(() => {
   decoder = new TextDecoder;
 });
 
-// src/config-tmux.ts
+// packages/tmux-pane-dash/src/config-tmux.ts
 function shellQuote(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
@@ -548,7 +548,7 @@ var init_config_tmux = __esm(() => {
   decoder2 = new TextDecoder;
 });
 
-// src/ownership.ts
+// packages/tmux-pane-dash/src/ownership.ts
 import { lstat as lstat3, mkdir as mkdir2, readFile as readFile2, readlink as readlink2, readdir as readdir3 } from "node:fs/promises";
 import { join as join3, resolve as resolve3 } from "node:path";
 async function managedRoot(env) {
@@ -633,7 +633,7 @@ var init_ownership = __esm(() => {
   init_errors();
 });
 
-// src/commands/doctor.ts
+// packages/tmux-pane-dash/src/commands/doctor.ts
 var exports_doctor = {};
 __export(exports_doctor, {
   renderDoctorJson: () => renderDoctorJson,
@@ -706,7 +706,7 @@ function tmuxVersion(value) {
 async function run(deps, path, args) {
   if (!deps.spawn)
     throw new Error("child execution unavailable");
-  return deps.spawn(path, args, { timeoutMs: 5000, env: childEnv, maxOutputBytes: 8 * 1024 });
+  return deps.spawn(path, args, { timeoutMs: 5000, env: childEnv(deps.env?.TMUX_TMPDIR), maxOutputBytes: 8 * 1024 });
 }
 function tmuxBindings(output) {
   return output.split(`
@@ -896,7 +896,7 @@ function renderDoctorHuman(report) {
 ${report.healthy ? "healthy" : "unhealthy"}
 `;
 }
-var DOCTOR_CHECK_IDS, text, control, maxMessage = 160, clean = (value) => String(value instanceof Error ? value.message : value).replace(control, " ").replace(/(?:authorization|cookie|token)\s*[:=]\s*\S+/gi, "$1=<redacted>").replace(/\/[A-Za-z0-9_.~%+@=,:;-]+(?:\/[A-Za-z0-9_.~%+@=,:;-]+)*/g, "<path>").replace(/\s+/g, " ").trim().slice(0, maxMessage) || "operation failed", missing4 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", exactKeys = (value, keys2) => !!value && typeof value === "object" && Object.keys(value).sort().join("\x00") === [...keys2].sort().join("\x00"), hash = (bytes) => createHash2("sha256").update(bytes).digest("hex"), childEnv;
+var DOCTOR_CHECK_IDS, text, control, maxMessage = 160, clean = (value) => String(value instanceof Error ? value.message : value).replace(control, " ").replace(/(?:authorization|cookie|token)\s*[:=]\s*\S+/gi, "$1=<redacted>").replace(/\/[A-Za-z0-9_.~%+@=,:;-]+(?:\/[A-Za-z0-9_.~%+@=,:;-]+)*/g, "<path>").replace(/\s+/g, " ").trim().slice(0, maxMessage) || "operation failed", missing4 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", exactKeys = (value, keys2) => !!value && typeof value === "object" && Object.keys(value).sort().join("\x00") === [...keys2].sort().join("\x00"), hash = (bytes) => createHash2("sha256").update(bytes).digest("hex"), childEnv = (tmuxTmpdir) => ({ PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C", ...tmuxTmpdir?.startsWith("/") ? { TMUX_TMPDIR: tmuxTmpdir } : {} });
 var init_doctor = __esm(() => {
   init_config_opencode();
   init_config_tmux();
@@ -918,10 +918,9 @@ var init_doctor = __esm(() => {
   ];
   text = new TextDecoder;
   control = /[\u0000-\u001f\u007f]/g;
-  childEnv = { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" };
 });
 
-// src/archive.ts
+// packages/tmux-pane-dash/src/archive.ts
 import { createHash as createHash3 } from "node:crypto";
 import { join as join5 } from "node:path";
 import { createInflateRaw } from "node:zlib";
@@ -1290,7 +1289,7 @@ var init_archive = __esm(() => {
   manifestKeys = ["asset", "files", "product", "schemaVersion", "target", "version"];
 });
 
-// src/acquire.ts
+// packages/tmux-pane-dash/src/acquire.ts
 import { createHash as createHash4 } from "node:crypto";
 import { join as join6 } from "node:path";
 function fail4(code) {
@@ -1513,7 +1512,7 @@ var init_acquire = __esm(() => {
   archiveLimits = { maxEntries: 64, maxTotalBytes: 268435456, maxFileBytes: 134217728, timeoutMs: 30000 };
 });
 
-// src/journal.ts
+// packages/tmux-pane-dash/src/journal.ts
 import { mkdir as mkdir3, open as open2, readFile as readFile3, rename as rename2 } from "node:fs/promises";
 import { dirname as dirname3, join as join7 } from "node:path";
 import { randomBytes as randomBytes2 } from "node:crypto";
@@ -1590,7 +1589,7 @@ var init_journal = __esm(() => {
   journalPhases = ["prepared", "version_staged", "configs_staged", "current_switched", "configs_committed", "ownership_committed", "complete"];
 });
 
-// src/transaction.ts
+// packages/tmux-pane-dash/src/transaction.ts
 import { createHash as createHash5, randomBytes as randomBytes3 } from "node:crypto";
 import { chmod as chmod2, lstat as lstat4, mkdir as mkdir4, open as open3, readFile as readFile4, readlink as readlink3, readdir as readdir4, rename as rename3, rm as rm2, symlink } from "node:fs/promises";
 import { dirname as dirname4, join as join8 } from "node:path";
@@ -1902,7 +1901,7 @@ var init_transaction = __esm(() => {
   absent = { type: "absent", sha256: null, mode: null };
 });
 
-// src/commands/setup.ts
+// packages/tmux-pane-dash/src/commands/setup.ts
 var exports_setup = {};
 __export(exports_setup, {
   setup: () => setup,
@@ -1992,7 +1991,7 @@ var init_setup = __esm(() => {
   encoder3 = new TextEncoder;
 });
 
-// src/commands/update.ts
+// packages/tmux-pane-dash/src/commands/update.ts
 var exports_update = {};
 __export(exports_update, {
   update: () => update
@@ -2029,7 +2028,7 @@ var init_update = __esm(() => {
   init_setup();
 });
 
-// src/commands/uninstall.ts
+// packages/tmux-pane-dash/src/commands/uninstall.ts
 var exports_uninstall = {};
 __export(exports_uninstall, {
   uninstall: () => uninstall
@@ -2098,7 +2097,7 @@ var init_uninstall = __esm(() => {
   init_transaction();
 });
 
-// src/runtime.ts
+// packages/tmux-pane-dash/src/runtime.ts
 function versionParts(version) {
   const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.exec(version);
   if (!match)
