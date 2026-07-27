@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test"
-import { lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises"
+import { lstat, mkdir, readFile, readlink, stat, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { executeTransaction, recoverIncomplete, type TransactionPlan } from "../src/transaction"
-import type { JournalPhase } from "../src/journal"
+import { readJournal, type JournalPhase } from "../src/journal"
 import { transactionFixture } from "./helpers/fixture"
 
 const phases: readonly JournalPhase[] = ["prepared", "version_staged", "configs_staged", "current_switched", "configs_committed", "ownership_committed", "complete"]
@@ -26,6 +26,74 @@ test("every persisted phase recovers after dead-owner crash and preserves eviden
       await expect(executeTransaction(plan(h.root), { ...h.deps, crashPhase: phase })).rejects.toThrow("E_CRASH")
       await expect(recoverIncomplete(h.root, h.deps)).resolves.toBeUndefined()
       await expect(Bun.file(join(h.root, "tmux.conf")).exists()).resolves.toBeFalse()
+    } finally { await h.cleanup() }
+  }
+})
+
+async function snapshot(path: string) {
+  try {
+    const entry = await lstat(path)
+    if (entry.isSymbolicLink()) return { type: "symlink", target: await readlink(path), mode: entry.mode & 0o777 }
+    return { type: "file", bytes: await readFile(path), mode: entry.mode & 0o777 }
+  } catch (error: any) {
+    if (error.code === "ENOENT") return { type: "absent" }
+    throw error
+  }
+}
+
+test("durable mutation intents recover every current, ordered config, and ownership crash window", async () => {
+  const windows = ["intent", "published", "applied"] as const
+  const mutations = [
+    { operation: "current", occurrence: 1 },
+    { operation: "config", occurrence: 1 },
+    { operation: "config", occurrence: 2 },
+    { operation: "ownership", occurrence: 1 },
+  ] as const
+  for (const mutation of mutations) for (const boundary of windows) {
+    const h = await transactionFixture({ alive: false })
+    try {
+      await mkdir(join(h.root, "versions", "0.0.9"), { recursive: true })
+      await mkdir(join(h.root, "state"), { recursive: true })
+      await symlink("versions/0.0.9", join(h.root, "current"))
+      await writeFile(join(h.root, "tmux.conf"), "old tmux", { mode: 0o640 })
+      await writeFile(join(h.root, "opencode.json"), "old open", { mode: 0o600 })
+      await writeFile(join(h.root, "state", "ownership.json"), "old ownership", { mode: 0o640 })
+      const before = await Promise.all(["current", "tmux.conf", "opencode.json", "state/ownership.json"].map(path => snapshot(join(h.root, path))))
+      await expect(executeTransaction(plan(h.root), { ...h.deps, crashMutation: { ...mutation, boundary } } as any)).rejects.toThrow("E_CRASH")
+      const journal = await readJournal(h.root, "abababababababababababababababab", h.deps), recorded = journal!.mutations.filter(item => item.operation === mutation.operation)[mutation.occurrence - 1]
+      expect(recorded.applied).toBe(boundary === "applied")
+      if (mutation.operation === "current") expect(recorded.pre).toMatchObject(before[0])
+      else expect(recorded.pre).toEqual({ type: "file", sha256: expect.any(String), mode: mutation.operation === "ownership" || mutation.occurrence === 1 ? 0o640 : 0o600 })
+      if (mutation.operation !== "current") expect(await Bun.file(join(h.root, "transactions", journal!.id, recorded.preimage!)).exists()).toBeTrue()
+      await expect(recoverIncomplete(h.root, h.deps)).resolves.toBeUndefined()
+      await expect(Promise.all(["current", "tmux.conf", "opencode.json", "state/ownership.json"].map(path => snapshot(join(h.root, path))))).resolves.toEqual(before)
+    } finally { await h.cleanup() }
+  }
+})
+
+test("recovery leaves an unapplied intent untouched and rejects collision without overwriting evidence", async () => {
+  const h = await transactionFixture({ alive: false })
+  try {
+    await expect(executeTransaction(plan(h.root), { ...h.deps, crashMutation: { operation: "config", occurrence: 1, boundary: "intent" } } as any)).rejects.toThrow("E_CRASH")
+    expect(await Bun.file(join(h.root, "tmux.conf")).exists()).toBeFalse()
+    await recoverIncomplete(h.root, h.deps)
+    await expect(executeTransaction(plan(h.root), { ...h.deps, crashMutation: { operation: "config", occurrence: 1, boundary: "published" } } as any)).rejects.toThrow("E_CRASH")
+    await writeFile(join(h.root, "tmux.conf"), "collision")
+    await expect(recoverIncomplete(h.root, h.deps)).rejects.toThrow("E_RECOVERY")
+    expect(await readFile(join(h.root, "tmux.conf"), "utf8")).toBe("collision")
+    expect(await Bun.file(join(h.root, "transactions", "abababababababababababababababab", "journal.json")).exists()).toBeTrue()
+  } finally { await h.cleanup() }
+})
+
+test("ownership rollback restores byte-identical existing state or preserves absence", async () => {
+  for (const existing of [true, false]) {
+    const h = await transactionFixture()
+    try {
+      const ownership = join(h.root, "state", "ownership.json")
+      if (existing) { await mkdir(join(h.root, "state"), { recursive: true }); await writeFile(ownership, "{\"opaque\":true}\n", { mode: 0o640 }) }
+      const before = await snapshot(ownership)
+      await expect(executeTransaction(plan(h.root), { ...h.deps, faultPhase: { phase: "ownership_committed", boundary: "after" } })).rejects.toThrow()
+      expect(await snapshot(ownership)).toEqual(before)
     } finally { await h.cleanup() }
   }
 })

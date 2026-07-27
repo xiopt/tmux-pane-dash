@@ -30,6 +30,7 @@ export type Dependencies = {
   journalEvent?: (event: string) => void
   faultPhase?: { phase: string; boundary: "before" | "after" }
   crashPhase?: string
+  crashMutation?: { operation: "current" | "config" | "ownership"; occurrence: number; boundary: "intent" | "published" | "applied" }
   collisionAfterMutation?: boolean
   signal?: "HUP" | "INT" | "TERM"
 }

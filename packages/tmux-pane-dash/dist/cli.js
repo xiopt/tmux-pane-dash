@@ -108,7 +108,15 @@ function nodeDependencies() {
         resolve2({ code: code ?? 1, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() });
     });
   });
-  return { manifest: release_manifest_default, platform: process.platform, arch: process.arch, executingVersion: release_manifest_default.version, ...{ fs: nodeFsOps(), nowMs: Date.now, fetch: globalThis.fetch.bind(globalThis), spawn: child } };
+  const env = Object.getOwnPropertyDescriptor(process, "env").value;
+  return { manifest: release_manifest_default, platform: process.platform, arch: process.arch, executingVersion: release_manifest_default.version, ...{ fs: nodeFsOps(), nowMs: Date.now, fetch: globalThis.fetch.bind(globalThis), spawn: child, env, pid: () => process.pid, uid: () => process.getuid?.() ?? 0, isPidAlive: (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  } } };
 }
 
 // packages/tmux-pane-dash/src/errors.ts

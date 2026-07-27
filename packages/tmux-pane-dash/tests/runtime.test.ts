@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { assertDowngradeAllowed, compareVersions, runCli } from "../src/runtime"
+import { nodeDependencies } from "../src/dependencies"
 import { CliError } from "../src/errors"
 
 const manifest = { schemaVersion: 1, repository: "xiopt/tmux-pane-dash", version: "0.1.0", tag: "v0.1.0", assets: {
@@ -41,4 +42,11 @@ test("packages the unexported runtime only as an absolute file module", async ()
   expect(pkg.files).toEqual(["dist/cli.js", "dist/runtime.js", "generated/release-manifest.json", "README.md", "LICENSE"])
   expect(pkg.exports).toBeUndefined()
   await expect(import(pathToFileURL(resolve(import.meta.dir, "..", "dist", "runtime.js")).href)).resolves.toHaveProperty("runCli")
+})
+
+test("production dependencies and packed CLI construct and execute a command path", async () => {
+  expect(nodeDependencies().pid?.()).toBe(process.pid)
+  const child = Bun.spawn([process.execPath, resolve(import.meta.dir, "..", "dist", "cli.js"), "doctor"], { stdout: "pipe", stderr: "pipe" })
+  expect(await child.exited).toBe(0)
+  expect(await new Response(child.stderr).text()).toBe("")
 })
