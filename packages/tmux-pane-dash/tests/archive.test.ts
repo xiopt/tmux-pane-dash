@@ -54,6 +54,31 @@ test("accepts a single stored-DEFLATE member containing a gzip signature and rej
   } finally { await rm(root, { recursive: true, force: true }); await rm(second, { recursive: true, force: true }) }
 })
 
+test("accepts a valid gzip footer split across streamed chunks", async () => {
+  const value = releaseArchive(), footerStart = value.length - 8
+  for (let footerBytes = 1; footerBytes < 8; footerBytes += 1) {
+    const root = await mkdtemp(join(tmpdir(), "pane-dash-gzip-footer-"))
+    try {
+      async function* split() {
+        const before = footerStart - (footerBytes + 1)
+        yield value.subarray(0, before)
+        yield value.subarray(before, footerStart)
+        yield value.subarray(footerStart, footerStart + footerBytes)
+        yield value.subarray(footerStart + footerBytes)
+      }
+      await expect(extractArchive({ archive: split(), stagingRoot: root, fs: nodeFsOps(), clock: { nowMs: () => 0 }, limits })).resolves.toBeUndefined()
+    } finally { await rm(root, { recursive: true, force: true }) }
+  }
+})
+
+test("bounds trailing zero blocks by total inflated tar bytes", async () => {
+  const tar = gunzipSync(releaseArchive()), value = gzipSync(new Uint8Array([...tar, ...new Uint8Array(512 * 32)]), { mtime: 0 })
+  const root = await mkdtemp(join(tmpdir(), "pane-dash-tar-zeros-"))
+  try {
+    await expect(extractArchive({ archive: chunks(value), stagingRoot: root, fs: nodeFsOps(), clock: { nowMs: () => 0 }, limits: { ...limits, maxTotalBytes: tar.length + 512 } })).rejects.toThrow("E_ARCHIVE_ENTRY")
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test("rejects duplicate, noncanonical, malformed metadata, and cleans the partial root", async () => {
   const limits = { maxEntries: 64, maxTotalBytes: 268435456, maxFileBytes: 134217728, timeoutMs: 30000 } as const
   for (const [value, maximumWrites] of [[archive(entry("README.md"), entry("README.md")), 1], [archive(entry("scripts//open.sh")), 0], [archive(entry("README.md", new Uint8Array(), "0755")), 0], [archive(...Array.from({ length: 65 }, () => entry("README.md"))), 64]] as const) {

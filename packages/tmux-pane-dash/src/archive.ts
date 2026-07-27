@@ -55,7 +55,7 @@ const pieces = (chunks: Uint8Array[], length: number) => { const result = new Ui
 class TarParser {
   private pending = new Uint8Array()
   private entries = 0
-  private total = 0
+  private inflated = 0
   private seen = new Set<string>()
   private ended = false
   private zeroBlocks = 0
@@ -73,7 +73,7 @@ class TarParser {
     this.seen.add(path)
     const fileMode = inventory.get(path), directoryMode = directories.get(path)
     if (type === "0" || type === "\0") {
-      if (fileMode === undefined || mode !== fileMode || size > this.limits.maxFileBytes || (this.total += size) > this.limits.maxTotalBytes) fail("file")
+      if (fileMode === undefined || mode !== fileMode || size > this.limits.maxFileBytes) fail("file")
       this.current = { path, mode: fileMode, size, remaining: size, padding: Math.ceil(size / 512) * 512 - size, body: [] }
       if (size === 0) { await this.finishFile(); this.current = undefined }
     } else if (type === "5") {
@@ -86,6 +86,7 @@ class TarParser {
     await this.wait(this.fs.writeFileExclusive(this.root, current.path, pieces(current.body, current.size), current.mode))
   }
   async push(chunk: Uint8Array) {
+    if ((this.inflated += chunk.length) > this.limits.maxTotalBytes) fail("total size")
     this.pending = this.pending.length ? pieces([this.pending, chunk], this.pending.length + chunk.length) : chunk
     for (;;) {
       if (this.current) {
@@ -128,11 +129,18 @@ export async function extractArchive(input: { archive: AsyncIterable<Uint8Array>
     let compressed = 0, header = new Uint8Array(), body = false, finished = false, footer = new Uint8Array(), crc = 0xffffffff, size = 0
     const output = (async () => { for await (const chunk of inflate) { crc = crc32(crc, chunk); size = (size + chunk.length) >>> 0; await parser.push(chunk) } })(); void output.catch(() => undefined)
     const write = async (chunk: Uint8Array) => {
-      if (finished) fail("gzip member")
+      if (finished) {
+        footer = pieces([footer, chunk], footer.length + chunk.length)
+        if (footer.length > 8) fail("gzip member")
+        return
+      }
       const before = inflate.bytesWritten
       await wait(new Promise<void>((resolve, reject) => inflate.write(chunk, (error) => error ? reject(error) : resolve())))
       const consumed = inflate.bytesWritten - before
-      if (consumed < chunk.length) { footer = chunk.slice(consumed); finished = true }
+      if (consumed < chunk.length) {
+        footer = chunk.slice(consumed); finished = true
+        if (footer.length > 8) fail("gzip member")
+      }
     }
     const writer = (async () => {
       try {
