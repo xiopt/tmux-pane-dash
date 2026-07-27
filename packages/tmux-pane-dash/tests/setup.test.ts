@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
-import { mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises"
+import { lstat, mkdir, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { doctor } from "../src/commands/doctor"
 import { setup } from "../src/commands/setup"
 import { uninstall } from "../src/commands/uninstall"
 import { managedRoot, readOwnership } from "../src/ownership"
@@ -25,8 +26,17 @@ test("fresh setup owns both components and equal setup reuses the verified paylo
     const deps = { ...h.deps, env: { XDG_DATA_HOME: join(h.outside, "data"), HOME: h.outside }, manifest: manifest(), fetch: async () => { h.calls.fetch += 1; return { status: 200, body: body(archive) } } }
     await setup({ name: "setup", tmux: true, opencode: true, migrate: false, allowDowngrade: false }, deps)
     const ownership = await readOwnership(await managedRoot(deps.env), deps)
+    const versionRoot = join(await managedRoot(deps.env), "versions", deps.executingVersion)
     expect(ownership?.components.tmux?.marker).toContain("schema=1")
     expect(ownership?.components.opencode?.packageEntries).toEqual(["@xiopt/pane-dash-opencode@0.1.0"])
+    expect(ownership?.files.every(file => file.logicalPath.startsWith(`${versionRoot}/`) && file.resolvedPath.startsWith(`${versionRoot}/`) && !file.logicalPath.includes("/transactions/") && !file.resolvedPath.includes("/transactions/"))).toBeTrue()
+    await Promise.all(ownership!.files.flatMap(file => [lstat(file.logicalPath), lstat(file.resolvedPath)]))
+    const report = await doctor({ ...deps, doctorFs: { readFile: async path => new Uint8Array(await readFile(path)), stat: async path => {
+      const info = await lstat(path)
+      return { kind: info.isFile() ? "file" as const : info.isDirectory() ? "directory" as const : info.isSymbolicLink() ? "symlink" as const : "other" as const, mode: info.mode & 0o777, size: info.size, dev: info.dev, ino: info.ino }
+    }, readdir, readlink } })
+    expect(report.checks.find(check => check.id === "inventory.entries")?.status).toBe("ok")
+    expect(report.checks.find(check => check.id === "inventory.metadata")?.status).toBe("ok")
     const fetches = h.calls.fetch
     await setup({ name: "setup", tmux: true, opencode: true, migrate: false, allowDowngrade: false }, deps)
     expect(h.calls.fetch).toBe(fetches)

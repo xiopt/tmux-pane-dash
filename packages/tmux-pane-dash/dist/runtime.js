@@ -1955,9 +1955,9 @@ async function inventoryConflicts(input, deps) {
 function owned(path, marker, packageEntries = []) {
   return { logicalPath: path.logicalPath, resolvedPath: path.resolvedPath, marker, packageEntries, baselineBackup: { logicalPath: path.logicalPath, sha256: digest2(path.bytes) } };
 }
-async function files(directory) {
+async function files(directory, destination = directory) {
   const raw = JSON.parse(await readFile5(join9(directory, "manifest.json"), "utf8"));
-  return raw.files.map((file) => ({ logicalPath: join9(directory, file.path), resolvedPath: join9(directory, file.path), sha256: file.sha256, mode: Number.parseInt(file.mode, 8), type: "file" }));
+  return raw.files.map((file) => ({ logicalPath: join9(destination, file.path), resolvedPath: join9(destination, file.path), sha256: file.sha256, mode: Number.parseInt(file.mode, 8), type: "file" }));
 }
 async function setup(command, deps) {
   const root2 = await managedRoot(deps.env);
@@ -1971,7 +1971,7 @@ async function setup(command, deps) {
   await ensureManagedRoot(root2);
   const staging = join9(root2, "transactions", `payload-${Buffer.from(deps.randomBytes?.(8) ?? randomBytes4(8)).toString("hex")}`);
   const acquired = await acquireRelease({ versionDirectory: join9(root2, "versions", deps.executingVersion), stagingRoot: staging, record: record2, deps });
-  const payload = await files(acquired.versionDirectory), currentTarget = `versions/${deps.executingVersion}`;
+  const payload = await files(acquired.versionDirectory, join9(root2, "versions", deps.executingVersion)), currentTarget = `versions/${deps.executingVersion}`;
   const ownership = { schemaVersion: 1, packageVersion: deps.executingVersion, releaseVersion: deps.executingVersion, archive: { target: record2.target, sha256: record2.sha256 }, files: payload, currentTarget, components: {
     tmux: inventory2.tmux ? owned(inventory2.tmux, managedTmuxBlock(root2)) : prior?.components.tmux ?? null,
     opencode: inventory2.opencode ? owned(inventory2.opencode, packageEntry, [packageEntry]) : prior?.components.opencode ?? null

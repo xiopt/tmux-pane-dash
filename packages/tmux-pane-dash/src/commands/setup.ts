@@ -41,9 +41,9 @@ export async function inventoryConflicts(input: { tmux: boolean; opencode: boole
 }
 
 function owned(path: PlannedConfigMutation, marker: string, packageEntries: readonly string[] = []) { return { logicalPath: path.logicalPath, resolvedPath: path.resolvedPath, marker, packageEntries, baselineBackup: { logicalPath: path.logicalPath, sha256: digest(path.bytes) } } }
-async function files(directory: string) {
+async function files(directory: string, destination = directory) {
   const raw = JSON.parse(await readFile(join(directory, "manifest.json"), "utf8")) as { files: { path: string; sha256: string; mode: string }[] }
-  return raw.files.map(file => ({ logicalPath: join(directory, file.path), resolvedPath: join(directory, file.path), sha256: file.sha256, mode: Number.parseInt(file.mode, 8), type: "file" as const }))
+  return raw.files.map(file => ({ logicalPath: join(destination, file.path), resolvedPath: join(destination, file.path), sha256: file.sha256, mode: Number.parseInt(file.mode, 8), type: "file" as const }))
 }
 
 export async function setup(command: Extract<Command, { name: "setup" }>, deps: Dependencies): Promise<void> {
@@ -57,7 +57,7 @@ export async function setup(command: Extract<Command, { name: "setup" }>, deps: 
   await ensureManagedRoot(root)
   const staging = join(root, "transactions", `payload-${Buffer.from(deps.randomBytes?.(8) ?? randomBytes(8)).toString("hex")}`)
   const acquired = await acquireRelease({ versionDirectory: join(root, "versions", deps.executingVersion), stagingRoot: staging, record, deps })
-  const payload = await files(acquired.versionDirectory), currentTarget = `versions/${deps.executingVersion}`
+  const payload = await files(acquired.versionDirectory, join(root, "versions", deps.executingVersion)), currentTarget = `versions/${deps.executingVersion}`
   const ownership: OwnershipRecord = { schemaVersion: 1, packageVersion: deps.executingVersion, releaseVersion: deps.executingVersion, archive: { target: record.target, sha256: record.sha256 }, files: payload, currentTarget, components: {
     tmux: inventory.tmux ? owned(inventory.tmux, managedTmuxBlock(root)) : prior?.components.tmux ?? null,
     opencode: inventory.opencode ? owned(inventory.opencode, packageEntry, [packageEntry]) : prior?.components.opencode ?? null,
