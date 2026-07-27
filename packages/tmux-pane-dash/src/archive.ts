@@ -145,5 +145,6 @@ export async function inspectPayload(root: string, manifest: InternalManifest, d
 }
 export async function verifyBinary(path: string, version: string, deps: Dependencies): Promise<void> {
   if (!deps.spawn) throw new Error("E_BINARY_VERSION: unavailable")
-  try { const result = await deps.spawn(path, ["--version"], { timeoutMs: 5000, env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" }, maxOutputBytes: 4096 }); if (Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) > 4096 || result.code !== 0 || result.stdout !== `pane-dash ${version}\n` || result.stderr !== "") throw new Error("invalid") } catch { throw new Error("E_BINARY_VERSION: self check failed") }
+  const result = await deps.spawn(path, ["--version"], { timeoutMs: 5000, env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" }, maxOutputBytes: 4096 })
+  if (Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) > 4096 || result.code !== 0 || result.stdout !== `pane-dash ${version}\n` || result.stderr !== "") throw new Error("E_BINARY_VERSION: self check failed")
 }

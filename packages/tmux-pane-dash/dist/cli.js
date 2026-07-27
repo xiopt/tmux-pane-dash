@@ -12,9 +12,103 @@ var release_manifest_default = {
 };
 
 // packages/tmux-pane-dash/src/dependencies.ts
+import { spawn } from "node:child_process";
 import process from "node:process";
+
+// packages/tmux-pane-dash/src/fs.ts
+import { chmod, lstat, mkdir, open, readdir, readFile, rm } from "node:fs/promises";
+import { dirname, resolve, sep } from "node:path";
+function canonicalPayloadPath(path) {
+  if (!path || path.includes("\x00") || path.includes("\\") || path.startsWith("/") || path.endsWith("/") || path.includes("//"))
+    throw new Error("invalid payload path");
+  if (path.split("/").some((part) => !part || part === "." || part === ".."))
+    throw new Error("invalid payload path");
+  return path;
+}
+function within(root, relative) {
+  const base = resolve(root), path = resolve(base, canonicalPayloadPath(relative));
+  if (!path.startsWith(`${base}${sep}`))
+    throw new Error("path escapes root");
+  return path;
+}
+function nodeFsOps() {
+  return {
+    async mkdir(path) {
+      await mkdir(path, { recursive: true, mode: 448 });
+    },
+    async readFile(path) {
+      return new Uint8Array(await readFile(path));
+    },
+    async mkdirPayloadDirectory(root, relative, mode) {
+      const path = within(root, relative);
+      await mkdir(path, { recursive: false, mode: mode & 511 });
+      await chmod(path, mode & 511);
+    },
+    async writeFileExclusive(root, relative, bytes, mode) {
+      const path = within(root, relative);
+      await mkdir(dirname(path), { recursive: true, mode: 448 });
+      const file = await open(path, "wx", mode & 511);
+      try {
+        await file.writeFile(bytes);
+      } finally {
+        await file.close();
+      }
+    },
+    async openExclusive(path, mode) {
+      return open(path, "wx", mode & 511);
+    },
+    async write(file, bytes) {
+      await file.writeFile(bytes);
+    },
+    async close(file) {
+      await file.close();
+    },
+    async stat(path) {
+      const entry = await lstat(path);
+      return { kind: entry.isFile() ? "file" : entry.isDirectory() ? "directory" : entry.isSymbolicLink() ? "symlink" : "other", mode: entry.mode & 4095, size: entry.size };
+    },
+    async readdir(path) {
+      return readdir(path);
+    },
+    async rm(path) {
+      await rm(path, { recursive: true, force: true });
+    }
+  };
+}
+
+// packages/tmux-pane-dash/src/dependencies.ts
 function nodeDependencies() {
-  return { manifest: release_manifest_default, platform: process.platform, arch: process.arch, executingVersion: release_manifest_default.version };
+  const child = (path, args, options) => new Promise((resolve2, reject) => {
+    const process2 = spawn(path, args, { env: options.env, stdio: ["ignore", "pipe", "pipe"] });
+    const stdout = [], stderr = [];
+    let size = 0, overflow = false, timedOut = false;
+    const receive = (target) => (chunk) => {
+      size += chunk.length;
+      if (size > options.maxOutputBytes) {
+        overflow = true;
+        process2.kill("SIGKILL");
+      } else
+        target.push(chunk);
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      process2.kill("SIGKILL");
+    }, options.timeoutMs);
+    timeout.unref();
+    process2.stdout.on("data", receive(stdout));
+    process2.stderr.on("data", receive(stderr));
+    process2.once("error", reject);
+    process2.once("close", (code) => {
+      clearTimeout(timeout);
+      if (overflow)
+        reject(new Error("E_BINARY_OUTPUT"));
+      else if (timedOut)
+        reject(new Error("E_BINARY_TIMEOUT"));
+      else
+        resolve2({ code: code ?? 1, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() });
+    });
+  });
+  return { manifest: release_manifest_default, platform: process.platform, arch: process.arch, executingVersion: release_manifest_default.version, ...{ fs: nodeFsOps(), nowMs: Date.now, fetch: globalThis.fetch.bind(globalThis), spawn: child } };
 }
 
 // packages/tmux-pane-dash/src/errors.ts
