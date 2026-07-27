@@ -1,0 +1,46 @@
+import { parseArgs } from "./args"
+import type { Command, ReleaseManifest } from "./contracts"
+import { CliError } from "./errors"
+import { parseReleaseManifest, selectRelease } from "./manifest"
+
+export type Dependencies = {
+  manifest: unknown
+  platform: NodeJS.Platform
+  arch: NodeJS.Architecture
+  executingVersion: string
+  ownedVersion?: string
+  lock?: () => void | Promise<void>
+  fetch?: () => void | Promise<void>
+}
+
+function versionParts(version: string): readonly [number, number, number] {
+  const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.exec(version)
+  if (!match) throw new CliError("E_VERSION", "invalid version")
+  return [Number(match[1]), Number(match[2]), Number(match[3])]
+}
+
+export function compareVersions(left: string, right: string): -1 | 0 | 1 {
+  const leftParts = versionParts(left), rightParts = versionParts(right)
+  for (let index = 0; index < leftParts.length; index += 1) {
+    if (leftParts[index] < rightParts[index]) return -1
+    if (leftParts[index] > rightParts[index]) return 1
+  }
+  return 0
+}
+
+export function assertDowngradeAllowed(input: { command: Command; executingVersion: string; ownedVersion: string }): void {
+  if (compareVersions(input.executingVersion, input.ownedVersion) >= 0) return
+  if (input.command.name === "setup" && input.command.allowDowngrade) return
+  throw new CliError("E_DOWNGRADE", "refusing to downgrade")
+}
+
+export async function runCli(argv: readonly string[], deps: Dependencies): Promise<number> {
+  const command = parseArgs(argv)
+  if (command.name === "doctor" || command.name === "uninstall") return 0
+  const manifest: ReleaseManifest = parseReleaseManifest(deps.manifest)
+  selectRelease(manifest, deps.platform, deps.arch)
+  if (command.name === "update" && deps.ownedVersion === undefined) throw new CliError("E_USAGE", "no installation; run setup")
+  if (deps.ownedVersion !== undefined) assertDowngradeAllowed({ command, executingVersion: deps.executingVersion, ownedVersion: deps.ownedVersion })
+  await deps.lock?.()
+  return 0
+}

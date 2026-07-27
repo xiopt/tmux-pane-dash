@@ -9,8 +9,13 @@
       "name": "@xiopt/pane-dash-opencode",
       "version": "0.1.0",
     },
+    "packages/tmux-pane-dash": {
+      "name": "@xiopt/tmux-pane-dash",
+      "version": "0.1.0",
+    },
   },
   "packages": {
     "@xiopt/pane-dash-opencode": ["@xiopt/pane-dash-opencode@workspace:opencode-plugin"],
+    "@xiopt/tmux-pane-dash": ["@xiopt/tmux-pane-dash@workspace:packages/tmux-pane-dash"],
   }
 }

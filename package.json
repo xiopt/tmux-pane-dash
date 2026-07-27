@@ -5,8 +5,9 @@
   "packageManager": "bun@1.3.14",
   "workspaces": ["packages/*", "opencode-plugin"],
   "scripts": {
-    "test": "bun test scripts/release/tests opencode-plugin/tests",
+    "test": "bun test scripts/release/tests opencode-plugin/tests packages/tmux-pane-dash/tests",
     "build": "bun scripts/release/build.ts",
-    "version:check": "bun scripts/release/version-sync.ts --check"
+    "version:check": "bun scripts/release/version-sync.ts --check",
+    "pack:check": "bun scripts/release/verify-artifacts.ts --packages"
   }
 }
