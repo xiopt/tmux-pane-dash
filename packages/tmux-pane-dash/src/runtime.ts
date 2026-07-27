@@ -58,11 +58,11 @@ export function assertDowngradeAllowed(input: { command: Command; executingVersi
 
 export async function runCli(argv: readonly string[], deps: Dependencies): Promise<number> {
   const command = parseArgs(argv)
-  if (command.name === "doctor" || command.name === "uninstall") return 0
-  const manifest: ReleaseManifest = parseReleaseManifest(deps.manifest)
-  selectRelease(manifest, deps.platform, deps.arch)
-  if (command.name === "update" && deps.ownedVersion === undefined) throw new CliError("E_USAGE", "no installation; run setup")
-  if (deps.ownedVersion !== undefined) assertDowngradeAllowed({ command, executingVersion: deps.executingVersion, ownedVersion: deps.ownedVersion })
+  if (command.name === "doctor") return 0
+  if (command.name === "setup") { const manifest: ReleaseManifest = parseReleaseManifest(deps.manifest); selectRelease(manifest, deps.platform, deps.arch) }
   await deps.lock?.()
+  if (command.name === "setup") await (await import("./commands/setup")).setup(command, deps)
+  else if (command.name === "update") await (await import("./commands/update")).update(deps)
+  else await (await import("./commands/uninstall")).uninstall(deps)
   return 0
 }

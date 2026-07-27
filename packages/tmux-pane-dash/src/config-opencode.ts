@@ -104,3 +104,16 @@ export function planOpenCodeEdit(input: OpenCodeEditInput): PlannedConfigMutatio
   const newline = text.includes("\r\n") ? "\r\n" : "\n", prefix = text.slice(0, closeIndex), indent = /(?:^|\n)([ \t]+)"/.exec(prefix)?.[1] ?? "  ", comma = /\{\s*$/.test(prefix) ? "" : ","
   return { ...input, bytes: encoder.encode(`${prefix}${comma}${newline}${indent}"plugin": [${JSON.stringify(desired)}]${newline}${text.slice(closeIndex)}`) }
 }
+
+/** Removes exactly one ownership-recorded package element, preserving every other token. */
+export function planOpenCodeRemoval(input: Omit<OpenCodeEditInput, "migrate">): PlannedConfigMutation {
+  const text = decoder.decode(input.bytes), plugin = rootPlugin(text), owned = input.ownedEntries
+  if (!plugin || owned?.length !== 1) fail("E_CONFIG_CONFLICT")
+  const matches = plugin.entries.filter(entry => entry.value === owned[0])
+  if (matches.length !== 1) fail("E_CONFIG_CONFLICT")
+  const entry = matches[0]!, index = plugin.entries.indexOf(entry)
+  let start = entry.start, end = entry.end
+  if (entry.comma !== undefined) end = entry.comma + 1
+  else if (index > 0) { const previous = plugin.entries[index - 1]!; start = previous.comma! }
+  return { ...input, bytes: encoder.encode(`${text.slice(0, start)}${text.slice(end)}`) }
+}

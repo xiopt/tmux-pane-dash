@@ -51,3 +51,11 @@ export function planTmuxEdit(input: TmuxEditInput): PlannedConfigMutation {
   const separator = text.length && !text.endsWith("\n") ? "\n" : ""
   return { ...input, bytes: encoder.encode(`${text}${separator}${block}`) }
 }
+
+/** The inverse accepts only the byte-for-byte block recorded at installation. */
+export function planTmuxRemoval(input: Omit<TmuxEditInput, "migrate">): PlannedConfigMutation {
+  const text = decoder.decode(input.bytes), block = managedTmuxBlock(input.installRoot), range = ownedRange(text, block)
+  if (!range) conflict("managed tmux-pane-dash block is missing")
+  const before = text.slice(0, range.start!), after = text.slice(range.end!)
+  return { ...input, bytes: encoder.encode(`${before.endsWith("\n") && !after ? before.slice(0, -1) : before}${after}`) }
+}

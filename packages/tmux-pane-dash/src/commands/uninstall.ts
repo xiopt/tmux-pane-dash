@@ -1,0 +1,28 @@
+import { createHash } from "node:crypto"
+import { readFile, readlink } from "node:fs/promises"
+import { join } from "node:path"
+import { planOpenCodeRemoval } from "../config-opencode"
+import { planTmuxRemoval } from "../config-tmux"
+import { CliError } from "../errors"
+import { managedRoot, readOwnership, validateManagedRoot } from "../ownership"
+import type { Dependencies } from "../runtime"
+import { executeTransaction, type PlannedConfigMutation } from "../transaction"
+
+const missing = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT"
+const digest = (value: Uint8Array) => createHash("sha256").update(value).digest("hex")
+async function bytes(path: string) { return new Uint8Array(await readFile(path)) }
+export async function uninstall(deps: Dependencies): Promise<void> {
+  const root = await managedRoot(deps.env)
+  try { await validateManagedRoot(root, deps) } catch (error) { if (missing(error)) return; throw error }
+  const ownership = await readOwnership(root, deps)
+  if (!ownership) {
+    if (deps.env?.HOME) try { if ((await readFile(join(deps.env.HOME, ".tmux.conf"), "utf8")).includes("# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>")) throw new CliError("E_OWNERSHIP", "managed marker requires manual review") } catch (error) { if (!missing(error)) throw error }
+    return
+  }
+  try { if (await readlink(join(root, "current")) !== ownership.currentTarget) throw new CliError("E_OWNERSHIP", "owned current target changed") } catch (error) { if (error instanceof CliError) throw error; throw new CliError("E_OWNERSHIP", "owned current target changed") }
+  for (const file of ownership.files) { const content = await bytes(file.resolvedPath); if (digest(content) !== file.sha256) throw new CliError("E_OWNERSHIP", "owned payload changed") }
+  const edits: PlannedConfigMutation[] = []
+  if (ownership.components.tmux) { const item = ownership.components.tmux, content = await bytes(item.resolvedPath); edits.push(planTmuxRemoval({ logicalPath: item.logicalPath, resolvedPath: item.resolvedPath, bytes: content, installRoot: root, mode: 0o600 })) }
+  if (ownership.components.opencode) { const item = ownership.components.opencode, content = await bytes(item.resolvedPath); edits.push(planOpenCodeRemoval({ logicalPath: item.logicalPath, resolvedPath: item.resolvedPath, bytes: content, ownedEntries: item.packageEntries, mode: 0o600 })) }
+  await executeTransaction({ command: "uninstall", components: { tmux: ownership.components.tmux !== null, opencode: ownership.components.opencode !== null }, desiredVersion: ownership.releaseVersion, previousCurrent: ownership.currentTarget, configMutations: edits, uninstall: { tombstoneVersions: true, removeCurrent: true, removeOwnership: true } }, deps)
+}
