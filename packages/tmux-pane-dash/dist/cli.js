@@ -1004,7 +1004,7 @@ function insertionTrivia(text2, plugin) {
     return text2.slice(first.comma + 1, second.start).match(/^\s*$/)?.[0] ?? "";
   return text2.slice(plugin.start + 1, first.start).match(/^\s*/)?.[0] ?? "";
 }
-function insertPlugin(text2, plugin) {
+function insertPlugin(text2, plugin, desired) {
   if (!plugin.entries.length)
     return `${text2.slice(0, plugin.end - 1)}${JSON.stringify(desired)}${text2.slice(plugin.end - 1)}`;
   const entry = plugin.entries[plugin.entries.length - 1];
@@ -1014,7 +1014,7 @@ function insertPlugin(text2, plugin) {
   return `${text2.slice(0, entry.end)}${insertion}${text2.slice(entry.end)}`;
 }
 function planOpenCodeEdit(input) {
-  const text2 = decoder.decode(input.bytes), plugin = rootPlugin(text2);
+  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.0", text2 = decoder.decode(input.bytes), plugin = rootPlugin(text2);
   if (plugin) {
     const managed = plugin.entries.filter((entry) => validPaneDash(entry.value));
     const desiredEntries = managed.filter((entry) => entry.value === desired);
@@ -1029,7 +1029,7 @@ function planOpenCodeEdit(input) {
         fail3("E_CONFIG_CONFLICT");
       return { ...input, bytes: encoder.encode(`${text2.slice(0, entry.start)}${JSON.stringify(desired)}${text2.slice(entry.end)}`) };
     }
-    return { ...input, bytes: encoder.encode(insertPlugin(text2, plugin)) };
+    return { ...input, bytes: encoder.encode(insertPlugin(text2, plugin, desired)) };
   }
   const closeIndex = text2.lastIndexOf("}");
   if (closeIndex < 0)
@@ -1057,7 +1057,7 @@ function planOpenCodeRemoval(input) {
   }
   return { ...input, bytes: encoder.encode(`${text2.slice(0, start)}${text2.slice(end)}`) };
 }
-var desired = "@xiopt/pane-dash-opencode@0.1.0", encoder, decoder, fail3 = (code2 = "E_CONFIG") => {
+var encoder, decoder, fail3 = (code2 = "E_CONFIG") => {
   throw new CliError(code2);
 }, missing2 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT";
 var init_config_opencode = __esm(() => {
@@ -1237,7 +1237,7 @@ function validState(value) {
   return value && ["absent", "file", "directory", "symlink"].includes(value.type) && (value.sha256 === null || typeof value.sha256 === "string") && (value.mode === null || Number.isInteger(value.mode));
 }
 function valid(value) {
-  return value && value.schemaVersion === 1 && typeof value.id === "string" && /^[a-f0-9-]{16,}$/.test(value.id) && ["setup", "update", "uninstall"].includes(value.command) && typeof value.packageVersion === "string" && journalPhases.includes(value.phase) && (value.previousCurrent === null || typeof value.previousCurrent === "string") && value.components && typeof value.components.tmux === "boolean" && typeof value.components.opencode === "boolean" && Array.isArray(value.mutations) && value.mutations.every((m) => m && ["version", "config", "current", "ownership", "tombstone"].includes(m.operation) && typeof m.logicalPath === "string" && typeof m.resolvedPath === "string" && validState(m.pre) && validState(m.post) && (m.preimage === null || typeof m.preimage === "string") && (m.backupPath === undefined || typeof m.backupPath === "string") && typeof m.applied === "boolean");
+  return value && value.schemaVersion === 1 && typeof value.id === "string" && /^[a-f0-9-]{16,}$/.test(value.id) && ["setup", "update", "uninstall"].includes(value.command) && typeof value.packageVersion === "string" && journalPhases.includes(value.phase) && (value.previousCurrent === null || typeof value.previousCurrent === "string") && value.components && typeof value.components.tmux === "boolean" && typeof value.components.opencode === "boolean" && Array.isArray(value.mutations) && value.mutations.every((m) => m && ["version", "config", "current", "ownership", "tombstone"].includes(m.operation) && typeof m.logicalPath === "string" && typeof m.resolvedPath === "string" && validState(m.pre) && validState(m.post) && (m.preimage === null || typeof m.preimage === "string") && (m.backupPath === undefined || typeof m.backupPath === "string") && (m.symlinkChain === undefined || Array.isArray(m.symlinkChain) && m.symlinkChain.every((link) => link && typeof link.path === "string" && typeof link.target === "string" && Number.isInteger(link.dev) && Number.isInteger(link.ino))) && typeof m.applied === "boolean");
 }
 function createJournal(input) {
   return { ...input, schemaVersion: 1, phase: "prepared", mutations: [] };
@@ -1400,12 +1400,29 @@ async function phase(journal, next, deps) {
     throw new Error("E_CRASH");
   fault(deps, next, "after");
 }
-async function capture(path, root, id, deps) {
-  const pre = await state(path);
+function sameChain(left, right) {
+  return left.length === right.length && left.every((link, index) => link.path === right[index]?.path && link.target === right[index]?.target && link.dev === right[index]?.dev && link.ino === right[index]?.ino);
+}
+async function verifyPlanned(mutation, deps) {
+  const expected = mutation.expectedPreimage;
+  if (!expected)
+    return;
+  let resolved;
+  try {
+    resolved = await resolveConfigPath(mutation.logicalPath, deps);
+  } catch {
+    throw new CliError("E_RECOVERY");
+  }
+  if (resolved.resolvedPath !== mutation.resolvedPath || !sameChain(expected.symlinkChain, resolved.symlinkChain) || !same(await state(resolved.resolvedPath), expected.state))
+    throw new CliError("E_RECOVERY");
+}
+async function capture(mutation, root, id, deps) {
+  await verifyPlanned(mutation, deps);
+  const pre = mutation.expectedPreimage?.state ?? await state(mutation.resolvedPath);
   if (pre.type !== "file")
     return { pre, preimage: null };
-  const preimage = join7("preimages", `${hash(new TextEncoder().encode(path))}.bin`);
-  await persistPreimage(root, id, preimage, await readFile4(path), deps);
+  const bytes = mutation.expectedPreimage?.bytes ?? await readFile4(mutation.resolvedPath), preimage = join7("preimages", `${hash(new TextEncoder().encode(mutation.resolvedPath))}.bin`);
+  await persistPreimage(root, id, preimage, bytes, deps);
   return { pre, preimage };
 }
 async function record(journal, mutation, deps) {
@@ -1473,9 +1490,11 @@ async function recoverIncomplete(root, deps) {
     }
   }
 }
-async function mutate(journal, mutation, temp, occurrence, deps) {
+async function mutate(journal, mutation, temp, occurrence, deps, expectedConfig) {
   const recorded = await record(journal, mutation, deps);
   crashMutation(deps, mutation.operation, occurrence, "intent");
+  if (expectedConfig)
+    await verifyPlanned(expectedConfig, deps);
   await publish(mutation.resolvedPath, temp, mutation.pre);
   crashMutation(deps, mutation.operation, occurrence, "published");
   await markApplied(journal, recorded, deps);
@@ -1526,6 +1545,7 @@ async function executeTransaction(plan, deps) {
     if (deps.crashPhase === "prepared")
       throw new Error("E_CRASH");
     fault(deps, "prepared", "after");
+    const staged = await Promise.all(plan.configMutations.map(async (mutation) => ({ mutation, ...await capture(mutation, root, id, deps) })));
     const version = join7(root, "versions", plan.desiredVersion);
     if (plan.uninstall?.tombstoneVersions) {
       const tombstone = join7(root, "transactions", id, "tombstone", "versions"), source = join7(root, "versions"), pre = await state(source);
@@ -1542,7 +1562,6 @@ async function executeTransaction(plan, deps) {
       await mkdir4(version, { recursive: true, mode: 448 });
     await phase(journal, "version_staged", deps);
     signal(deps);
-    const staged = await Promise.all(plan.configMutations.map(async (mutation) => ({ mutation, ...await capture(mutation.resolvedPath, root, id, deps) })));
     await phase(journal, "configs_staged", deps);
     const current = join7(root, "current"), currentPre = await state(current), target = `versions/${plan.desiredVersion}`;
     if (plan.uninstall?.removeCurrent)
@@ -1554,7 +1573,7 @@ async function executeTransaction(plan, deps) {
     await phase(journal, "current_switched", deps);
     for (const [index, item] of staged.entries()) {
       const stagedFile = await stageBytes(item.mutation.resolvedPath, item.mutation.bytes, item.mutation.mode ?? (item.pre.mode ?? 384), deps);
-      await mutate(journal, { operation: "config", logicalPath: item.mutation.logicalPath, resolvedPath: item.mutation.resolvedPath, pre: item.pre, post: stagedFile.post, preimage: item.preimage }, stagedFile.temp, index + 1, deps);
+      await mutate(journal, { operation: "config", logicalPath: item.mutation.logicalPath, resolvedPath: item.mutation.resolvedPath, pre: item.pre, post: stagedFile.post, preimage: item.preimage, symlinkChain: item.mutation.expectedPreimage?.symlinkChain }, stagedFile.temp, index + 1, deps, item.mutation);
     }
     for (const [index, item] of (plan.migrationUnlinks ?? []).entries()) {
       const pre = await state(item.logicalPath);
@@ -1568,7 +1587,7 @@ async function executeTransaction(plan, deps) {
     }
     await phase(journal, "configs_committed", deps);
     signal(deps);
-    const ownershipPath = join7(root, "state", "ownership.json"), ownershipCapture = await capture(ownershipPath, root, id, deps);
+    const ownershipPath = join7(root, "state", "ownership.json"), ownershipCapture = await capture({ logicalPath: ownershipPath, resolvedPath: ownershipPath, bytes: new Uint8Array }, root, id, deps);
     if (plan.uninstall?.removeOwnership)
       await removeMutation(journal, { operation: "ownership", logicalPath: ownershipPath, resolvedPath: ownershipPath, pre: ownershipCapture.pre, post: absent, preimage: ownershipCapture.preimage }, 1, deps);
     else {
@@ -1593,6 +1612,7 @@ async function executeTransaction(plan, deps) {
 var missing5 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", hash = (bytes) => createHash4("sha256").update(bytes).digest("hex"), absent;
 var init_transaction = __esm(() => {
   init_errors();
+  init_fs();
   init_journal();
   init_ownership();
   absent = { type: "absent", sha256: null, mode: null };
@@ -1626,6 +1646,9 @@ async function exists(path) {
     throw error;
   }
 }
+function planned(mutation, resolved, bytes) {
+  return { ...mutation, expectedPreimage: { state: resolved.preimageHash ? { type: "file", sha256: resolved.preimageHash, mode: resolved.mode ?? 384 } : { type: "absent", sha256: null, mode: null }, ...resolved.preimageHash ? { bytes } : {}, symlinkChain: resolved.symlinkChain } };
+}
 async function inventoryConflicts(input, deps) {
   const root = await managedRoot(deps.env);
   let tmux = null, opencode = null, migrations = [];
@@ -1633,12 +1656,14 @@ async function inventoryConflicts(input, deps) {
     if (!deps.env?.HOME)
       throw new CliError("E_ROOT");
     const resolved = await resolveConfigPath(join8(deps.env.HOME, ".tmux.conf"), deps);
-    tmux = planTmuxEdit({ ...resolved, bytes: await readOr(resolved.resolvedPath, ""), mode: resolved.mode ?? 384, installRoot: root, migrate: input.migrate });
+    const bytes = await readOr(resolved.resolvedPath, "");
+    tmux = planned(planTmuxEdit({ ...resolved, bytes, mode: resolved.mode ?? 384, installRoot: root, migrate: input.migrate }), resolved, bytes);
   }
   if (input.opencode) {
     const logicalPath = await selectOpenCodeConfig(deps.env, deps), resolved = await resolveConfigPath(logicalPath, deps);
-    opencode = planOpenCodeEdit({ ...resolved, bytes: await readOr(resolved.resolvedPath, `{}
-`), mode: resolved.mode ?? 384, migrate: input.migrate });
+    const bytes = await readOr(resolved.resolvedPath, `{}
+`);
+    opencode = planned(planOpenCodeEdit({ ...resolved, bytes, mode: resolved.mode ?? 384, migrate: input.migrate, packageEntry: input.packageEntry, ownedEntries: input.ownedOpenCodeEntries }), resolved, bytes);
     migrations = await planOpenCodeMigration({ configDirectory: dirname4(logicalPath), installRoot: root, migrate: input.migrate });
   }
   return { tmux, opencode, migrations };
@@ -1658,14 +1683,14 @@ async function setup(command, deps) {
   if (prior)
     assertDowngradeAllowed({ command, executingVersion: deps.executingVersion, ownedVersion: prior.releaseVersion });
   const record2 = selectRelease(parseReleaseManifest(deps.manifest), deps.platform, deps.arch);
-  const inventory2 = await inventoryConflicts(command, deps);
+  const packageEntry = `@xiopt/pane-dash-opencode@${deps.executingVersion}`, inventory2 = await inventoryConflicts({ ...command, packageEntry, ownedOpenCodeEntries: prior?.components.opencode?.packageEntries }, deps);
   await ensureManagedRoot(root);
   const staging = join8(root, "transactions", `payload-${Buffer.from(deps.randomBytes?.(8) ?? randomBytes4(8)).toString("hex")}`);
   const acquired = await acquireRelease({ versionDirectory: join8(root, "versions", deps.executingVersion), stagingRoot: staging, record: record2, deps });
   const payload = await files(acquired.versionDirectory), currentTarget = `versions/${deps.executingVersion}`;
   const ownership = { schemaVersion: 1, packageVersion: deps.executingVersion, releaseVersion: deps.executingVersion, archive: { target: record2.target, sha256: record2.sha256 }, files: payload, currentTarget, components: {
-    tmux: inventory2.tmux ? owned(inventory2.tmux, managedTmuxBlock(root)) : null,
-    opencode: inventory2.opencode ? owned(inventory2.opencode, "@xiopt/pane-dash-opencode@0.1.0", ["@xiopt/pane-dash-opencode@0.1.0"]) : null
+    tmux: inventory2.tmux ? owned(inventory2.tmux, managedTmuxBlock(root)) : prior?.components.tmux ?? null,
+    opencode: inventory2.opencode ? owned(inventory2.opencode, packageEntry, [packageEntry]) : prior?.components.opencode ?? null
   }, migrations: inventory2.migrations.map((item) => ({ from: item.logicalPath, to: item.resolvedPath, sha256: "" })) };
   await executeTransaction({ command: "setup", components: { tmux: command.tmux, opencode: command.opencode }, desiredVersion: deps.executingVersion, previousCurrent: prior?.currentTarget ?? null, configMutations: [inventory2.tmux, inventory2.opencode].filter((item) => item !== null), migrationUnlinks: inventory2.migrations, ownership, ...acquired.kind === "staged" ? { versionActivation: { stagingPath: acquired.versionDirectory } } : {} }, deps);
 }
@@ -1731,6 +1756,9 @@ import { join as join10 } from "node:path";
 async function bytes(path) {
   return new Uint8Array(await readFile6(path));
 }
+function planned2(mutation, resolved, content) {
+  return { ...mutation, expectedPreimage: { state: { type: "file", sha256: digest3(content), mode: resolved.mode ?? 384 }, bytes: content, symlinkChain: resolved.symlinkChain } };
+}
 async function uninstall(deps) {
   const root = await managedRoot(deps.env);
   try {
@@ -1767,12 +1795,12 @@ async function uninstall(deps) {
   }
   const edits = [];
   if (ownership.components.tmux) {
-    const item = ownership.components.tmux, content = await bytes(item.resolvedPath);
-    edits.push(planTmuxRemoval({ logicalPath: item.logicalPath, resolvedPath: item.resolvedPath, bytes: content, installRoot: root, mode: 384 }));
+    const item = ownership.components.tmux, resolved = await resolveConfigPath(item.logicalPath, deps), content = await bytes(resolved.resolvedPath);
+    edits.push(planned2(planTmuxRemoval({ ...resolved, bytes: content, installRoot: root, mode: resolved.mode ?? 384 }), resolved, content));
   }
   if (ownership.components.opencode) {
-    const item = ownership.components.opencode, content = await bytes(item.resolvedPath);
-    edits.push(planOpenCodeRemoval({ logicalPath: item.logicalPath, resolvedPath: item.resolvedPath, bytes: content, ownedEntries: item.packageEntries, mode: 384 }));
+    const item = ownership.components.opencode, resolved = await resolveConfigPath(item.logicalPath, deps), content = await bytes(resolved.resolvedPath);
+    edits.push(planned2(planOpenCodeRemoval({ ...resolved, bytes: content, ownedEntries: item.packageEntries, mode: resolved.mode ?? 384 }), resolved, content));
   }
   await executeTransaction({ command: "uninstall", components: { tmux: ownership.components.tmux !== null, opencode: ownership.components.opencode !== null }, desiredVersion: ownership.releaseVersion, previousCurrent: ownership.currentTarget, configMutations: edits, uninstall: { tombstoneVersions: true, removeCurrent: true, removeOwnership: true } }, deps);
 }
@@ -1781,6 +1809,7 @@ var init_uninstall = __esm(() => {
   init_config_opencode();
   init_config_tmux();
   init_errors();
+  init_fs();
   init_ownership();
   init_transaction();
 });

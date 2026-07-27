@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { setup } from "../src/commands/setup"
+import { uninstall } from "../src/commands/uninstall"
 import { managedRoot, readOwnership } from "../src/ownership"
 import { archiveRecord, releaseArchive, transactionFixture } from "./helpers/fixture"
 
@@ -29,5 +30,57 @@ test("fresh setup owns both components and equal setup reuses the verified paylo
     const fetches = h.calls.fetch
     await setup({ name: "setup", tmux: true, opencode: true, migrate: false, allowDowngrade: false }, deps)
     expect(h.calls.fetch).toBe(fetches)
+  } finally { await h.cleanup() }
+})
+
+test("setup rejects an OpenCode edit made during acquisition without publishing planned bytes", async () => {
+  const h = await transactionFixture(), archive = releaseArchive(), config = join(h.outside, ".config", "opencode", "opencode.json"), edited = '{"plugin":["user/plugin"]}\n'
+  try {
+    await mkdir(join(h.outside, ".config", "opencode"), { recursive: true }); await writeFile(config, "{}\n")
+    const deps = { ...h.deps, env: { XDG_DATA_HOME: join(h.outside, "data"), HOME: h.outside }, manifest: manifest(), fetch: async () => { await writeFile(config, edited); return { status: 200, body: body(archive) } } }
+    await expect(setup({ name: "setup", tmux: false, opencode: true, migrate: false, allowDowngrade: false }, deps)).rejects.toMatchObject({ code: "E_RECOVERY" })
+    expect(await readFile(config, "utf8")).toBe(edited)
+    expect(await Bun.file(join(await managedRoot(deps.env), "current")).exists()).toBeFalse()
+  } finally { await h.cleanup() }
+})
+
+test("setup rejects a swapped OpenCode symlink chain during acquisition", async () => {
+  const h = await transactionFixture(), archive = releaseArchive(), directory = join(h.outside, ".config", "opencode"), config = join(directory, "opencode.json"), original = join(directory, "original.json"), replacement = join(directory, "replacement.json"), edited = '{"plugin":["user/plugin"]}\n'
+  try {
+    await mkdir(directory, { recursive: true }); await writeFile(original, "{}\n"); await writeFile(replacement, edited); await symlink("original.json", config)
+    const deps = { ...h.deps, env: { XDG_DATA_HOME: join(h.outside, "data"), HOME: h.outside }, manifest: manifest(), fetch: async () => { await rm(config); await symlink("replacement.json", config); return { status: 200, body: body(archive) } } }
+    await expect(setup({ name: "setup", tmux: false, opencode: true, migrate: false, allowDowngrade: false }, deps)).rejects.toMatchObject({ code: "E_RECOVERY" })
+    expect(await readlink(config)).toBe("replacement.json")
+    expect(await readFile(replacement, "utf8")).toBe(edited)
+    expect(await Bun.file(join(await managedRoot(deps.env), "current")).exists()).toBeFalse()
+  } finally { await h.cleanup() }
+})
+
+test("disabled setup preserves ownership and config for the omitted component", async () => {
+  const h = await transactionFixture(), archive = releaseArchive(), config = join(h.outside, ".config", "opencode", "opencode.json")
+  try {
+    await mkdir(join(h.outside, ".config", "opencode"), { recursive: true }); await writeFile(config, "{}\n")
+    const deps = { ...h.deps, env: { XDG_DATA_HOME: join(h.outside, "data"), HOME: h.outside }, manifest: manifest(), fetch: async () => ({ status: 200, body: body(archive) }) }
+    await setup({ name: "setup", tmux: true, opencode: true, migrate: false, allowDowngrade: false }, deps)
+    const before = await readFile(config, "utf8")
+    await setup({ name: "setup", tmux: true, opencode: false, migrate: false, allowDowngrade: false }, deps)
+    expect(await readFile(config, "utf8")).toBe(before)
+    expect((await readOwnership(await managedRoot(deps.env), deps))?.components.opencode).not.toBeNull()
+    await uninstall(deps)
+    expect(await readFile(config, "utf8")).not.toContain("@xiopt/pane-dash-opencode")
+    expect(await readFile(join(h.outside, ".tmux.conf"), "utf8")).not.toContain("tmux-pane-dash (@xiopt/tmux-pane-dash)")
+  } finally { await h.cleanup() }
+})
+
+test("setup --no-tmux preserves prior tmux ownership and config", async () => {
+  const h = await transactionFixture(), archive = releaseArchive(), config = join(h.outside, ".config", "opencode", "opencode.json"), tmux = join(h.outside, ".tmux.conf")
+  try {
+    await mkdir(join(h.outside, ".config", "opencode"), { recursive: true }); await writeFile(config, "{}\n")
+    const deps = { ...h.deps, env: { XDG_DATA_HOME: join(h.outside, "data"), HOME: h.outside }, manifest: manifest(), fetch: async () => ({ status: 200, body: body(archive) }) }
+    await setup({ name: "setup", tmux: true, opencode: true, migrate: false, allowDowngrade: false }, deps)
+    const before = await readFile(tmux, "utf8")
+    await setup({ name: "setup", tmux: false, opencode: true, migrate: false, allowDowngrade: false }, deps)
+    expect(await readFile(tmux, "utf8")).toBe(before)
+    expect((await readOwnership(await managedRoot(deps.env), deps))?.components.tmux).not.toBeNull()
   } finally { await h.cleanup() }
 })

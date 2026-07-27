@@ -6,7 +6,7 @@ import { planOpenCodeEdit, planOpenCodeMigration, selectOpenCodeConfig } from ".
 import { managedTmuxBlock, planTmuxEdit } from "../config-tmux"
 import type { Command } from "../contracts"
 import { CliError } from "../errors"
-import { resolveConfigPath } from "../fs"
+import { resolveConfigPath, type ResolvedConfigPath } from "../fs"
 import { parseReleaseManifest, selectRelease } from "../manifest"
 import { ensureManagedRoot, managedRoot, readOwnership, validateManagedRoot, type OwnershipRecord } from "../ownership"
 import { assertDowngradeAllowed, type Dependencies } from "../runtime"
@@ -17,19 +17,24 @@ const encoder = new TextEncoder(), digest = (value: Uint8Array) => createHash("s
 const missing = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT"
 async function readOr(path: string, fallback: string) { try { return new Uint8Array(await readFile(path)) } catch (error) { if (missing(error)) return encoder.encode(fallback); throw error } }
 async function exists(path: string) { try { await lstat(path); return true } catch (error) { if (missing(error)) return false; throw error } }
+function planned(mutation: PlannedConfigMutation, resolved: ResolvedConfigPath, bytes: Uint8Array): PlannedConfigMutation {
+  return { ...mutation, expectedPreimage: { state: resolved.preimageHash ? { type: "file", sha256: resolved.preimageHash, mode: resolved.mode ?? 0o600 } : { type: "absent", sha256: null, mode: null }, ...(resolved.preimageHash ? { bytes } : {}), symlinkChain: resolved.symlinkChain } }
+}
 
 /** Pure conflict inventory: no root creation, fetch, unlink, or config write. */
-export async function inventoryConflicts(input: { tmux: boolean; opencode: boolean; migrate: boolean }, deps: Dependencies): Promise<ConflictInventory> {
+export async function inventoryConflicts(input: { tmux: boolean; opencode: boolean; migrate: boolean; packageEntry?: string; ownedOpenCodeEntries?: readonly string[] }, deps: Dependencies): Promise<ConflictInventory> {
   const root = await managedRoot(deps.env)
   let tmux: PlannedConfigMutation | null = null, opencode: PlannedConfigMutation | null = null, migrations: ConflictInventory["migrations"] = []
   if (input.tmux) {
     if (!deps.env?.HOME) throw new CliError("E_ROOT")
     const resolved = await resolveConfigPath(join(deps.env.HOME, ".tmux.conf"), deps)
-    tmux = planTmuxEdit({ ...resolved, bytes: await readOr(resolved.resolvedPath, ""), mode: resolved.mode ?? 0o600, installRoot: root, migrate: input.migrate })
+    const bytes = await readOr(resolved.resolvedPath, "")
+    tmux = planned(planTmuxEdit({ ...resolved, bytes, mode: resolved.mode ?? 0o600, installRoot: root, migrate: input.migrate }), resolved, bytes)
   }
   if (input.opencode) {
     const logicalPath = await selectOpenCodeConfig(deps.env, deps), resolved = await resolveConfigPath(logicalPath, deps)
-    opencode = planOpenCodeEdit({ ...resolved, bytes: await readOr(resolved.resolvedPath, "{}\n"), mode: resolved.mode ?? 0o600, migrate: input.migrate })
+    const bytes = await readOr(resolved.resolvedPath, "{}\n")
+    opencode = planned(planOpenCodeEdit({ ...resolved, bytes, mode: resolved.mode ?? 0o600, migrate: input.migrate, packageEntry: input.packageEntry, ownedEntries: input.ownedOpenCodeEntries }), resolved, bytes)
     migrations = await planOpenCodeMigration({ configDirectory: dirname(logicalPath), installRoot: root, migrate: input.migrate })
   }
   return { tmux, opencode, migrations }
@@ -47,15 +52,15 @@ export async function setup(command: Extract<Command, { name: "setup" }>, deps: 
   const prior = await readOwnership(root, deps)
   if (prior) assertDowngradeAllowed({ command, executingVersion: deps.executingVersion, ownedVersion: prior.releaseVersion })
   const record = selectRelease(parseReleaseManifest(deps.manifest), deps.platform, deps.arch)
-  const inventory = await inventoryConflicts(command, deps)
+  const packageEntry = `@xiopt/pane-dash-opencode@${deps.executingVersion}`, inventory = await inventoryConflicts({ ...command, packageEntry, ownedOpenCodeEntries: prior?.components.opencode?.packageEntries }, deps)
   // All candidate migration routes are recognized before any acquisition or unlink.
   await ensureManagedRoot(root)
   const staging = join(root, "transactions", `payload-${Buffer.from(deps.randomBytes?.(8) ?? randomBytes(8)).toString("hex")}`)
   const acquired = await acquireRelease({ versionDirectory: join(root, "versions", deps.executingVersion), stagingRoot: staging, record, deps })
   const payload = await files(acquired.versionDirectory), currentTarget = `versions/${deps.executingVersion}`
   const ownership: OwnershipRecord = { schemaVersion: 1, packageVersion: deps.executingVersion, releaseVersion: deps.executingVersion, archive: { target: record.target, sha256: record.sha256 }, files: payload, currentTarget, components: {
-    tmux: inventory.tmux ? owned(inventory.tmux, managedTmuxBlock(root)) : null,
-    opencode: inventory.opencode ? owned(inventory.opencode, "@xiopt/pane-dash-opencode@0.1.0", ["@xiopt/pane-dash-opencode@0.1.0"]) : null,
+    tmux: inventory.tmux ? owned(inventory.tmux, managedTmuxBlock(root)) : prior?.components.tmux ?? null,
+    opencode: inventory.opencode ? owned(inventory.opencode, packageEntry, [packageEntry]) : prior?.components.opencode ?? null,
   }, migrations: inventory.migrations.map(item => ({ from: item.logicalPath, to: item.resolvedPath, sha256: "" })) }
   await executeTransaction({ command: "setup", components: { tmux: command.tmux, opencode: command.opencode }, desiredVersion: deps.executingVersion, previousCurrent: prior?.currentTarget ?? null, configMutations: [inventory.tmux, inventory.opencode].filter((item): item is PlannedConfigMutation => item !== null), migrationUnlinks: inventory.migrations, ownership, ...(acquired.kind === "staged" ? { versionActivation: { stagingPath: acquired.versionDirectory } } : {}) }, deps)
 }

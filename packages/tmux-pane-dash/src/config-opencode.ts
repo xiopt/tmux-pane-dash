@@ -5,8 +5,8 @@ import { resolveConfigPath } from "./fs"
 import type { Dependencies } from "./runtime"
 import type { PlannedConfigMutation } from "./transaction"
 
-const desired = "@xiopt/pane-dash-opencode@0.1.0", encoder = new TextEncoder(), decoder = new TextDecoder()
-export type OpenCodeEditInput = Omit<PlannedConfigMutation, "bytes"> & { bytes: Uint8Array; migrate: boolean; ownedEntries?: readonly string[] }
+const encoder = new TextEncoder(), decoder = new TextDecoder()
+export type OpenCodeEditInput = Omit<PlannedConfigMutation, "bytes"> & { bytes: Uint8Array; migrate: boolean; packageEntry?: string; ownedEntries?: readonly string[] }
 export type PlannedOpenCodeMigration = { logicalPath: string; resolvedPath: string; action: "unlink" }
 const fail = (code = "E_CONFIG") => { throw new CliError(code) }
 const missing = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT"
@@ -78,7 +78,7 @@ function insertionTrivia(text: string, plugin: Plugin): string {
   if (second && first.comma !== undefined) return text.slice(first.comma + 1, second.start).match(/^\s*$/)?.[0] ?? ""
   return text.slice(plugin.start + 1, first.start).match(/^\s*/)?.[0] ?? ""
 }
-function insertPlugin(text: string, plugin: Plugin): string {
+function insertPlugin(text: string, plugin: Plugin, desired: string): string {
   if (!plugin.entries.length) return `${text.slice(0, plugin.end - 1)}${JSON.stringify(desired)}${text.slice(plugin.end - 1)}`
   const entry = plugin.entries[plugin.entries.length - 1]
   if (!entry) fail()
@@ -86,7 +86,7 @@ function insertPlugin(text: string, plugin: Plugin): string {
   return `${text.slice(0, entry.end)}${insertion}${text.slice(entry.end)}`
 }
 export function planOpenCodeEdit(input: OpenCodeEditInput): PlannedConfigMutation {
-  const text = decoder.decode(input.bytes), plugin = rootPlugin(text)
+  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.0", text = decoder.decode(input.bytes), plugin = rootPlugin(text)
   if (plugin) {
     const managed = plugin.entries.filter(entry => validPaneDash(entry.value))
     const desiredEntries = managed.filter(entry => entry.value === desired)
@@ -98,7 +98,7 @@ export function planOpenCodeEdit(input: OpenCodeEditInput): PlannedConfigMutatio
       if (owned?.length !== 1 || !entry || owned[0] !== entry.value) fail("E_CONFIG_CONFLICT")
       return { ...input, bytes: encoder.encode(`${text.slice(0, entry.start)}${JSON.stringify(desired)}${text.slice(entry.end)}`) }
     }
-    return { ...input, bytes: encoder.encode(insertPlugin(text, plugin)) }
+    return { ...input, bytes: encoder.encode(insertPlugin(text, plugin, desired)) }
   }
   const closeIndex = text.lastIndexOf("}"); if (closeIndex < 0) fail()
   const newline = text.includes("\r\n") ? "\r\n" : "\n", prefix = text.slice(0, closeIndex), indent = /(?:^|\n)([ \t]+)"/.exec(prefix)?.[1] ?? "  ", comma = /\{\s*$/.test(prefix) ? "" : ","
