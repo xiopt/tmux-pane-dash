@@ -1,78 +1,132 @@
-# tmux-pane-dash v2
+# tmux-pane-dash
 
-tmux-pane-dash is a tmux popup dashboard for OpenCode sessions and manually tagged panes. It provides live status, grouped or flat views, filtering, pane preview, safe pane actions, and context-aware creation.
+`tmux-pane-dash` is a Rust dashboard for navigating OpenCode sessions and
+manually tagged tmux panes. It opens in a tmux popup, shows live status, and
+keeps pane actions literal and target-specific. OpenCode status is optional;
+the dashboard remains useful for tagged panes without it.
 
-> **Screenshot placeholder:** dashboard screenshot coming soon.
+The first public release is `0.1.0`. GitHub Releases are the immutable binary
+channel and the npm CLI is the supported installer. The source and TPM channel
+is available when you want to build locally.
 
 ## Requirements
 
-| Dependency | Requirement | Scope |
+| Dependency | Requirement | Used for |
 | --- | --- | --- |
-| tmux | >=3.6 | Always; v2 wire-format support floor |
-| Rust + Cargo | toolchain supporting Rust edition 2024 | Source build only |
-| make + standard `install` utility | Available locally | Source packaging |
-| fzf | >=0.73.0 | Explicit legacy engine or missing-binary fallback only |
-| OpenCode | optional | Companion status producer only |
+| tmux | `>=3.6` | Popup, bindings, and pane routing |
+| Rust and Cargo | Rust edition 2024 toolchain | Source and TPM builds |
+| `make` and `install` | POSIX implementations | Source packaging and installation |
+| OpenCode | `>=1.17.20`, optional | Companion status producer |
 
-Rust 1.85+ is the edition-2024 language floor. The Rust dashboard itself does not require fzf. OpenCode is only needed to produce companion status; command-matched panes still appear without it as `? unknown`.
+Requires tmux >=3.6. Rust and Cargo are needed only for source and TPM builds.
+No Homebrew formula or platform-specific npm package is part of `0.1.0`.
 
-## Install, update, and remove
+## Choose a distribution channel
+
+| Channel | Use it when | What owns the installation |
+| --- | --- | --- |
+| npm CLI | You want a verified release for the current platform | `@xiopt/tmux-pane-dash` owns its XDG data root and managed configuration |
+| Source or TPM | You want to build from a checkout | Your checkout, `make`, and the tmux entry own the local build |
+| OpenCode package | You want companion status in OpenCode | `@xiopt/pane-dash-opencode` is the exact plugin entry |
+
+Do not combine a source-built checkout with an npm-managed `current` link unless
+you deliberately manage the two installations separately. Each channel has
+one owner; neither channel rewrites the other channel's files.
+
+## Install with the npm CLI
+
+The CLI is a Node `>=20` ESM package with no install-time filesystem mutation.
+It downloads only the exact immutable release selected by its package version,
+verifies the archive hash and size, checks the binary version, and then commits
+the installation atomically.
+
+### First install
+
+The default installs both tmux and OpenCode integration:
+
+```sh
+npx @xiopt/tmux-pane-dash@latest setup
+```
+
+Use these setup flags when one integration should be omitted or an existing
+owned installation needs migration:
+
+```sh
+npx @xiopt/tmux-pane-dash@latest setup --no-tmux
+npx @xiopt/tmux-pane-dash@latest setup --no-opencode
+npx @xiopt/tmux-pane-dash@latest setup --migrate
+```
+
+`setup --allow-downgrade` is only for deliberately invoking an older package
+version. A normal update never moves the installation backwards:
+
+```sh
+npx @xiopt/tmux-pane-dash@0.1.0 setup --allow-downgrade
+```
+
+### Update, inspect, and remove
+
+Run the latest package explicitly for update and maintenance operations:
+
+```sh
+npx @xiopt/tmux-pane-dash@latest update
+npx @xiopt/tmux-pane-dash@latest doctor
+npx @xiopt/tmux-pane-dash@latest doctor --json
+npx @xiopt/tmux-pane-dash@latest uninstall
+```
+
+`doctor` is read-only and offline. It reports the installed version, target,
+hash, binary version, tmux version, managed configuration, and ownership. The
+uninstall command removes only files recorded as owned by this package; it
+does not remove an unrelated tmux setting, OpenCode setting, or user TOML.
+
+## Source and TPM installation
+
+The source channel builds the Rust binary in the checkout. It performs no
+network operation on tmux startup and does not build or update when the popup
+opens.
+
+There is no automatic build, no automatic update, and no package-manager
+operation at tmux startup.
 
 ### TPM
 
-Add the plugin to `~/.tmux.conf`:
+Add the public repository to `~/.tmux.conf`, then install it through TPM:
 
 ```tmux
-set -g @plugin 'OWNER/tmux-pane-dash'
+set -g @plugin 'xiopt/tmux-pane-dash'
 ```
 
-**Mandatory:** this checkout has no configured canonical remote; substitute the owner from the published repository URL before TPM use, replacing `OWNER`. Run `<prefix> I` to install through TPM. TPM normally clones to `$HOME/.tmux/plugins/tmux-pane-dash`; from that directory, build the Rust dashboard:
+Run `<prefix> I`, then build from the checkout TPM selected:
 
 ```sh
 cd "$HOME/.tmux/plugins/tmux-pane-dash"
 make build
 ```
 
-TPM loading does not compile on load. After `<prefix> U` updates the plugin, `cd "$HOME/.tmux/plugins/tmux-pane-dash"` and rerun `make build`. If your TPM path is custom, `cd` to that plugin directory instead. `make install` is an optional alternative and also runs the build. Plugin-local `bin/pane-dash` wins over PATH, so `make build` is the most direct way to make TPM use the Rust dashboard.
+After `<prefix> U`, run `make build` again. TPM loads the committed tmux
+entrypoint; it does not compile on load.
 
-### Manual or source clone
-
-Clone or unpack the source, build it, then add its absolute path to tmux. Replace `<repository-url>` with the published repository URL; this workflow does not depend on a configured remote in this checkout:
+### Manual source checkout
 
 ```sh
-git clone <repository-url> "$HOME/.tmux/plugins/tmux-pane-dash"
+git clone https://github.com/xiopt/tmux-pane-dash.git "$HOME/.tmux/plugins/tmux-pane-dash"
 cd "$HOME/.tmux/plugins/tmux-pane-dash"
 make build
 ```
+
+Load the entrypoint and reload tmux after changing the checkout:
 
 ```tmux
 run-shell "$HOME/.tmux/plugins/tmux-pane-dash/pane_dash.tmux"
 ```
 
-Reload tmux after changing the entry:
-
 ```sh
 tmux source-file "$HOME/.tmux.conf"
 ```
 
-### Optional OpenCode status plugin
-
-From the plugin checkout, install the optional status producer:
-
-```sh
-mkdir -p "$HOME/.config/opencode/plugin"
-ln -sf "$PWD/opencode-plugin/pane-dash.ts" "$HOME/.config/opencode/plugin/pane-dash.ts"
-```
-
-Restart or reopen the OpenCode process after creating the symlink. Without the plugin, command-matched panes remain visible with `? unknown` status. To remove the companion plugin, run:
-
-```sh
-rm "$HOME/.config/opencode/plugin/pane-dash.ts"
-```
-
-### Optional PATH install
-
-`make install` builds first and installs `pane-dash` to `$HOME/.local/bin` by default:
+`make install` is an optional PATH installation of only `pane-dash`; it does
+not install the tmux entrypoint or edit configuration:
 
 ```sh
 make install
@@ -80,220 +134,117 @@ make install PREFIX=/usr/local
 make install DESTDIR=/tmp/package PREFIX=/usr/local
 ```
 
-PATH installation installs only the binary, not the tmux scripts: the source or TPM clone remains the plugin entry point. Ensure `$HOME/.local/bin` is in the PATH inherited by the tmux server; reloading a shell alone may not change an already-running server's environment. A plugin-local build avoids that dependency.
+The default destination is `$HOME/.local/bin/pane-dash`. `make uninstall`
+removes that binary for the selected `PREFIX`, `BINDIR`, and `DESTDIR`.
+`make clean` removes local Cargo output and `bin/pane-dash`.
 
-### Update and remove
+## OpenCode integration
 
-After a TPM update, source pull, or source replacement, rerun `make build` (or `make install`) and reload `pane_dash.tmux` or your tmux configuration. There is no automatic update, freshness check, or build on plugin load.
+The npm setup command adds the exact package entry
+`@xiopt/pane-dash-opencode@0.1.0` to the selected global OpenCode config. It
+does not edit a project-local OpenCode file. Use `--no-opencode` if the
+companion producer is not wanted.
 
-Use the command that matches what you want to remove:
+There are no project-local OpenCode configuration edits.
 
-```sh
-make uninstall                 # installed binary for the configured PREFIX/BINDIR/DESTDIR
-make clean                     # local Cargo output and bin/pane-dash
-```
-
-Remove the TPM or manual `run-shell` entry separately. `make uninstall` does not remove plugin-local `bin/pane-dash`, because `make install` depends on `make build`.
-
-## Engine migration and compatibility
-
-With no `@pane-dash-engine` option, the plugin is Rust-first. `set -g @pane-dash-engine rust` is valid but unnecessary. `set -g @pane-dash-engine fzf` explicitly selects the legacy dashboard even if a Rust binary exists. An explicitly empty engine option is invalid, not absent.
-
-Rust-first checks the plugin-local binary first, then PATH. If neither is available, it displays this actionable fallback and opens the legacy dashboard:
+When configuring the package manually, use the global OpenCode configuration
+directory, not a project checkout:
 
 ```text
-pane-dash: Rust binary not found; using legacy fzf (run 'make build' in the plugin directory or 'make install')
+@xiopt/pane-dash-opencode@0.1.0
 ```
 
-Explicit legacy mode displays:
+If the companion is absent, command-matched panes remain visible with
+`? unknown`. The package requires OpenCode `>=1.17.20`, has no runtime
+dependencies, and exports the same bundled module from `.` and `./server`.
+
+## Managed filesystem and ownership
+
+The CLI uses `XDG_DATA_HOME` when it is set, otherwise
+`$HOME/.local/share/tmux-pane-dash`:
 
 ```text
-pane-dash: @pane-dash-engine fzf is deprecated; supported through v2.x, removed no earlier than v3.0
+<data-home>/tmux-pane-dash/
+├── current -> versions/0.1.0
+├── versions/0.1.0/
+├── state/ownership.json
+└── transactions/
 ```
 
-An invalid engine value displays:
+A new version is staged and hashed before `current` changes. The previous
+version remains available until the transaction and configuration updates
+complete. The lock and journal make interrupted operations recoverable.
+
+Setup backs up and atomically updates the managed block in `~/.tmux.conf` (or
+the selected configuration path) and updates the global OpenCode JSON/JSONC
+file while preserving unrelated text. Same-directory replacement preserves
+file modes. Symlinked dotfiles are resolved and recorded; a true configuration
+ambiguity or an unowned conflicting entry stops before any mutation. Use
+`--migrate` only for the documented, recognized legacy ownership routes.
+
+The CLI is per-user. tmux startup performs no network access, automatic build,
+automatic update, or package-manager operation. There is no startup network.
+`doctor` performs no write and does not contact a release service.
+
+## Release assets and verification
+
+The `0.1.0` release has exactly four platform archives:
+
+| Target | Asset |
+| --- | --- |
+| macOS arm64 | `tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz` |
+| macOS x64 | `tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz` |
+| Linux arm64 | `tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz` |
+| Linux x64 | `tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz` |
+
+The immutable asset URL prefix is:
 
 ```text
-pane-dash: invalid @pane-dash-engine value; using Rust-first resolution
+https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/
 ```
 
-fzf is deprecated in v2 but supported through v2.x and removed no earlier than v3.0. The legacy scripts stay present and tested until removal. fzf >=0.73.0 is needed only for explicit legacy mode or missing-binary fallback; a resolved Rust dashboard has no fzf runtime dependency.
+Each archive has a SHA-256 entry in `SHA256SUMS`, target/version metadata, and
+GitHub artifact attestations. The release manifest, checksums, and all four
+archives are attested. Both npm packages publish with npm provenance. Release
+verification compares names, URLs, hashes, sizes, archive inventories, and
+attestation subjects before a channel is promoted.
 
-## Keys
+For the release operation matrix, publisher provenance, and rollback procedure,
+see [Release distribution](docs/release-distribution.md).
 
-### tmux bindings
+## Dashboard controls
 
-| Default | Action |
+The default tmux bindings are:
+
+| Binding | Action |
 | --- | --- |
-| `<prefix> D` | Open dashboard |
-| `<prefix> T` | Toggle manual tag using the current command as label |
-| `<prefix> M` | Prompt for and set a manual label |
+| `<prefix> D` | Open the dashboard |
+| `<prefix> T` | Toggle a tag using the current command |
+| `<prefix> M` | Prompt for a tag label |
 
-### Navigation and dashboard
+Inside the dashboard, `j`/`k` or arrows navigate, `Enter` jumps to the selected
+session or pane, `/` filters, `?` opens help, `x` confirms a pane kill, `n`
+starts context-aware pane creation, and `q` closes the popup. Sending text is
+literal and is followed by Enter only after confirmation; it is never treated
+as a shell or tmux command.
 
-| Key | Action |
-| --- | --- |
-| `j` / `k`, `Down` / `Up` | Move down/up |
-| `g` / `G` | First/last visible row |
-| `h` / `l`, `z a` | Collapse/expand or toggle selected session in grouped mode |
-| `/` | Enter live filter mode |
-| `Enter` | Jump to selected session or pane |
-| `Ctrl-z` | Zoom selected pane, then jump |
-| `Ctrl-s` | Open literal send-line modal for selected pane |
-| `Ctrl-u` / `Ctrl-d` | Inspect preview half-page up/down; pause preview capture only |
-| `Ctrl-r` | Return preview to bottom and resume capture |
-| `n` | Open context-aware create modal |
-| `x` | Open pane-kill confirmation |
-| `s` | Toggle grouped/flat mode and update shared `@pane_dash_group` |
-| `?` | Open help |
-| `q` / `Esc` | Close dashboard in navigation mode |
-
-### Filter and preview
-
-Printable unmodified/Shift text edits the query; `Backspace` deletes one Unicode scalar; `Esc` returns to navigation and retains the query. `?` is query text, not help. Preview controls and `Ctrl-s` retain their reducer-defined availability while filtering; navigation, grouping, creation, kill, and jump keys do not act as dashboard actions while filtering.
-
-`Ctrl-u` and `Ctrl-d` enter inspect mode. Inspect pauses only preview capture, not topology or status snapshots. `Ctrl-r` resumes bottom-following preview capture.
-
-### Modals
-
-| Modal | Keys |
-| --- | --- |
-| Send | text/`Backspace`; `Enter` sends a nonempty line (empty closes with no send); `Esc` cancels; `?` is inert |
-| Kill | `y`/`Y` confirms; any other key cancels except inert `?` |
-| Create choice | `j`/`k` or arrows; `Enter` chooses; `Esc` cancels; `?` is inert |
-| Create form | text/`Backspace`; `Tab`/Down next field; `Shift-Tab`/Up previous; `Enter` submits; `Esc` cancels; `?` is inert |
-| Locked create submission | `q`/`Esc` closes the popup; all other keys are inert |
-| Help | `j`/`k` and unmodified arrows scroll one line; `Ctrl-u`/`Ctrl-d` scroll half a page; unmodified `PageUp`/`PageDown` scroll a page; `g`/`G` jump to top/bottom; `?`, `Esc`, or unmodified `q` closes help |
-
-## tmux options
-
-Set options before loading or reloading `pane_dash.tmux`. Options are read at popup startup except the live shared group state. Key and engine options take effect when `pane_dash.tmux` is reloaded; width and height are read by the launcher on each open.
-
-| Option | Default | Contract |
-| --- | --- | --- |
-| `@pane-dash-key` | `D` | Dashboard prefix binding |
-| `@pane-dash-tag-key` | `T` | Tag-toggle prefix binding |
-| `@pane-dash-label-key` | `M` | Typed-label prefix binding |
-| `@pane-dash-width` | `90%` | Popup width; empty uses default |
-| `@pane-dash-height` | `85%` | Popup height; empty uses default |
-| `@pane-dash-match` | `opencode` | Command match for auto-discovery; explicit empty disables command matching |
-| `@pane-dash-stale-secs` | `60` | Positive heartbeat staleness threshold; invalid or nonpositive uses default |
-| `@pane-dash-new-command` | `opencode` | Initial command for new panes; explicit empty creates a plain pane and sends no Enter |
-| `@pane-dash-theme` | `dark` | `dark`, `light`, or `terminal-native`; invalid or empty warns and uses dark before TOML |
-| `@pane-dash-engine` | absent = Rust-first | `rust`, deprecated `fzf`, or absent; explicit empty is invalid |
-| `@pane_dash_group` | `1` | `1` grouped, `0` flat; shared server state updated by `s` |
-
-## Dashboard behavior and safety
-
-- **Discovery and status:** a pane option, command match, or manual tag admits a pane. Labels fall back through title, tag, and current command. OpenCode status is optional.
-- **Grouped and flat views:** grouped is default and headers collapse locally. Flat mode is status-sorted. A live filter is retained and temporarily exposes matches inside collapsed sessions.
-- **Degraded updates:** `live updates lost — polling` means the control channel is unavailable and bounded fallback polling is active. The dashboard is degraded, not frozen.
-- **Creation:** a session header offers window or session; a pane offers four split directions, window, or session; an empty dashboard offers session. The name is optional, cwd is the child working directory, and an empty command creates a plain pane without sending Enter. Partial post-create failures are surfaced, and a new pane remains reconciled when present.
-- **Send safety:** sending is pane-only, shows the target and current command, and sends text literally followed by Enter. It never interprets the text as a tmux or shell command. Verify manually tagged targets because literal input still affects the running program.
-- **Kill and navigation:** kill is pane-only and requires y/Y confirmation; vanished panes become a silent no-op. Session rows jump sessions, while pane rows target the exact pane. Zoom then jump handles vanishing targets.
-
-## Status legend
-
-| Glyph/status | Meaning |
-| --- | --- |
-| `● needs_input` | Waiting for permission or a question response |
-| `◐ working` | Busy or retrying |
-| `○ idle` | Known idle |
-| `✗ error` | Agent error latched until work or user activity clears it |
-| `? unknown` | No companion-plugin status available |
-| `⊘ stale` | Companion heartbeat exceeded `@pane-dash-stale-secs` |
-
-## TOML configuration
-
-At popup startup, the dashboard selects one config path:
-
-1. A nonempty `$XDG_CONFIG_HOME/tmux-pane-dash/config.toml`;
-2. Otherwise a nonempty `$HOME/.config/tmux-pane-dash/config.toml`;
-3. Otherwise no file and no warning.
-
-The selected path does not fall back when missing. It must be a regular file (a symlink to one is allowed), is limited to 1024 bytes, and Config is read once per popup; reopen to reload it.
-
-The root is a flat TOML table. Recognized optional string keys are `theme` and these fifteen palette slots:
-
-```text
-text, dim, accent, needs_input, working, idle, error, unknown, stale,
-warning, degrade, border, status_bar, selection_fg, selection_bg
-```
-
-Built-in themes are exact lowercase `dark`, `light`, and `terminal-native`. Colors accept canonical lowercase ANSI names (`reset`, `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`, `dark_gray`, `light_red`, `light_green`, `light_yellow`, `light_blue`, `light_magenta`, `light_cyan`, `white`), `#RRGGBB` with exactly six hexadecimal digits, or `ansi:0` through `ansi:255`.
-
-pane-dash intentionally does not paint a terminal background. The `light` theme expects a light terminal background. On a dark terminal background, use `dark` or `terminal-native`; selecting `light` may make dark foreground text appear blank or low contrast.
-
-Precedence is tmux `@pane-dash-theme` base, then TOML `theme` replacement, then per-slot overrides. Arrays, nested tables, malformed files, oversized files, and unreadable files reject the whole file. In a structurally valid file, an unknown theme retains the prior base, each invalid color retains only that slot's prior value, and valid siblings still apply. Unknown flat scalar keys are forward-compatible; a near-known-key typo warns. Warnings are sanitized, deterministic, visible, deduplicated, and capped at four rows (three concrete warnings plus a suppression summary).
-
-```toml
-theme = "dark"
-accent = "#7aa2f7"
-working = "ansi:220"
-selection_fg = "black"
-selection_bg = "light_cyan"
-```
+Useful options include `@pane-dash-key`, `@pane-dash-tag-key`,
+`@pane-dash-label-key`, `@pane-dash-width`, `@pane-dash-height`,
+`@pane-dash-match`, `@pane-dash-stale-secs`, `@pane-dash-new-command`,
+`@pane-dash-theme`, and `@pane_dash_group`. Run `doctor` for installation
+state; run `make help` for source build variables.
 
 ## Troubleshooting
 
 | Symptom | Action |
 | --- | --- |
-| Rust fallback notice | Run `make build` in the plugin directory or `make install`, then reload the plugin. |
-| PATH install not found | Inspect the PATH inherited by the tmux server, or use a plugin-local build. Restarting or reloading a shell alone may not update server environment. |
-| Explicit legacy notice | Remove the engine option to migrate; if keeping legacy, install fzf >=0.73.0. |
-| Unsupported tmux | Upgrade to >=3.6. |
-| Config warning | Correct the displayed path, key, or value, then reopen the popup. |
-| Stale status | Verify the optional OpenCode plugin/process and heartbeat, or adjust the positive stale threshold. |
-| Unexpected behavior after update | Rebuild the source binary and reload the plugin; there is no auto-build. |
-| Wrong client or pane | Collect the tmux version and reproduce with the real routing test; do not rediscover a "best" client. |
+| Binary is unavailable | Run `make build` in the source/TPM checkout and reload `pane_dash.tmux`. |
+| Popup uses an old binary | Check `current` with `doctor`, then run `npx @xiopt/tmux-pane-dash@latest update`. |
+| OpenCode status is unknown | Check the global OpenCode package entry and reopen OpenCode. |
+| Setup reports a conflict | Inspect the ownership and configuration paths; use `--migrate` only for a recognized legacy entry. |
+| tmux is unsupported | Upgrade tmux to `3.6` or newer. |
+| A transaction was interrupted | Run `doctor`, then rerun the same `setup`, `update`, or `uninstall` command after reviewing the report. |
 
-### Interactive `after-*` hooks and one-shot creation
+## License
 
-Synchronous interactive `after-*` hooks can block a noninteractive one-shot tmux
-client after tmux has already applied the requested mutation and emitted machine
-output. They are therefore incompatible with automation. Do not use
-`client_*` formats to condition them: when an attached client exists, tmux can
-resolve both a PTY-backed one-shot `new-window` and a manual prefix binding to
-that same best attached client.
-
-Move the interactive rename prompt out of the hook and into the manual binding:
-
-```tmux
-set-hook -gu after-new-window
-bind-key c new-window \; command-prompt -I "#{window_name}" "rename-window %%"
-```
-
-Adapt `c` if you use a custom new-window key. External dashboard commands now
-create windows without running a prompt. `%%` is the literal percent required
-by `command-prompt`. pane-dash never detects, disables, suppresses, rewrites,
-or restores hooks: the operator owns hook policy. For a temporary smoke test,
-removing and later restoring the original hook requires operator approval.
-`command-prompt -b` can contend with the popup and is not recommended.
-
-If creation times out after parser-proven stage-1 pane output, pane-dash
-preserves and reconciles that real pane when present. Tagging never started, so
-the pane remains untagged; pane-dash does not retry or roll back creation, and
-does not send the configured command or Enter.
-
-## Local verification
-
-Run local checks in dependency order:
-
-```sh
-make clean && make build
-bats tests/readme.bats
-bats tests/*.bats
-shellcheck pane_dash.tmux scripts/*.sh tests/*.sh
-cargo fmt --manifest-path pane-dash/Cargo.toml -- --check
-cargo clippy --manifest-path pane-dash/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path pane-dash/Cargo.toml
-cargo test --manifest-path pane-dash/Cargo.toml -- --ignored --nocapture --test-threads=1
-(cd opencode-plugin && bun test)
-tests/integration.sh
-tests/pane_dash_integration.sh
-tests/rust_engine_integration.sh
-tests/rust_engine_quoting_integration.sh
-tests/rust_live_integration.sh
-```
-
-Some checks require installed tmux, fzf, Bats, Bun, or ShellCheck. Network, CI, and release automation are out of Phase 7.
+Released under the [MIT License](LICENSE), Copyright (c) 2026 xiopt.
