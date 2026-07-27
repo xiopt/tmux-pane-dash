@@ -51,7 +51,7 @@ test("inspects the exact payload schema and constrains binary execution", async 
   const h = await installedFixture()
   try {
     await expect(inspectPayload(h.versionDirectory, internalManifest(), h.context.deps)).resolves.toBeUndefined()
-    await expect(verifyBinary("/stage/bin/pane-dash", "0.1.0", { ...h.context.deps, spawn: async (_path, args, options) => { expect(args).toEqual(["--version"]); expect(options).toEqual({ timeoutMs: 5000, env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" }, maxOutputBytes: 4096 }); return { code: 0, stdout: "0.1.0\n", stderr: "" } } })).resolves.toBeUndefined()
+    await expect(verifyBinary("/stage/bin/pane-dash", "0.1.0", { ...h.context.deps, spawn: async (_path, args, options) => { expect(args).toEqual(["--version"]); expect(options).toEqual({ timeoutMs: 5000, env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" }, maxOutputBytes: 4096 }); return { code: 0, stdout: "pane-dash 0.1.0\n", stderr: "" } } })).resolves.toBeUndefined()
     await expect(verifyBinary("/stage/bin/pane-dash", "0.1.0", { ...h.context.deps, spawn: async () => ({ code: 0, stdout: "wrong\n", stderr: "" }) })).rejects.toThrow("E_BINARY_VERSION")
   } finally { await rm(h.root, { recursive: true, force: true }) }
 })
