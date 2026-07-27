@@ -29,7 +29,7 @@ function fixture(fault?: string) {
     `bind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle '#{pane_id}'`,
     `bind-key -T prefix M command-prompt -p 'pane-dash label:' \"set-option -p @pane_dash_label_input \\\"%%%\\\" ; run-shell '\"${root}/current/scripts/tag.sh\" label-from-option \\\"#{pane_id}\\\"'\"`,
   ].join("\n")
-  const calls = { fetch: 0, lock: 0, mutations: 0, child: 0 }
+  const calls = { fetch: 0, lock: 0, mutations: 0, child: 0 }, tmuxEnvironments: Record<string, string>[] = []
   const fs: DoctorFs = { stat: async path => info(path), readFile: async path => { const value = bytes.get(path); if (value === undefined) throw Object.assign(new Error(`missing ${path}`), { code: "ENOENT" }); return new TextEncoder().encode(value) }, readlink: async path => { if (path !== `${root}/current`) throw Object.assign(new Error("missing"), { code: "ENOENT" }); return fault === "current.target" ? "versions/bad" : `versions/${version}` }, readdir: async path => {
     if (path === `${root}/transactions`) return fault === "transaction.complete" ? ["pending"] : []
     if (path === versionRoot) return fault === "inventory.entries" ? ["bin", "scripts", "README.md"] : ["bin", "scripts", "pane_dash.tmux", "README.md", "LICENSE", "VERSION", "manifest.json"]
@@ -37,8 +37,9 @@ function fixture(fault?: string) {
     if (path === `${versionRoot}/scripts`) return ["open.sh", "tag.sh"]
     throw Object.assign(new Error(`missing ${path}`), { code: "ENOENT" })
   } }
-  const deps: Dependencies = { manifest: {}, platform: "linux", arch: "x64", executingVersion: version, env: { XDG_DATA_HOME: "/data", HOME: "/home" }, doctorFs: fs, fetch: async () => { calls.fetch += 1; throw new Error("fetch") }, lock: () => { calls.lock += 1 }, spawn: async (path, args, options) => {
-    calls.child += 1; expect(options.timeoutMs).toBe(5_000); expect(options.maxOutputBytes).toBe(8 * 1024); expect(options.env).toEqual({ PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" })
+  const deps: Dependencies = { manifest: {}, platform: "linux", arch: "x64", executingVersion: version, env: { XDG_DATA_HOME: "/data", HOME: "/home", CALLER_LEAK: "must-not-reach-tmux" }, doctorFs: fs, fetch: async () => { calls.fetch += 1; throw new Error("fetch") }, lock: () => { calls.lock += 1 }, spawn: async (path, args, options) => {
+    calls.child += 1; expect(options.timeoutMs).toBe(5_000); expect(options.maxOutputBytes).toBe(8 * 1024); expect(options.env).toEqual({ PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" })
+    if (path === "tmux") tmuxEnvironments.push(options.env)
     if (fault === "binary.version" && path.includes("pane-dash")) return { code: 1, stdout: "bad\n", stderr: "" }
     if (fault === "tmux.version" && args[0] === "-V") return { code: 0, stdout: "tmux 3.5\n", stderr: "" }
     if (args[0] === "-V") return { code: 0, stdout: "tmux 3.6\n", stderr: "" }
@@ -48,6 +49,7 @@ function fixture(fault?: string) {
   return {
     deps,
     calls,
+    tmuxEnvironments,
     tree: () => JSON.stringify([...bytes].sort(([left], [right]) => left.localeCompare(right))),
     mutate: (path: string, value: string) => bytes.set(path, value),
     setBindings: (value: string) => { bindings = value },
@@ -59,6 +61,10 @@ test("doctor is offline read-only and stable", async () => {
   expect(report.healthy).toBeTrue()
   expect(report.checks.map(check => check.id)).toEqual(DOCTOR_CHECK_IDS)
   expect(h.calls.fetch + h.calls.lock + h.calls.mutations).toBe(0)
+  expect(h.tmuxEnvironments).toEqual([
+    { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" },
+    { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" },
+  ])
   expect(h.tree()).toBe(before)
 })
 

@@ -20,7 +20,7 @@ const clean = (value: unknown) => String(value instanceof Error ? value.message 
 const missing = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT"
 const exactKeys = (value: unknown, keys: readonly string[]) => !!value && typeof value === "object" && Object.keys(value as object).sort().join("\0") === [...keys].sort().join("\0")
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
-const childEnv = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" }
+const childEnv = { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" }
 
 function selectedTarget(deps: Dependencies): string | null {
   const assets = (deps.manifest as any)?.assets

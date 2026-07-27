@@ -979,7 +979,7 @@ var init_doctor = __esm(() => {
   ];
   text = new TextDecoder;
   control = /[\u0000-\u001f\u007f]/g;
-  childEnv = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" };
+  childEnv = { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" };
 });
 
 // src/archive.ts
