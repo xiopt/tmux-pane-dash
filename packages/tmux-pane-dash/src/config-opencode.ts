@@ -1,4 +1,4 @@
-import { lstat, readdir, realpath } from "node:fs/promises"
+import { lstat, readdir, realpath, stat } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { CliError } from "./errors"
 import { resolveConfigPath } from "./fs"
@@ -26,7 +26,7 @@ export async function selectOpenCodeConfig(env: Dependencies["env"], deps: Depen
 }
 
 /** Plans, but never performs, removal of the one historical global plugin link. */
-export async function planOpenCodeMigration(input: { configDirectory: string; installRoot: string; migrate: boolean }): Promise<readonly PlannedOpenCodeMigration[]> {
+export async function planOpenCodeMigration(input: { configDirectory: string; migrate: boolean }): Promise<readonly PlannedOpenCodeMigration[]> {
   const names = new Set(["pane-dash.ts", "pane-dash.js", "pane_dash.ts", "pane_dash.js"]), candidates: string[] = []
   for (const directory of [join(input.configDirectory, "plugin"), join(input.configDirectory, "plugins")]) {
     let entries: string[]
@@ -37,9 +37,11 @@ export async function planOpenCodeMigration(input: { configDirectory: string; in
   if (!input.migrate || candidates.length !== 1) fail("E_CONFIG_CONFLICT")
   const logicalPath = candidates[0]!, entry = await lstat(logicalPath)
   if (!entry.isSymbolicLink()) fail("E_CONFIG_CONFLICT")
-  let resolvedPath: string, known: string
-  try { [resolvedPath, known] = await Promise.all([realpath(logicalPath), realpath(join(input.installRoot, "opencode-plugin", "pane-dash.ts"))]) } catch { fail("E_CONFIG_CONFLICT") }
-  if (resolvedPath! !== known!) fail("E_CONFIG_CONFLICT")
+  let resolvedPath: string
+  try {
+    resolvedPath = await realpath(logicalPath)
+    if (!resolvedPath.endsWith("/tmux-pane-dash/opencode-plugin/pane-dash.ts") || !(await stat(resolvedPath)).isFile()) fail("E_CONFIG_CONFLICT")
+  } catch { fail("E_CONFIG_CONFLICT") }
   return [{ logicalPath, resolvedPath: resolvedPath!, action: "unlink" }]
 }
 

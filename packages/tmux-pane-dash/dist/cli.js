@@ -224,7 +224,7 @@ var init_manifest = __esm(() => {
 });
 
 // packages/tmux-pane-dash/src/config-opencode.ts
-import { lstat as lstat3, readdir as readdir3, realpath } from "node:fs/promises";
+import { lstat as lstat3, readdir as readdir3, realpath, stat } from "node:fs/promises";
 import { join as join2 } from "node:path";
 async function selectOpenCodeConfig(env, deps) {
   const root = env?.XDG_CONFIG_HOME ? join2(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join2(env.HOME, ".config", "opencode") : fail("E_ROOT");
@@ -274,14 +274,14 @@ async function planOpenCodeMigration(input) {
   const logicalPath = candidates[0], entry = await lstat3(logicalPath);
   if (!entry.isSymbolicLink())
     fail("E_CONFIG_CONFLICT");
-  let resolvedPath, known;
+  let resolvedPath;
   try {
-    [resolvedPath, known] = await Promise.all([realpath(logicalPath), realpath(join2(input.installRoot, "opencode-plugin", "pane-dash.ts"))]);
+    resolvedPath = await realpath(logicalPath);
+    if (!resolvedPath.endsWith("/tmux-pane-dash/opencode-plugin/pane-dash.ts") || !(await stat(resolvedPath)).isFile())
+      fail("E_CONFIG_CONFLICT");
   } catch {
     fail("E_CONFIG_CONFLICT");
   }
-  if (resolvedPath !== known)
-    fail("E_CONFIG_CONFLICT");
   return [{ logicalPath, resolvedPath, action: "unlink" }];
 }
 function space(text, index) {
@@ -1994,11 +1994,11 @@ function planned(mutation, resolved, bytes) {
   return { ...mutation, expectedPreimage: { state: resolved.preimageHash ? { type: "file", sha256: resolved.preimageHash, mode: resolved.mode ?? 384 } : { type: "absent", sha256: null, mode: null }, ...resolved.preimageHash ? { bytes } : {}, symlinkChain: resolved.symlinkChain } };
 }
 async function inventoryConflicts(input, deps) {
-  const root2 = await managedRoot(deps.env);
   let tmux = null, opencode = null, migrations = [];
   if (input.tmux) {
     if (!deps.env?.HOME)
       throw new CliError("E_ROOT");
+    const root2 = await managedRoot(deps.env);
     const resolved = await resolveConfigPath(join9(deps.env.HOME, ".tmux.conf"), deps);
     const bytes = await readOr(resolved.resolvedPath, "");
     tmux = planned(planTmuxEdit({ ...resolved, bytes, mode: resolved.mode ?? 384, installRoot: root2, migrate: input.migrate }), resolved, bytes);
@@ -2008,7 +2008,7 @@ async function inventoryConflicts(input, deps) {
     const bytes = await readOr(resolved.resolvedPath, `{}
 `);
     opencode = planned(planOpenCodeEdit({ ...resolved, bytes, mode: resolved.mode ?? 384, migrate: input.migrate, packageEntry: input.packageEntry, ownedEntries: input.ownedOpenCodeEntries }), resolved, bytes);
-    migrations = await planOpenCodeMigration({ configDirectory: dirname5(logicalPath), installRoot: root2, migrate: input.migrate });
+    migrations = await planOpenCodeMigration({ configDirectory: dirname5(logicalPath), migrate: input.migrate });
   }
   return { tmux, opencode, migrations };
 }

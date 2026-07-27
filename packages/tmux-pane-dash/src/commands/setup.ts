@@ -23,10 +23,10 @@ function planned(mutation: PlannedConfigMutation, resolved: ResolvedConfigPath, 
 
 /** Pure conflict inventory: no root creation, fetch, unlink, or config write. */
 export async function inventoryConflicts(input: { tmux: boolean; opencode: boolean; migrate: boolean; packageEntry?: string; ownedOpenCodeEntries?: readonly string[] }, deps: Dependencies): Promise<ConflictInventory> {
-  const root = await managedRoot(deps.env)
   let tmux: PlannedConfigMutation | null = null, opencode: PlannedConfigMutation | null = null, migrations: ConflictInventory["migrations"] = []
   if (input.tmux) {
     if (!deps.env?.HOME) throw new CliError("E_ROOT")
+    const root = await managedRoot(deps.env)
     const resolved = await resolveConfigPath(join(deps.env.HOME, ".tmux.conf"), deps)
     const bytes = await readOr(resolved.resolvedPath, "")
     tmux = planned(planTmuxEdit({ ...resolved, bytes, mode: resolved.mode ?? 0o600, installRoot: root, migrate: input.migrate }), resolved, bytes)
@@ -35,7 +35,7 @@ export async function inventoryConflicts(input: { tmux: boolean; opencode: boole
     const logicalPath = await selectOpenCodeConfig(deps.env, deps), resolved = await resolveConfigPath(logicalPath, deps)
     const bytes = await readOr(resolved.resolvedPath, "{}\n")
     opencode = planned(planOpenCodeEdit({ ...resolved, bytes, mode: resolved.mode ?? 0o600, migrate: input.migrate, packageEntry: input.packageEntry, ownedEntries: input.ownedOpenCodeEntries }), resolved, bytes)
-    migrations = await planOpenCodeMigration({ configDirectory: dirname(logicalPath), installRoot: root, migrate: input.migrate })
+    migrations = await planOpenCodeMigration({ configDirectory: dirname(logicalPath), migrate: input.migrate })
   }
   return { tmux, opencode, migrations }
 }
