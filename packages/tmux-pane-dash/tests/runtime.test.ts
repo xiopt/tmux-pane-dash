@@ -46,7 +46,8 @@ test("packages the unexported runtime only as an absolute file module", async ()
 
 test("production dependencies and packed CLI construct and execute a command path", async () => {
   expect(nodeDependencies().pid?.()).toBe(process.pid)
-  const child = Bun.spawn([process.execPath, resolve(import.meta.dir, "..", "dist", "cli.js"), "doctor"], { stdout: "pipe", stderr: "pipe" })
-  expect(await child.exited).toBe(0)
+  const child = Bun.spawn([process.execPath, resolve(import.meta.dir, "..", "dist", "cli.js"), "doctor", "--json"], { stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH!, HOME: resolve(import.meta.dir, "missing-home") } })
+  expect(await child.exited).toBe(1)
+  expect(JSON.parse(await new Response(child.stdout).text())).toMatchObject({ schemaVersion: 1, healthy: false })
   expect(await new Response(child.stderr).text()).toBe("")
 })

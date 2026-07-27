@@ -113,10 +113,443 @@ var init_manifest = __esm(() => {
   };
 });
 
+// packages/tmux-pane-dash/src/config-tmux.ts
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+function tmuxConfigEmbed(shellCommand) {
+  if (/[\u0000-\u001f\u007f]/.test(shellCommand))
+    throw new CliError("E_CONFIG");
+  const literal = `#{l:${shellCommand.replaceAll("#", "##").replaceAll("}", "#}")}}`;
+  return `"${literal.replaceAll("\\", "\\\\").replaceAll('"', "\\\"").replaceAll("$", "\\$")}"`;
+}
+function managedTmuxBlock(installRoot) {
+  return `${begin}
+run-shell ${tmuxConfigEmbed(shellQuote(`${installRoot}/current/pane_dash.tmux`))}
+${end}`;
+}
+function ownedRange(text, block) {
+  if (text.includes("tmux-pane-dash (@xiopt/tmux-pane-dash)") && (!text.includes(begin) || !text.includes(end)))
+    conflict("unsupported tmux-pane-dash marker schema");
+  const starts = [], ends = [];
+  for (let index = text.indexOf(begin);index >= 0; index = text.indexOf(begin, index + begin.length))
+    starts.push(index);
+  for (let index = text.indexOf(end);index >= 0; index = text.indexOf(end, index + end.length))
+    ends.push(index);
+  if (!starts.length && !ends.length)
+    return null;
+  if (starts.length !== 1 || ends.length !== 1 || starts[0] > ends[0])
+    conflict("malformed tmux-pane-dash markers");
+  const start = starts[0], finish = ends[0] + end.length;
+  if (text.slice(start, finish) !== block)
+    conflict("altered tmux-pane-dash block");
+  return { start, end: finish };
+}
+function legacyLines(text, migrate) {
+  const lines = text.split(/(?<=\n)/);
+  const retained = [];
+  for (const line of lines) {
+    const active = line.replace(/^\s*(?:#.*)?$/, "");
+    if (!active || !active.includes("pane_dash.tmux") && !active.includes("@pane-dash-engine") && !active.includes("tmux-pane-dash")) {
+      retained.push(line);
+      continue;
+    }
+    const exactManual = /^\s*run-shell\s+(['"])[^'"\n]*(?:tmux-pane-dash[^'"\n]*)?\/pane_dash\.tmux\1\s*(?:\r?\n)?$/.test(line);
+    const exactEngine = /^\s*set(?:-option)?\s+-g\s+@pane-dash-engine\s+\S+\s*(?:\r?\n)?$/.test(line);
+    const exactTpm = /^\s*set\s+-g\s+@plugin\s+['"]xiopt\/tmux-pane-dash['"]\s*(?:\r?\n)?$/.test(line);
+    if (!migrate || !(exactManual || exactEngine || exactTpm))
+      conflict(`existing configuration at tmux line ${retained.length + 1}`);
+  }
+  return retained.join("");
+}
+function planTmuxEdit(input) {
+  let text = decoder.decode(input.bytes), block = managedTmuxBlock(input.installRoot);
+  const range = ownedRange(text, block);
+  if (range)
+    return { ...input, bytes: input.bytes };
+  text = legacyLines(text, input.migrate);
+  const separator = text.length && !text.endsWith(`
+`) ? `
+` : "";
+  return { ...input, bytes: encoder.encode(`${text}${separator}${block}`) };
+}
+function planTmuxRemoval(input) {
+  const text = decoder.decode(input.bytes), block = managedTmuxBlock(input.installRoot), range = ownedRange(text, block);
+  if (!range)
+    conflict("managed tmux-pane-dash block is missing");
+  const before = text.slice(0, range.start), after = text.slice(range.end);
+  return { ...input, bytes: encoder.encode(`${before.endsWith(`
+`) && !after ? before.slice(0, -1) : before}${after}`) };
+}
+var encoder, decoder, begin = "# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>", end = "# <<< tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 <<<", conflict = (detail = "existing tmux-pane-dash configuration") => {
+  throw new CliError("E_CONFIG_CONFLICT", detail);
+};
+var init_config_tmux = __esm(() => {
+  init_errors();
+  encoder = new TextEncoder;
+  decoder = new TextDecoder;
+});
+
+// packages/tmux-pane-dash/src/ownership.ts
+import { lstat, mkdir, readFile, readlink, readdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
+async function managedRoot(env) {
+  const xdg = env?.XDG_DATA_HOME;
+  if (xdg)
+    return join(xdg, "tmux-pane-dash");
+  if (!env?.HOME)
+    fail("E_ROOT");
+  return join(env.HOME, ".local", "share", "tmux-pane-dash");
+}
+function inside(root, path) {
+  return path === root || path.startsWith(`${root}/`);
+}
+async function safeDirectory(path, uid) {
+  const entry = await lstat(path);
+  if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== uid || (entry.mode & 18) !== 0)
+    fail("E_CONFLICT");
+}
+async function validateManagedRoot(root, deps) {
+  const canonical = resolve(root), uid = deps.uid?.() ?? process.getuid?.() ?? 0;
+  await safeDirectory(canonical, uid);
+  const allowed = new Set(["versions", "state", "transactions", "current"]);
+  for (const name of await readdir(canonical))
+    if (!allowed.has(name))
+      fail("E_CONFLICT");
+  for (const name of ["versions", "state", "transactions"]) {
+    try {
+      await safeDirectory(join(canonical, name), uid);
+    } catch (error) {
+      if (!missing(error))
+        throw error;
+    }
+  }
+  try {
+    const current = join(canonical, "current"), target = await readlink(current);
+    if (target.startsWith("/") || !target.startsWith("versions/") || target.split("/").some((part) => !part || part === "." || part === "..") || !inside(canonical, resolve(canonical, target)))
+      fail("E_CONFLICT");
+  } catch (error) {
+    if (!missing(error))
+      throw error;
+  }
+  try {
+    for (const version of await readdir(join(canonical, "versions")))
+      await safeDirectory(join(canonical, "versions", version), uid);
+  } catch (error) {
+    if (!missing(error))
+      throw error;
+  }
+}
+function validOwnership(value) {
+  return value && typeof value === "object" && value.schemaVersion === 1 && typeof value.packageVersion === "string" && typeof value.releaseVersion === "string" && value.archive && typeof value.archive.target === "string" && typeof value.archive.sha256 === "string" && Array.isArray(value.files) && typeof value.currentTarget === "string" && value.components && Array.isArray(value.migrations);
+}
+async function readOwnership(root, _deps) {
+  let bytes;
+  try {
+    bytes = await readFile(join(root, "state", "ownership.json"));
+  } catch (error) {
+    if (missing(error))
+      return null;
+    fail("E_OWNERSHIP");
+  }
+  let value;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    fail("E_OWNERSHIP");
+  }
+  if (!validOwnership(value))
+    fail("E_OWNERSHIP");
+  return value;
+}
+async function ensureManagedRoot(root) {
+  await mkdir(root, { recursive: true, mode: 448 });
+  await mkdir(join(root, "versions"), { recursive: true, mode: 448 });
+  await mkdir(join(root, "state"), { recursive: true, mode: 448 });
+  await mkdir(join(root, "transactions"), { recursive: true, mode: 448 });
+}
+var missing = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", fail = (code) => {
+  throw new CliError(code);
+};
+var init_ownership = __esm(() => {
+  init_errors();
+});
+
+// packages/tmux-pane-dash/src/commands/doctor.ts
+var exports_doctor = {};
+__export(exports_doctor, {
+  renderDoctorJson: () => renderDoctorJson,
+  renderDoctorHuman: () => renderDoctorHuman,
+  doctor: () => doctor,
+  DOCTOR_CHECK_IDS: () => DOCTOR_CHECK_IDS
+});
+import { createHash } from "node:crypto";
+import { join as join2, relative, resolve as resolve2 } from "node:path";
+function selectedTarget(deps) {
+  const assets = deps.manifest?.assets;
+  const key = `${deps.platform}-${deps.arch === "arm64" ? "arm64" : deps.arch === "x64" ? "x64" : deps.arch}`;
+  return typeof assets?.[key]?.target === "string" ? assets[key].target : null;
+}
+async function root(deps) {
+  return managedRoot(deps.env);
+}
+async function exists(fs, path) {
+  try {
+    await fs.stat(path);
+    return true;
+  } catch (error) {
+    if (missing2(error))
+      return false;
+    throw error;
+  }
+}
+async function selectDoctorOpenCodeConfig(fs, env) {
+  const directory = env?.XDG_CONFIG_HOME ? join2(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join2(env.HOME, ".config", "opencode") : (() => {
+    throw new Error("OpenCode root is unavailable");
+  })();
+  const json = join2(directory, "opencode.json"), jsonc = join2(directory, "opencode.jsonc"), [hasJson, hasJsonc] = await Promise.all([exists(fs, json), exists(fs, jsonc)]);
+  if (!hasJson && !hasJsonc)
+    return json;
+  if (hasJson && !hasJsonc)
+    return json;
+  if (!hasJson && hasJsonc)
+    return jsonc;
+  const [left, right] = await Promise.all([fs.stat(json), fs.stat(jsonc)]);
+  if (left.kind !== "file" || right.kind !== "file" || left.dev !== right.dev || left.ino !== right.ino)
+    throw new Error("OpenCode config selection is ambiguous");
+  return json;
+}
+async function read(fs, path) {
+  return fs.readFile(path);
+}
+function check(id, status, code, message) {
+  return { id, status, code, message: clean(message) };
+}
+function ownershipValid(value) {
+  if (!exactKeys(value, ["schemaVersion", "packageVersion", "releaseVersion", "archive", "files", "currentTarget", "components", "migrations"]))
+    return false;
+  const record = value;
+  return record.schemaVersion === 1 && typeof record.packageVersion === "string" && typeof record.releaseVersion === "string" && exactKeys(record.archive, ["target", "sha256"]) && typeof record.archive.target === "string" && /^[a-f0-9]{64}$/.test(record.archive.sha256) && Array.isArray(record.files) && exactKeys(record.components, ["tmux", "opencode"]) && Array.isArray(record.migrations);
+}
+async function loadOwnership(fs, installRoot) {
+  const value = JSON.parse(text.decode(await read(fs, join2(installRoot, "state", "ownership.json"))));
+  if (!ownershipValid(value))
+    throw new Error("ownership schema is invalid");
+  return value;
+}
+function inRoot(installRoot, path) {
+  const rel = relative(resolve2(installRoot), resolve2(path));
+  return rel !== "" && !rel.startsWith("..") && !rel.includes("/../");
+}
+function parseJsonc(bytes) {
+  return JSON.parse(text.decode(bytes).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/[^\n]*/g, "$1"));
+}
+function tmuxVersion(value) {
+  const match = /^tmux\s+(\d+)\.(\d+)(?:\.|[a-z]|\s|$)/.exec(value.trim());
+  return !!match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 6);
+}
+async function run(deps, path, args) {
+  if (!deps.spawn)
+    throw new Error("child execution unavailable");
+  return deps.spawn(path, args, { timeoutMs: 5000, env: childEnv, maxOutputBytes: 8 * 1024 });
+}
+async function doctor(deps) {
+  const fs = deps.doctorFs;
+  const fallback = () => ({ schemaVersion: 1, healthy: false, packageVersion: deps.executingVersion, installedVersion: null, target: selectedTarget(deps), checks: [check("ownership.schema", "error", "E_DOCTOR", "unable to form doctor report")] });
+  if (!fs)
+    return fallback();
+  try {
+    const installRoot = await root(deps), checks = [], ownershipPath = join2(installRoot, "state", "ownership.json");
+    let ownership = null;
+    try {
+      ownership = await loadOwnership(fs, installRoot);
+      checks.push(check("ownership.schema", "ok", null, "ownership schema matches"));
+    } catch (error) {
+      checks.push(check("ownership.schema", "error", "E_OWNERSHIP", `ownership unavailable: ${clean(error)}`));
+    }
+    const version = ownership?.releaseVersion ?? null, versionRoot = version ? join2(installRoot, "versions", version) : null;
+    try {
+      const components = ownership?.components;
+      const validComponent = (value) => value === null || exactKeys(value, ["logicalPath", "resolvedPath", "marker", "packageEntries", "baselineBackup"]) && typeof value.logicalPath === "string" && typeof value.resolvedPath === "string" && typeof value.marker === "string" && Array.isArray(value.packageEntries) && exactKeys(value.baselineBackup, ["logicalPath", "sha256"]) && typeof value.baselineBackup.logicalPath === "string" && /^[a-f0-9]{64}$/.test(value.baselineBackup.sha256);
+      if (!ownership || !versionRoot || ownership.currentTarget !== `versions/${version}` || ownership.files.some((file) => !inRoot(installRoot, file.logicalPath) || !inRoot(installRoot, file.resolvedPath)) || !validComponent(components?.tmux) || !validComponent(components?.opencode))
+        throw new Error("owned paths are invalid");
+      checks.push(check("ownership.paths", "ok", null, "ownership paths match"));
+    } catch (error) {
+      checks.push(check("ownership.paths", "error", "E_OWNERSHIP_PATH", clean(error)));
+    }
+    try {
+      const entries = await fs.readdir(join2(installRoot, "transactions"));
+      if (entries.some((entry) => entry !== "lock"))
+        throw new Error("incomplete transaction exists");
+      checks.push(check("transaction.complete", "ok", null, "no incomplete transaction"));
+    } catch (error) {
+      checks.push(check("transaction.complete", "error", "E_TRANSACTION", clean(error)));
+    }
+    try {
+      const current = join2(installRoot, "current"), info = await fs.stat(current), target = await fs.readlink(current);
+      if (info.kind !== "symlink" || target.startsWith("/") || target !== ownership?.currentTarget)
+        throw new Error("current link is not the owned relative target");
+      checks.push(check("current.link", "ok", null, "current link is relative"));
+    } catch (error) {
+      checks.push(check("current.link", "error", "E_CURRENT_LINK", clean(error)));
+    }
+    try {
+      if (!ownership || !versionRoot || ownership.currentTarget !== `versions/${ownership.releaseVersion}` || await fs.readlink(join2(installRoot, "current")) !== ownership.currentTarget)
+        throw new Error("current target does not name installed version");
+      const info = await fs.stat(versionRoot);
+      if (info.kind !== "directory")
+        throw new Error("installed version directory is missing");
+      checks.push(check("current.target", "ok", null, "current target matches installed version"));
+    } catch (error) {
+      checks.push(check("current.target", "error", "E_CURRENT_TARGET", clean(error)));
+    }
+    try {
+      if (!ownership || !versionRoot)
+        throw new Error("no installed inventory");
+      const expected = new Set([...ownership.files.map((file) => file.logicalPath.slice(versionRoot.length + 1)), "manifest.json"]);
+      const actual = [];
+      const walk = async (directory, prefix = "") => {
+        for (const name of await fs.readdir(directory)) {
+          const path = join2(directory, name), item = await fs.stat(path), logical = prefix ? `${prefix}/${name}` : name;
+          if (item.kind === "directory")
+            await walk(path, logical);
+          else
+            actual.push(logical);
+        }
+      };
+      await walk(versionRoot);
+      if (actual.length !== expected.size || actual.some((path) => !expected.has(path)))
+        throw new Error("installed inventory differs");
+      checks.push(check("inventory.entries", "ok", null, "installed inventory matches"));
+    } catch (error) {
+      checks.push(check("inventory.entries", "error", "E_INVENTORY", clean(error)));
+    }
+    try {
+      if (!ownership || !versionRoot)
+        throw new Error("no installed manifest");
+      const manifest = JSON.parse(text.decode(await read(fs, join2(versionRoot, "manifest.json"))));
+      if (!exactKeys(manifest, ["schemaVersion", "product", "version", "target", "asset", "files"]) || manifest.version !== ownership.releaseVersion || manifest.target !== ownership.archive.target || !Array.isArray(manifest.files))
+        throw new Error("internal manifest is invalid");
+      for (const file of ownership.files) {
+        const item = await fs.stat(file.resolvedPath), bytes = await read(fs, file.resolvedPath);
+        if (item.kind !== file.type || item.mode !== file.mode || item.size !== bytes.length || hash(bytes) !== file.sha256)
+          throw new Error("owned payload metadata differs");
+      }
+      checks.push(check("inventory.metadata", "ok", null, "payload metadata matches"));
+    } catch (error) {
+      checks.push(check("inventory.metadata", "error", "E_PAYLOAD", clean(error)));
+    }
+    try {
+      if (!versionRoot || !version)
+        throw new Error("binary is unavailable");
+      const result = await run(deps, join2(versionRoot, "bin", "pane-dash"), ["--version"]);
+      if (result.code !== 0 || result.stdout !== `pane-dash ${version}
+` || result.stderr !== "")
+        throw new Error("binary version output differs");
+      checks.push(check("binary.version", "ok", null, "binary version matches"));
+    } catch (error) {
+      checks.push(check("binary.version", "error", "E_BINARY", clean(error)));
+    }
+    try {
+      const result = await run(deps, "tmux", ["-V"]);
+      if (result.code !== 0 || result.stderr !== "" || !tmuxVersion(result.stdout))
+        throw new Error("tmux 3.6 or newer is required");
+      checks.push(check("tmux.version", "ok", null, "tmux version is supported"));
+    } catch (error) {
+      checks.push(check("tmux.version", "error", "E_TMUX", clean(error)));
+    }
+    try {
+      const owned = ownership?.components.tmux;
+      if (!owned || !deps.env?.HOME || owned.logicalPath !== join2(deps.env.HOME, ".tmux.conf") || owned.marker !== managedTmuxBlock(installRoot))
+        throw new Error("owned tmux route is invalid");
+      const config = text.decode(await read(fs, owned.resolvedPath)), marker = owned.marker;
+      if (config.split(marker).length !== 2 || hash(new TextEncoder().encode(config)) !== owned.baselineBackup.sha256 || /(?:@pane-dash-engine|@plugin\s+['"]xiopt\/tmux-pane-dash|pane_dash\.tmux)/.test(config.replace(marker, "")))
+        throw new Error("conflicting tmux route exists");
+      checks.push(check("tmux.config", "ok", null, "tmux marker and route match"));
+    } catch (error) {
+      checks.push(check("tmux.config", "error", "E_TMUX_CONFIG", clean(error)));
+    }
+    try {
+      const result = await run(deps, "tmux", ["list-keys", "-T", "prefix"]);
+      if (result.code !== 0)
+        checks.push(check("tmux.server", "warning", "W_TMUX_SERVER", "tmux server is not running"));
+      else if (!result.stderr && ["scripts/open.sh", "scripts/tag.sh", "current"].every((token) => result.stdout.includes(token)))
+        checks.push(check("tmux.server", "ok", null, "tmux bindings use current route"));
+      else
+        checks.push(check("tmux.server", "error", "E_TMUX_BINDINGS", "tmux bindings do not match"));
+    } catch {
+      checks.push(check("tmux.server", "warning", "W_TMUX_SERVER", "tmux server is not running"));
+    }
+    try {
+      const owned = ownership?.components.opencode;
+      if (!owned)
+        throw new Error("OpenCode ownership is missing");
+      const selected = await selectDoctorOpenCodeConfig(fs, deps.env), expected = `@xiopt/pane-dash-opencode@${deps.executingVersion}`;
+      if (selected !== owned.logicalPath || owned.packageEntries.length !== 1 || owned.packageEntries[0] !== expected)
+        throw new Error("OpenCode selection or ownership differs");
+      const configBytes = await read(fs, owned.resolvedPath), config = parseJsonc(configBytes), entries = config?.plugin;
+      if (hash(configBytes) !== owned.baselineBackup.sha256 || !Array.isArray(entries) || entries.filter((entry) => entry === expected).length !== 1 || entries.filter((entry) => typeof entry === "string" && /pane-dash/i.test(entry)).length !== 1)
+        throw new Error("OpenCode plugin entries differ");
+      checks.push(check("opencode.config", "ok", null, "OpenCode plugin entry matches"));
+    } catch (error) {
+      checks.push(check("opencode.config", "error", "E_OPENCODE", clean(error)));
+    }
+    try {
+      if (!ownership)
+        throw new Error("ownership is unavailable");
+      for (const file of ownership.files) {
+        if (!inRoot(installRoot, file.logicalPath) || !inRoot(installRoot, file.resolvedPath))
+          throw new Error("managed path escapes root");
+      }
+      if (await exists(fs, ownershipPath) === false)
+        throw new Error("ownership file is missing");
+      checks.push(check("ownership.managed-paths", "ok", null, "all managed paths are owned"));
+    } catch (error) {
+      checks.push(check("ownership.managed-paths", "error", "E_MANAGED_PATH", clean(error)));
+    }
+    return { schemaVersion: 1, healthy: !checks.some((item) => item.status === "error"), packageVersion: deps.executingVersion, installedVersion: version, target: ownership?.archive.target ?? selectedTarget(deps), checks };
+  } catch (error) {
+    return { ...fallback(), checks: [check("ownership.schema", "error", "E_DOCTOR", `unable to form doctor report: ${clean(error)}`)] };
+  }
+}
+function renderDoctorJson(report) {
+  return `${JSON.stringify(report)}
+`;
+}
+function renderDoctorHuman(report) {
+  return `${report.checks.map((item) => `${item.id}: ${item.status}${item.code ? ` (${item.code})` : ""} ${item.message}`).join(`
+`)}
+${report.healthy ? "healthy" : "unhealthy"}
+`;
+}
+var DOCTOR_CHECK_IDS, text, control, maxMessage = 160, clean = (value) => String(value instanceof Error ? value.message : value).replace(control, " ").replace(/(?:authorization|cookie|token)\s*[:=]\s*\S+/gi, "$1=<redacted>").replace(/\/[A-Za-z0-9_.~%+@=,:;-]+(?:\/[A-Za-z0-9_.~%+@=,:;-]+)*/g, "<path>").replace(/\s+/g, " ").trim().slice(0, maxMessage) || "operation failed", missing2 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", exactKeys = (value, keys2) => !!value && typeof value === "object" && Object.keys(value).sort().join("\x00") === [...keys2].sort().join("\x00"), hash = (bytes) => createHash("sha256").update(bytes).digest("hex"), childEnv;
+var init_doctor = __esm(() => {
+  init_config_tmux();
+  init_ownership();
+  DOCTOR_CHECK_IDS = [
+    "ownership.schema",
+    "ownership.paths",
+    "transaction.complete",
+    "current.link",
+    "current.target",
+    "inventory.entries",
+    "inventory.metadata",
+    "binary.version",
+    "tmux.version",
+    "tmux.config",
+    "tmux.server",
+    "opencode.config",
+    "ownership.managed-paths"
+  ];
+  text = new TextDecoder;
+  control = /[\u0000-\u001f\u007f]/g;
+  childEnv = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" };
+});
+
 // packages/tmux-pane-dash/src/fs.ts
-import { chmod, lstat, mkdir, open, readdir, readFile, readlink, rename, rm } from "node:fs/promises";
-import { createHash, randomBytes } from "node:crypto";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { chmod, lstat as lstat2, mkdir as mkdir2, open, readdir as readdir2, readFile as readFile2, readlink as readlink2, rename, rm } from "node:fs/promises";
+import { createHash as createHash2, randomBytes } from "node:crypto";
+import { dirname as dirname2, isAbsolute, join as join3, resolve as resolve3, sep } from "node:path";
 function canonicalPayloadPath(path) {
   if (!path || path.includes("\x00") || path.includes("\\") || path.startsWith("/") || path.endsWith("/") || path.includes("//"))
     throw new Error("invalid payload path");
@@ -129,9 +562,9 @@ async function resolveConfigPath(logicalPath, _deps) {
   for (let count = 0;count <= 16; count += 1) {
     let entry;
     try {
-      entry = await lstat(path);
+      entry = await lstat2(path);
     } catch (error) {
-      if (missing(error) && count === 0)
+      if (missing3(error) && count === 0)
         return { logicalPath, resolvedPath: logicalPath, symlinkChain: [] };
       configError();
     }
@@ -140,22 +573,22 @@ async function resolveConfigPath(logicalPath, _deps) {
         configError();
       let target;
       try {
-        target = await readlink(path);
+        target = await readlink2(path);
       } catch {
         configError();
       }
       links.push({ path, target, dev: entry.dev, ino: entry.ino });
-      path = isAbsolute(target) ? target : resolve(dirname(path), target);
+      path = isAbsolute(target) ? target : resolve3(dirname2(path), target);
       continue;
     }
     if (!entry.isFile())
       configError();
-    const content = new Uint8Array(await readFile(path));
+    const content = new Uint8Array(await readFile2(path));
     return { logicalPath, resolvedPath: path, symlinkChain: links, mode: entry.mode & 511, preimageHash: digest(content) };
   }
   configError();
 }
-var missing = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", digest = (value) => createHash("sha256").update(value).digest("hex"), configError = () => {
+var missing3 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", digest = (value) => createHash2("sha256").update(value).digest("hex"), configError = () => {
   throw new CliError("E_CONFIG");
 };
 var init_fs = __esm(() => {
@@ -163,14 +596,14 @@ var init_fs = __esm(() => {
 });
 
 // packages/tmux-pane-dash/src/archive.ts
-import { createHash as createHash2 } from "node:crypto";
-import { join as join2 } from "node:path";
+import { createHash as createHash3 } from "node:crypto";
+import { join as join4 } from "node:path";
 import { createInflateRaw } from "node:zlib";
 function gzipHeaderLength(bytes) {
   if (bytes.length < 10)
     return;
   if (bytes[0] !== 31 || bytes[1] !== 139 || bytes[2] !== 8 || bytes[3] & 224)
-    fail("gzip header");
+    fail2("gzip header");
   const flags = bytes[3], has = (flag) => (flags & flag) !== 0;
   let offset = 10;
   if (has(4)) {
@@ -183,16 +616,16 @@ function gzipHeaderLength(bytes) {
   }
   for (const flag of [8, 16])
     if (has(flag)) {
-      const end = bytes.indexOf(0, offset);
-      if (end < 0)
+      const end2 = bytes.indexOf(0, offset);
+      if (end2 < 0)
         return;
-      offset = end + 1;
+      offset = end2 + 1;
     }
   if (has(2)) {
     if (bytes.length < offset + 2)
       return;
     if (((crc32(4294967295, bytes.subarray(0, offset)) ^ 4294967295) & 65535) !== (bytes[offset] | bytes[offset + 1] << 8))
-      fail("gzip header");
+      fail2("gzip header");
     offset += 2;
   }
   return offset;
@@ -200,20 +633,20 @@ function gzipHeaderLength(bytes) {
 function field(header, offset, length) {
   const value = header.subarray(offset, offset + length), nul = value.indexOf(0);
   if (nul < 0 || value.subarray(nul + 1).some((byte) => byte !== 0))
-    fail("header field");
+    fail2("header field");
   try {
-    return text.decode(value.subarray(0, nul));
+    return text2.decode(value.subarray(0, nul));
   } catch {
-    return fail("header encoding");
+    return fail2("header encoding");
   }
 }
 function octal(header, offset, length) {
   const value = field(header, offset, length);
   if (!/^[0-7]+$/.test(value))
-    fail("number");
+    fail2("number");
   const result = Number.parseInt(value, 8);
   if (!Number.isSafeInteger(result))
-    fail("number");
+    fail2("number");
   return result;
 }
 function checksum(header) {
@@ -222,7 +655,7 @@ function checksum(header) {
   for (let index = 0;index < 512; index += 1)
     actual += index >= 148 && index < 156 ? 32 : header[index];
   if (actual !== expected)
-    fail("checksum");
+    fail2("checksum");
 }
 function headerIsSafe(header) {
   octal(header, 108, 8);
@@ -230,9 +663,9 @@ function headerIsSafe(header) {
   octal(header, 136, 12);
   for (const [offset, length] of [[157, 100], [265, 32], [297, 32], [329, 8], [337, 8], [345, 155], [500, 12]])
     if (!allZero(header.subarray(offset, offset + length)))
-      fail("metadata");
-  if (field(header, 257, 6) !== "ustar" || text.decode(header.subarray(263, 265)) !== "00")
-    fail("format");
+      fail2("metadata");
+  if (field(header, 257, 6) !== "ustar" || text2.decode(header.subarray(263, 265)) !== "00")
+    fail2("format");
 }
 
 class TarParser {
@@ -247,8 +680,8 @@ class TarParser {
   ended = false;
   zeroBlocks = 0;
   current;
-  constructor(root, fs, limits, wait) {
-    this.root = root;
+  constructor(root2, fs, limits, wait) {
+    this.root = root2;
     this.fs = fs;
     this.limits = limits;
     this.wait = wait;
@@ -256,7 +689,7 @@ class TarParser {
   async header(header) {
     if (this.ended) {
       if (!allZero(header))
-        fail("trailing data");
+        fail2("trailing data");
       this.zeroBlocks += 1;
       return;
     }
@@ -271,18 +704,18 @@ class TarParser {
     try {
       path = canonicalPayloadPath(field(header, 0, 100));
     } catch {
-      fail("path");
+      fail2("path");
     }
     const mode = octal(header, 100, 8), size = octal(header, 124, 12), type = String.fromCharCode(header[156] || 48);
     if (++this.entries > this.limits.maxEntries)
-      fail("entries");
+      fail2("entries");
     if (this.seen.has(path))
-      fail("duplicate");
+      fail2("duplicate");
     this.seen.add(path);
     const fileMode = inventory.get(path), directoryMode = directories.get(path);
     if (type === "0" || type === "\x00") {
       if (fileMode === undefined || mode !== fileMode || size > this.limits.maxFileBytes)
-        fail("file");
+        fail2("file");
       this.current = { path, mode: fileMode, size, remaining: size, padding: Math.ceil(size / 512) * 512 - size, body: [] };
       if (size === 0) {
         await this.finishFile();
@@ -290,10 +723,10 @@ class TarParser {
       }
     } else if (type === "5") {
       if (directoryMode === undefined || mode !== directoryMode || size !== 0)
-        fail("type");
+        fail2("type");
       await this.wait(this.fs.mkdirPayloadDirectory(this.root, path, directoryMode));
     } else
-      fail("type");
+      fail2("type");
   }
   async finishFile() {
     const current = this.current;
@@ -301,7 +734,7 @@ class TarParser {
   }
   async push(chunk) {
     if ((this.inflated += chunk.length) > this.limits.maxTotalBytes)
-      fail("total size");
+      fail2("total size");
     this.pending = this.pending.length ? pieces([this.pending, chunk], this.pending.length + chunk.length) : chunk;
     for (;; ) {
       if (this.current) {
@@ -320,7 +753,7 @@ class TarParser {
           if (this.pending.length < current.padding)
             return;
           if (!allZero(this.pending.subarray(0, current.padding)))
-            fail("padding");
+            fail2("padding");
           this.pending = this.pending.slice(current.padding);
           current.padding = 0;
         }
@@ -337,16 +770,16 @@ class TarParser {
   }
   finish() {
     if (this.current || this.pending.length)
-      fail(this.current ? "truncated body" : "truncated header");
+      fail2(this.current ? "truncated body" : "truncated header");
     if (!this.ended || this.zeroBlocks < 2)
-      fail("terminal zeros");
+      fail2("terminal zeros");
     if ([...inventory.keys(), ...directories.keys()].some((path) => !this.seen.has(path)))
-      fail("inventory");
+      fail2("inventory");
   }
 }
 async function extractArchive(input) {
   if (!input.clock.nowMs)
-    fail("clock");
+    fail2("clock");
   const started = input.clock.nowMs(), deadline = started + input.limits.timeoutMs;
   let rejectDeadline;
   const expired = new Promise((_, reject) => {
@@ -357,11 +790,11 @@ async function extractArchive(input) {
     try {
       const result = await Promise.race([promise, expired]);
       if (input.clock.nowMs() > deadline)
-        fail("timeout");
+        fail2("timeout");
       return result;
     } catch (error) {
       if (error instanceof Error && error.message === "timeout")
-        fail("timeout");
+        fail2("timeout");
       throw error;
     }
   };
@@ -382,17 +815,17 @@ async function extractArchive(input) {
       if (finished) {
         footer = pieces([footer, chunk], footer.length + chunk.length);
         if (footer.length > 8)
-          fail("gzip member");
+          fail2("gzip member");
         return;
       }
       const before = inflate.bytesWritten;
-      await wait(new Promise((resolve2, reject) => inflate.write(chunk, (error) => error ? reject(error) : resolve2())));
+      await wait(new Promise((resolve4, reject) => inflate.write(chunk, (error) => error ? reject(error) : resolve4())));
       const consumed = inflate.bytesWritten - before;
       if (consumed < chunk.length) {
         footer = chunk.slice(consumed);
         finished = true;
         if (footer.length > 8)
-          fail("gzip member");
+          fail2("gzip member");
       }
     };
     const writer = (async () => {
@@ -400,11 +833,11 @@ async function extractArchive(input) {
         for await (const chunk of input.archive) {
           compressed += chunk.length;
           if (compressed > MAX_COMPRESSED_BYTES)
-            fail("compressed size");
+            fail2("compressed size");
           if (!body) {
             header = pieces([header, chunk], header.length + chunk.length);
             if (header.length > MAX_GZIP_HEADER_BYTES)
-              fail("gzip header");
+              fail2("gzip header");
             const length = gzipHeaderLength(header);
             if (length === undefined)
               continue;
@@ -415,8 +848,8 @@ async function extractArchive(input) {
             await write(chunk);
         }
         if (!body || !finished || footer.length !== 8)
-          fail("gzip footer");
-        await wait(new Promise((resolve2, reject) => inflate.end((error) => error ? reject(error) : resolve2())));
+          fail2("gzip footer");
+        await wait(new Promise((resolve4, reject) => inflate.end((error) => error ? reject(error) : resolve4())));
       } catch (error) {
         inflate.destroy(error instanceof Error ? error : new Error("gzip"));
         throw error;
@@ -426,7 +859,7 @@ async function extractArchive(input) {
       await wait(writer);
       await output;
       if ((crc ^ 4294967295) >>> 0 !== littleEndian(footer, 0) || size !== littleEndian(footer, 4))
-        fail("gzip footer");
+        fail2("gzip footer");
       parser.finish();
     } catch (error) {
       await output.catch(() => {
@@ -434,7 +867,7 @@ async function extractArchive(input) {
       });
       if (error instanceof Error && error.message.startsWith("E_ARCHIVE_ENTRY"))
         throw error;
-      fail("gzip");
+      fail2("gzip");
     }
   } catch (error) {
     try {
@@ -443,8 +876,8 @@ async function extractArchive(input) {
     if (error instanceof Error && error.message.startsWith("E_ARCHIVE_ENTRY"))
       throw error;
     if (error instanceof Error && error.message === "timeout")
-      fail("timeout");
-    fail("gzip");
+      fail2("timeout");
+    fail2("gzip");
   } finally {
     clearTimeout(timer);
   }
@@ -452,37 +885,37 @@ async function extractArchive(input) {
 function validManifest(value) {
   const paths = [...inventory.keys()].filter((path) => path !== "manifest.json").sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
   if (!value || Object.keys(value).join("\x00") !== manifestKeys.join("\x00") || value.schemaVersion !== 1 || value.product !== "tmux-pane-dash" || typeof value.version !== "string" || typeof value.target !== "string" || typeof value.asset !== "string" || !Array.isArray(value.files) || value.files.length !== paths.length)
-    fail("manifest");
+    fail2("manifest");
   for (let index = 0;index < paths.length; index += 1) {
     const item = value.files[index], mode = inventory.get(paths[index]).toString(8).padStart(4, "0");
     if (!item || Object.keys(item).join("\x00") !== "mode\x00path\x00sha256\x00size" || item.path !== paths[index] || !/^[a-f0-9]{64}$/.test(item.sha256) || !Number.isSafeInteger(item.size) || item.size < 0 || item.mode !== mode)
-      fail("manifest");
+      fail2("manifest");
   }
 }
-async function inspectPayload(root, manifest, deps) {
+async function inspectPayload(root2, manifest, deps) {
   validManifest(manifest);
   if (!deps.fs)
-    fail("filesystem");
+    fail2("filesystem");
   const found = [];
-  const walk = async (base, relative = "") => {
+  const walk = async (base, relative2 = "") => {
     for (const name of await deps.fs.readdir(base)) {
-      const child = relative ? `${relative}/${name}` : name, info = await deps.fs.stat(join2(base, name));
+      const child = relative2 ? `${relative2}/${name}` : name, info = await deps.fs.stat(join4(base, name));
       found.push([child, info.kind, info.mode]);
       if (info.kind === "directory")
-        await walk(join2(base, name), child);
+        await walk(join4(base, name), child);
     }
   };
-  await walk(root);
+  await walk(root2);
   if (found.length !== inventory.size + directories.size || found.some(([path, kind, mode]) => inventory.has(path) ? kind !== "file" || mode !== inventory.get(path) : directories.has(path) ? kind !== "directory" || mode !== directories.get(path) : true))
-    fail("filesystem inventory");
+    fail2("filesystem inventory");
   for (const [path, mode] of inventory) {
-    const info = await deps.fs.stat(join2(root, path)), content = await deps.fs.readFile(join2(root, path));
+    const info = await deps.fs.stat(join4(root2, path)), content = await deps.fs.readFile(join4(root2, path));
     if (info.kind !== "file" || info.mode !== mode || info.size !== content.length)
-      fail("filesystem metadata");
+      fail2("filesystem metadata");
     if (path !== "manifest.json") {
       const item = manifest.files.find((candidate) => candidate.path === path);
-      if (item.size !== content.length || item.sha256 !== createHash2("sha256").update(content).digest("hex"))
-        fail("filesystem hash");
+      if (item.size !== content.length || item.sha256 !== createHash3("sha256").update(content).digest("hex"))
+        fail2("filesystem hash");
     }
   }
 }
@@ -494,7 +927,7 @@ async function verifyBinary(path, version, deps) {
 ` || result.stderr !== "")
     throw new Error("E_BINARY_VERSION: self check failed");
 }
-var inventory, directories, text, MAX_COMPRESSED_BYTES, MAX_GZIP_HEADER_BYTES, fail = (reason) => {
+var inventory, directories, text2, MAX_COMPRESSED_BYTES, MAX_GZIP_HEADER_BYTES, fail2 = (reason) => {
   throw new Error(`E_ARCHIVE_ENTRY: ${reason}`);
 }, allZero = (value) => value.every((byte) => byte === 0), crcTable, crc32 = (crc, bytes) => {
   let value = crc;
@@ -514,7 +947,7 @@ var init_archive = __esm(() => {
   init_fs();
   inventory = new Map([["bin/pane-dash", 493], ["pane_dash.tmux", 493], ["scripts/open.sh", 493], ["scripts/tag.sh", 493], ["README.md", 420], ["LICENSE", 420], ["VERSION", 420], ["manifest.json", 420]]);
   directories = new Map([["bin", 493], ["scripts", 493]]);
-  text = new TextDecoder("utf-8", { fatal: true });
+  text2 = new TextDecoder("utf-8", { fatal: true });
   MAX_COMPRESSED_BYTES = 64 * 1024 * 1024;
   MAX_GZIP_HEADER_BYTES = 64 * 1024;
   crcTable = (() => {
@@ -531,9 +964,9 @@ var init_archive = __esm(() => {
 });
 
 // packages/tmux-pane-dash/src/acquire.ts
-import { createHash as createHash3 } from "node:crypto";
-import { join as join3 } from "node:path";
-function fail2(code) {
+import { createHash as createHash4 } from "node:crypto";
+import { join as join5 } from "node:path";
+function fail3(code) {
   throw new CliError(code);
 }
 function code(error) {
@@ -550,15 +983,15 @@ function initialUrl(record) {
   try {
     parsed = new URL(record.url);
   } catch {
-    fail2("E_DOWNLOAD_URL");
+    fail3("E_DOWNLOAD_URL");
   }
   const expectedPath = `/xiopt/tmux-pane-dash/releases/download/v0.1.0/${record.asset}`;
   if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port && parsed.port !== "443" || parsed.hostname !== "github.com" || parsed.pathname !== expectedPath || parsed.search || parsed.hash)
-    fail2("E_DOWNLOAD_URL");
+    fail3("E_DOWNLOAD_URL");
   const exact = `https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/${record.asset}`;
   const explicit = `https://github.com:443/xiopt/tmux-pane-dash/releases/download/v0.1.0/${record.asset}`;
   if (record.url !== exact && record.url !== explicit)
-    fail2("E_DOWNLOAD_URL");
+    fail3("E_DOWNLOAD_URL");
   return record.url;
 }
 function location(response) {
@@ -571,20 +1004,20 @@ function location(response) {
 }
 function redirectUrl(value) {
   if (!value)
-    fail2("E_REDIRECT");
+    fail3("E_REDIRECT");
   let parsed;
   try {
     parsed = new URL(value);
   } catch {
-    fail2("E_REDIRECT");
+    fail3("E_REDIRECT");
   }
   if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port && parsed.port !== "443" || parsed.hostname !== "release-assets.githubusercontent.com" || parsed.hash)
-    fail2("E_REDIRECT");
+    fail3("E_REDIRECT");
   return value;
 }
 async function* responseBody(source) {
   if (!source)
-    fail2("E_DOWNLOAD_BODY");
+    fail3("E_DOWNLOAD_BODY");
   if (Symbol.asyncIterator in Object(source)) {
     yield* source;
     return;
@@ -603,11 +1036,11 @@ async function* responseBody(source) {
 }
 async function downloadAsset(record, destination, deps) {
   if (!Number.isSafeInteger(record.size) || record.size < 0 || record.size > MAX)
-    fail2("E_ARCHIVE_SIZE");
+    fail3("E_ARCHIVE_SIZE");
   if (!deps.fetch)
-    fail2("E_DOWNLOAD_FETCH");
+    fail3("E_DOWNLOAD_FETCH");
   if (!deps.fs)
-    fail2("E_DOWNLOAD_FS");
+    fail3("E_DOWNLOAD_FS");
   const controller = new AbortController, fs = deps.fs;
   let rejectAbort;
   const aborted = new Promise((_, reject) => {
@@ -651,14 +1084,14 @@ async function downloadAsset(record, destination, deps) {
     let response = await request(initialUrl(record));
     for (let redirects = 0;response.status >= 300 && response.status < 400; redirects += 1) {
       if (redirects >= 2)
-        fail2("E_REDIRECT");
+        fail3("E_REDIRECT");
       response = await request(redirectUrl(location(response)));
     }
     if (response.status < 200 || response.status >= 300)
-      fail2("E_DOWNLOAD_STATUS");
+      fail3("E_DOWNLOAD_STATUS");
     const file = await race(fs.openExclusive(destination, 384));
     created = true;
-    const hash = createHash3("sha256");
+    const hash2 = createHash4("sha256");
     let size = 0;
     let progress = arm(30000);
     const iterator = responseBody(response.body)[Symbol.asyncIterator]();
@@ -674,16 +1107,16 @@ async function downloadAsset(record, destination, deps) {
         }
         size += chunk.length;
         if (size > record.size || size > MAX)
-          fail2("E_ARCHIVE_SIZE");
-        hash.update(chunk);
+          fail3("E_ARCHIVE_SIZE");
+        hash2.update(chunk);
         await race(fs.write(file, chunk));
       }
     } finally {
       clear(progress);
       await race(fs.close(file));
     }
-    if (size !== record.size || hash.digest("hex") !== record.sha256)
-      fail2("E_ARCHIVE_HASH");
+    if (size !== record.size || hash2.digest("hex") !== record.sha256)
+      fail3("E_ARCHIVE_HASH");
   } catch (error) {
     if (created)
       await fs.rm(destination);
@@ -699,19 +1132,19 @@ function validateRecord(context) {
   const selected = selectTarget(context.deps.platform, context.deps.arch);
   const expected = { "darwin-arm64": "aarch64-apple-darwin", "darwin-x64": "x86_64-apple-darwin", "linux-arm64": "aarch64-unknown-linux-musl", "linux-x64": "x86_64-unknown-linux-musl" };
   if (context.record.target !== expected[selected] || context.record.asset !== `tmux-pane-dash-v0.1.0-${context.record.target}.tar.gz`)
-    fail2("E_PLATFORM");
+    fail3("E_PLATFORM");
 }
-async function validatePayload(root, record, deps, fs) {
-  const manifest = JSON.parse(new TextDecoder().decode(await fs.readFile(join3(root, "manifest.json"))));
-  await inspectPayload(root, manifest, { ...deps, fs });
+async function validatePayload(root2, record, deps, fs) {
+  const manifest = JSON.parse(new TextDecoder().decode(await fs.readFile(join5(root2, "manifest.json"))));
+  await inspectPayload(root2, manifest, { ...deps, fs });
   if (manifest.version !== "0.1.0" || manifest.target !== record.target || manifest.asset !== record.asset)
-    fail2("E_VERSION");
-  await verifyBinary(join3(root, "bin/pane-dash"), manifest.version, deps);
+    fail3("E_VERSION");
+  await verifyBinary(join5(root2, "bin/pane-dash"), manifest.version, deps);
 }
 async function acquireRelease(context) {
   const fs = context.fs ?? context.deps.fs;
   if (!fs)
-    fail2("E_FILESYSTEM");
+    fail3("E_FILESYSTEM");
   validateRecord(context);
   try {
     await validatePayload(context.versionDirectory, context.record, context.deps, fs);
@@ -751,22 +1184,22 @@ var init_acquire = __esm(() => {
 });
 
 // packages/tmux-pane-dash/src/config-opencode.ts
-import { lstat as lstat2, readdir as readdir2, realpath } from "node:fs/promises";
-import { join as join4 } from "node:path";
+import { lstat as lstat3, readdir as readdir3, realpath } from "node:fs/promises";
+import { join as join6 } from "node:path";
 async function selectOpenCodeConfig(env, deps) {
-  const root = env?.XDG_CONFIG_HOME ? join4(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join4(env.HOME, ".config", "opencode") : fail3("E_ROOT");
-  const json = join4(root, "opencode.json"), jsonc = join4(root, "opencode.jsonc");
-  const exists = async (path) => {
+  const root2 = env?.XDG_CONFIG_HOME ? join6(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join6(env.HOME, ".config", "opencode") : fail4("E_ROOT");
+  const json = join6(root2, "opencode.json"), jsonc = join6(root2, "opencode.jsonc");
+  const exists2 = async (path) => {
     try {
-      await lstat2(path);
+      await lstat3(path);
       return true;
     } catch (error) {
-      if (missing2(error))
+      if (missing4(error))
         return false;
       throw error;
     }
   };
-  const [hasJson, hasJsonc] = await Promise.all([exists(json), exists(jsonc)]);
+  const [hasJson, hasJsonc] = await Promise.all([exists2(json), exists2(jsonc)]);
   if (!hasJson && !hasJsonc)
     return json;
   if (hasJson && !hasJsonc)
@@ -774,70 +1207,70 @@ async function selectOpenCodeConfig(env, deps) {
   if (!hasJson && hasJsonc)
     return jsonc;
   const [left, right] = await Promise.all([resolveConfigPath(json, deps), resolveConfigPath(jsonc, deps)]);
-  const [leftInfo, rightInfo] = await Promise.all([lstat2(left.resolvedPath), lstat2(right.resolvedPath)]);
+  const [leftInfo, rightInfo] = await Promise.all([lstat3(left.resolvedPath), lstat3(right.resolvedPath)]);
   if (!leftInfo.isFile() || !rightInfo.isFile() || leftInfo.dev !== rightInfo.dev || leftInfo.ino !== rightInfo.ino)
-    fail3("E_CONFIG_AMBIGUOUS");
+    fail4("E_CONFIG_AMBIGUOUS");
   return json;
 }
 async function planOpenCodeMigration(input) {
   const names = new Set(["pane-dash.ts", "pane-dash.js", "pane_dash.ts", "pane_dash.js"]), candidates = [];
-  for (const directory of [join4(input.configDirectory, "plugin"), join4(input.configDirectory, "plugins")]) {
+  for (const directory of [join6(input.configDirectory, "plugin"), join6(input.configDirectory, "plugins")]) {
     let entries;
     try {
-      entries = await readdir2(directory);
+      entries = await readdir3(directory);
     } catch (error) {
-      if (missing2(error))
+      if (missing4(error))
         continue;
       throw error;
     }
     for (const name of entries)
       if (names.has(name))
-        candidates.push(join4(directory, name));
+        candidates.push(join6(directory, name));
   }
   if (!candidates.length)
     return [];
   if (!input.migrate || candidates.length !== 1)
-    fail3("E_CONFIG_CONFLICT");
-  const logicalPath = candidates[0], entry = await lstat2(logicalPath);
+    fail4("E_CONFIG_CONFLICT");
+  const logicalPath = candidates[0], entry = await lstat3(logicalPath);
   if (!entry.isSymbolicLink())
-    fail3("E_CONFIG_CONFLICT");
+    fail4("E_CONFIG_CONFLICT");
   let resolvedPath, known;
   try {
-    [resolvedPath, known] = await Promise.all([realpath(logicalPath), realpath(join4(input.installRoot, "opencode-plugin", "pane-dash.ts"))]);
+    [resolvedPath, known] = await Promise.all([realpath(logicalPath), realpath(join6(input.installRoot, "opencode-plugin", "pane-dash.ts"))]);
   } catch {
-    fail3("E_CONFIG_CONFLICT");
+    fail4("E_CONFIG_CONFLICT");
   }
   if (resolvedPath !== known)
-    fail3("E_CONFIG_CONFLICT");
+    fail4("E_CONFIG_CONFLICT");
   return [{ logicalPath, resolvedPath, action: "unlink" }];
 }
-function space(text2, index) {
+function space(text3, index) {
   for (;; ) {
-    while (/\s/.test(text2[index] ?? ""))
+    while (/\s/.test(text3[index] ?? ""))
       index += 1;
-    if (text2.startsWith("//", index)) {
-      const end = text2.indexOf(`
+    if (text3.startsWith("//", index)) {
+      const end2 = text3.indexOf(`
 `, index + 2);
-      index = end < 0 ? text2.length : end + 1;
+      index = end2 < 0 ? text3.length : end2 + 1;
       continue;
     }
-    if (text2.startsWith("/*", index)) {
-      const end = text2.indexOf("*/", index + 2);
-      if (end < 0)
-        fail3();
-      index = end + 2;
+    if (text3.startsWith("/*", index)) {
+      const end2 = text3.indexOf("*/", index + 2);
+      if (end2 < 0)
+        fail4();
+      index = end2 + 2;
       continue;
     }
     return index;
   }
 }
-function stringAt(text2, index) {
-  if (text2[index] !== '"')
-    fail3();
+function stringAt(text3, index) {
+  if (text3[index] !== '"')
+    fail4();
   const start = index;
-  let end = index + 1, escaped = false;
-  while (end < text2.length) {
-    const char = text2[end++];
+  let end2 = index + 1, escaped = false;
+  while (end2 < text3.length) {
+    const char = text3[end2++];
     if (escaped) {
       escaped = false;
       continue;
@@ -848,329 +1281,167 @@ function stringAt(text2, index) {
     }
     if (char === '"') {
       try {
-        return { value: JSON.parse(text2.slice(index, end)), start, end };
+        return { value: JSON.parse(text3.slice(index, end2)), start, end: end2 };
       } catch {
-        fail3();
+        fail4();
       }
     }
   }
-  fail3();
+  fail4();
 }
-function close(text2, index, open2, endChar) {
+function close(text3, index, open2, endChar) {
   let depth = 0;
-  for (;index < text2.length; index += 1) {
-    index = space(text2, index);
-    if (text2[index] === '"') {
-      index = stringAt(text2, index).end - 1;
+  for (;index < text3.length; index += 1) {
+    index = space(text3, index);
+    if (text3[index] === '"') {
+      index = stringAt(text3, index).end - 1;
       continue;
     }
-    if (text2[index] === open2)
+    if (text3[index] === open2)
       depth += 1;
-    if (text2[index] === endChar && --depth === 0)
+    if (text3[index] === endChar && --depth === 0)
       return index;
   }
-  fail3();
+  fail4();
 }
-function rootPlugin(text2) {
-  let index = space(text2, 0);
-  if (text2[index++] !== "{")
-    fail3();
+function rootPlugin(text3) {
+  let index = space(text3, 0);
+  if (text3[index++] !== "{")
+    fail4();
   let plugin = null;
   for (;; ) {
-    index = space(text2, index);
-    if (text2[index] === "}") {
-      if (space(text2, index + 1) !== text2.length)
-        fail3();
+    index = space(text3, index);
+    if (text3[index] === "}") {
+      if (space(text3, index + 1) !== text3.length)
+        fail4();
       return plugin;
     }
-    const key = stringAt(text2, index);
-    index = space(text2, key.end);
-    if (text2[index++] !== ":")
-      fail3();
-    index = space(text2, index);
+    const key = stringAt(text3, index);
+    index = space(text3, key.end);
+    if (text3[index++] !== ":")
+      fail4();
+    index = space(text3, index);
     if (key.value === "plugin") {
-      if (plugin || text2[index] !== "[")
-        fail3();
-      const start = index, end = close(text2, index, "[", "]"), entries = [];
+      if (plugin || text3[index] !== "[")
+        fail4();
+      const start = index, end2 = close(text3, index, "[", "]"), entries = [];
       let item = start + 1;
       for (;; ) {
-        item = space(text2, item);
-        if (text2[item] === "]")
+        item = space(text3, item);
+        if (text3[item] === "]")
           break;
-        const value = stringAt(text2, item);
-        item = space(text2, value.end);
-        const comma = text2[item] === "," ? item : undefined;
+        const value = stringAt(text3, item);
+        item = space(text3, value.end);
+        const comma = text3[item] === "," ? item : undefined;
         if (comma !== undefined)
           item += 1;
-        else if (text2[item] !== "]")
-          fail3();
+        else if (text3[item] !== "]")
+          fail4();
         entries.push({ ...value, comma });
       }
-      plugin = { start, end: end + 1, entries };
-      index = end + 1;
+      plugin = { start, end: end2 + 1, entries };
+      index = end2 + 1;
     } else {
-      if (text2[index] === "[")
-        index = close(text2, index, "[", "]") + 1;
-      else if (text2[index] === "{")
-        index = close(text2, index, "{", "}") + 1;
-      else if (text2[index] === '"')
-        index = stringAt(text2, index).end;
+      if (text3[index] === "[")
+        index = close(text3, index, "[", "]") + 1;
+      else if (text3[index] === "{")
+        index = close(text3, index, "{", "}") + 1;
+      else if (text3[index] === '"')
+        index = stringAt(text3, index).end;
       else {
-        const match = /^(?:true|false|null|-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text2.slice(index));
+        const match = /^(?:true|false|null|-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text3.slice(index));
         if (!match)
-          fail3();
+          fail4();
         index += match[0].length;
       }
     }
-    index = space(text2, index);
-    if (text2[index] === ",") {
+    index = space(text3, index);
+    if (text3[index] === ",") {
       index += 1;
       continue;
     }
-    if (text2[index] !== "}")
-      fail3();
+    if (text3[index] !== "}")
+      fail4();
   }
 }
 function validPaneDash(value) {
   return /^@xiopt\/pane-dash-opencode(?:@[0-9]+\.[0-9]+\.[0-9]+)?$/.test(value) || /pane-dash/i.test(value);
 }
-function insertionTrivia(text2, plugin) {
+function insertionTrivia(text3, plugin) {
   const first = plugin.entries[0];
   if (!first)
     return "";
   const second = plugin.entries[1];
   if (second && first.comma !== undefined)
-    return text2.slice(first.comma + 1, second.start).match(/^\s*$/)?.[0] ?? "";
-  return text2.slice(plugin.start + 1, first.start).match(/^\s*/)?.[0] ?? "";
+    return text3.slice(first.comma + 1, second.start).match(/^\s*$/)?.[0] ?? "";
+  return text3.slice(plugin.start + 1, first.start).match(/^\s*/)?.[0] ?? "";
 }
-function insertPlugin(text2, plugin, desired) {
+function insertPlugin(text3, plugin, desired) {
   if (!plugin.entries.length)
-    return `${text2.slice(0, plugin.end - 1)}${JSON.stringify(desired)}${text2.slice(plugin.end - 1)}`;
+    return `${text3.slice(0, plugin.end - 1)}${JSON.stringify(desired)}${text3.slice(plugin.end - 1)}`;
   const entry = plugin.entries[plugin.entries.length - 1];
   if (!entry)
-    fail3();
-  const insertion = `,${insertionTrivia(text2, plugin)}${JSON.stringify(desired)}`;
-  return `${text2.slice(0, entry.end)}${insertion}${text2.slice(entry.end)}`;
+    fail4();
+  const insertion = `,${insertionTrivia(text3, plugin)}${JSON.stringify(desired)}`;
+  return `${text3.slice(0, entry.end)}${insertion}${text3.slice(entry.end)}`;
 }
 function planOpenCodeEdit(input) {
-  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.0", text2 = decoder.decode(input.bytes), plugin = rootPlugin(text2);
+  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.0", text3 = decoder2.decode(input.bytes), plugin = rootPlugin(text3);
   if (plugin) {
     const managed = plugin.entries.filter((entry) => validPaneDash(entry.value));
     const desiredEntries = managed.filter((entry) => entry.value === desired);
     if (desiredEntries.length === 1 && managed.length === 1)
       return { ...input, bytes: input.bytes };
     if (desiredEntries.length || managed.length > 1)
-      fail3("E_CONFIG_CONFLICT");
+      fail4("E_CONFIG_CONFLICT");
     if (managed.length === 1) {
       const owned = input.ownedEntries;
       const entry = managed[0];
       if (owned?.length !== 1 || !entry || owned[0] !== entry.value)
-        fail3("E_CONFIG_CONFLICT");
-      return { ...input, bytes: encoder.encode(`${text2.slice(0, entry.start)}${JSON.stringify(desired)}${text2.slice(entry.end)}`) };
+        fail4("E_CONFIG_CONFLICT");
+      return { ...input, bytes: encoder2.encode(`${text3.slice(0, entry.start)}${JSON.stringify(desired)}${text3.slice(entry.end)}`) };
     }
-    return { ...input, bytes: encoder.encode(insertPlugin(text2, plugin, desired)) };
+    return { ...input, bytes: encoder2.encode(insertPlugin(text3, plugin, desired)) };
   }
-  const closeIndex = text2.lastIndexOf("}");
+  const closeIndex = text3.lastIndexOf("}");
   if (closeIndex < 0)
-    fail3();
-  const newline = text2.includes(`\r
+    fail4();
+  const newline = text3.includes(`\r
 `) ? `\r
 ` : `
-`, prefix = text2.slice(0, closeIndex), indent = /(?:^|\n)([ \t]+)"/.exec(prefix)?.[1] ?? "  ", comma = /\{\s*$/.test(prefix) ? "" : ",";
-  return { ...input, bytes: encoder.encode(`${prefix}${comma}${newline}${indent}"plugin": [${JSON.stringify(desired)}]${newline}${text2.slice(closeIndex)}`) };
+`, prefix = text3.slice(0, closeIndex), indent = /(?:^|\n)([ \t]+)"/.exec(prefix)?.[1] ?? "  ", comma = /\{\s*$/.test(prefix) ? "" : ",";
+  return { ...input, bytes: encoder2.encode(`${prefix}${comma}${newline}${indent}"plugin": [${JSON.stringify(desired)}]${newline}${text3.slice(closeIndex)}`) };
 }
 function planOpenCodeRemoval(input) {
-  const text2 = decoder.decode(input.bytes), plugin = rootPlugin(text2), owned = input.ownedEntries;
+  const text3 = decoder2.decode(input.bytes), plugin = rootPlugin(text3), owned = input.ownedEntries;
   if (!plugin || owned?.length !== 1)
-    fail3("E_CONFIG_CONFLICT");
+    fail4("E_CONFIG_CONFLICT");
   const matches = plugin.entries.filter((entry2) => entry2.value === owned[0]);
   if (matches.length !== 1)
-    fail3("E_CONFIG_CONFLICT");
+    fail4("E_CONFIG_CONFLICT");
   const entry = matches[0], index = plugin.entries.indexOf(entry);
-  let { start, end } = entry;
+  let { start, end: end2 } = entry;
   if (entry.comma !== undefined)
-    end = entry.comma + 1;
+    end2 = entry.comma + 1;
   else if (index > 0) {
     const previous = plugin.entries[index - 1];
     start = previous.comma;
   }
-  return { ...input, bytes: encoder.encode(`${text2.slice(0, start)}${text2.slice(end)}`) };
+  return { ...input, bytes: encoder2.encode(`${text3.slice(0, start)}${text3.slice(end2)}`) };
 }
-var encoder, decoder, fail3 = (code2 = "E_CONFIG") => {
+var encoder2, decoder2, fail4 = (code2 = "E_CONFIG") => {
   throw new CliError(code2);
-}, missing2 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT";
+}, missing4 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT";
 var init_config_opencode = __esm(() => {
   init_errors();
   init_fs();
-  encoder = new TextEncoder;
-  decoder = new TextDecoder;
-});
-
-// packages/tmux-pane-dash/src/config-tmux.ts
-function shellQuote(value) {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-function tmuxConfigEmbed(shellCommand) {
-  if (/[\u0000-\u001f\u007f]/.test(shellCommand))
-    throw new CliError("E_CONFIG");
-  const literal = `#{l:${shellCommand.replaceAll("#", "##").replaceAll("}", "#}")}}`;
-  return `"${literal.replaceAll("\\", "\\\\").replaceAll('"', "\\\"").replaceAll("$", "\\$")}"`;
-}
-function managedTmuxBlock(installRoot) {
-  return `${begin}
-run-shell ${tmuxConfigEmbed(shellQuote(`${installRoot}/current/pane_dash.tmux`))}
-${end}`;
-}
-function ownedRange(text2, block) {
-  if (text2.includes("tmux-pane-dash (@xiopt/tmux-pane-dash)") && (!text2.includes(begin) || !text2.includes(end)))
-    conflict("unsupported tmux-pane-dash marker schema");
-  const starts = [], ends = [];
-  for (let index = text2.indexOf(begin);index >= 0; index = text2.indexOf(begin, index + begin.length))
-    starts.push(index);
-  for (let index = text2.indexOf(end);index >= 0; index = text2.indexOf(end, index + end.length))
-    ends.push(index);
-  if (!starts.length && !ends.length)
-    return null;
-  if (starts.length !== 1 || ends.length !== 1 || starts[0] > ends[0])
-    conflict("malformed tmux-pane-dash markers");
-  const start = starts[0], finish = ends[0] + end.length;
-  if (text2.slice(start, finish) !== block)
-    conflict("altered tmux-pane-dash block");
-  return { start, end: finish };
-}
-function legacyLines(text2, migrate) {
-  const lines = text2.split(/(?<=\n)/);
-  const retained = [];
-  for (const line of lines) {
-    const active = line.replace(/^\s*(?:#.*)?$/, "");
-    if (!active || !active.includes("pane_dash.tmux") && !active.includes("@pane-dash-engine") && !active.includes("tmux-pane-dash")) {
-      retained.push(line);
-      continue;
-    }
-    const exactManual = /^\s*run-shell\s+(['"])[^'"\n]*(?:tmux-pane-dash[^'"\n]*)?\/pane_dash\.tmux\1\s*(?:\r?\n)?$/.test(line);
-    const exactEngine = /^\s*set(?:-option)?\s+-g\s+@pane-dash-engine\s+\S+\s*(?:\r?\n)?$/.test(line);
-    const exactTpm = /^\s*set\s+-g\s+@plugin\s+['"]xiopt\/tmux-pane-dash['"]\s*(?:\r?\n)?$/.test(line);
-    if (!migrate || !(exactManual || exactEngine || exactTpm))
-      conflict(`existing configuration at tmux line ${retained.length + 1}`);
-  }
-  return retained.join("");
-}
-function planTmuxEdit(input) {
-  let text2 = decoder2.decode(input.bytes), block = managedTmuxBlock(input.installRoot);
-  const range = ownedRange(text2, block);
-  if (range)
-    return { ...input, bytes: input.bytes };
-  text2 = legacyLines(text2, input.migrate);
-  const separator = text2.length && !text2.endsWith(`
-`) ? `
-` : "";
-  return { ...input, bytes: encoder2.encode(`${text2}${separator}${block}`) };
-}
-function planTmuxRemoval(input) {
-  const text2 = decoder2.decode(input.bytes), block = managedTmuxBlock(input.installRoot), range = ownedRange(text2, block);
-  if (!range)
-    conflict("managed tmux-pane-dash block is missing");
-  const before = text2.slice(0, range.start), after = text2.slice(range.end);
-  return { ...input, bytes: encoder2.encode(`${before.endsWith(`
-`) && !after ? before.slice(0, -1) : before}${after}`) };
-}
-var encoder2, decoder2, begin = "# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>", end = "# <<< tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 <<<", conflict = (detail = "existing tmux-pane-dash configuration") => {
-  throw new CliError("E_CONFIG_CONFLICT", detail);
-};
-var init_config_tmux = __esm(() => {
-  init_errors();
   encoder2 = new TextEncoder;
   decoder2 = new TextDecoder;
 });
 
-// packages/tmux-pane-dash/src/ownership.ts
-import { lstat as lstat3, mkdir as mkdir2, readFile as readFile2, readlink as readlink2, readdir as readdir3 } from "node:fs/promises";
-import { join as join5, resolve as resolve3 } from "node:path";
-async function managedRoot(env) {
-  const xdg = env?.XDG_DATA_HOME;
-  if (xdg)
-    return join5(xdg, "tmux-pane-dash");
-  if (!env?.HOME)
-    fail4("E_ROOT");
-  return join5(env.HOME, ".local", "share", "tmux-pane-dash");
-}
-function inside(root, path) {
-  return path === root || path.startsWith(`${root}/`);
-}
-async function safeDirectory(path, uid) {
-  const entry = await lstat3(path);
-  if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== uid || (entry.mode & 18) !== 0)
-    fail4("E_CONFLICT");
-}
-async function validateManagedRoot(root, deps) {
-  const canonical = resolve3(root), uid = deps.uid?.() ?? process.getuid?.() ?? 0;
-  await safeDirectory(canonical, uid);
-  const allowed = new Set(["versions", "state", "transactions", "current"]);
-  for (const name of await readdir3(canonical))
-    if (!allowed.has(name))
-      fail4("E_CONFLICT");
-  for (const name of ["versions", "state", "transactions"]) {
-    try {
-      await safeDirectory(join5(canonical, name), uid);
-    } catch (error) {
-      if (!missing3(error))
-        throw error;
-    }
-  }
-  try {
-    const current = join5(canonical, "current"), target = await readlink2(current);
-    if (target.startsWith("/") || !target.startsWith("versions/") || target.split("/").some((part) => !part || part === "." || part === "..") || !inside(canonical, resolve3(canonical, target)))
-      fail4("E_CONFLICT");
-  } catch (error) {
-    if (!missing3(error))
-      throw error;
-  }
-  try {
-    for (const version of await readdir3(join5(canonical, "versions")))
-      await safeDirectory(join5(canonical, "versions", version), uid);
-  } catch (error) {
-    if (!missing3(error))
-      throw error;
-  }
-}
-function validOwnership(value) {
-  return value && typeof value === "object" && value.schemaVersion === 1 && typeof value.packageVersion === "string" && typeof value.releaseVersion === "string" && value.archive && typeof value.archive.target === "string" && typeof value.archive.sha256 === "string" && Array.isArray(value.files) && typeof value.currentTarget === "string" && value.components && Array.isArray(value.migrations);
-}
-async function readOwnership(root, _deps) {
-  let bytes;
-  try {
-    bytes = await readFile2(join5(root, "state", "ownership.json"));
-  } catch (error) {
-    if (missing3(error))
-      return null;
-    fail4("E_OWNERSHIP");
-  }
-  let value;
-  try {
-    value = JSON.parse(new TextDecoder().decode(bytes));
-  } catch {
-    fail4("E_OWNERSHIP");
-  }
-  if (!validOwnership(value))
-    fail4("E_OWNERSHIP");
-  return value;
-}
-async function ensureManagedRoot(root) {
-  await mkdir2(root, { recursive: true, mode: 448 });
-  await mkdir2(join5(root, "versions"), { recursive: true, mode: 448 });
-  await mkdir2(join5(root, "state"), { recursive: true, mode: 448 });
-  await mkdir2(join5(root, "transactions"), { recursive: true, mode: 448 });
-}
-var missing3 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", fail4 = (code2) => {
-  throw new CliError(code2);
-};
-var init_ownership = __esm(() => {
-  init_errors();
-});
-
 // packages/tmux-pane-dash/src/journal.ts
 import { mkdir as mkdir3, open as open2, readFile as readFile3, rename as rename2 } from "node:fs/promises";
-import { dirname as dirname2, join as join6 } from "node:path";
+import { dirname as dirname3, join as join7 } from "node:path";
 import { randomBytes as randomBytes2 } from "node:crypto";
 function validState(value) {
   return value && ["absent", "file", "directory", "symlink"].includes(value.type) && (value.sha256 === null || typeof value.sha256 === "string") && (value.mode === null || Number.isInteger(value.mode));
@@ -1182,8 +1453,8 @@ function createJournal(input) {
   return { ...input, schemaVersion: 1, phase: "prepared", mutations: [] };
 }
 async function durableWrite(path, bytes, deps) {
-  await mkdir3(dirname2(path), { recursive: true, mode: 448 });
-  const temp = join6(dirname2(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes2(8)).toString("hex")}`);
+  await mkdir3(dirname3(path), { recursive: true, mode: 448 });
+  const temp = join7(dirname3(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes2(8)).toString("hex")}`);
   const file = await open2(temp, "wx", 384);
   try {
     await file.writeFile(bytes);
@@ -1193,7 +1464,7 @@ async function durableWrite(path, bytes, deps) {
     await file.close();
   }
   await rename2(temp, path);
-  const parent = await open2(dirname2(path), "r");
+  const parent = await open2(dirname3(path), "r");
   try {
     await parent.sync();
     deps.journalEvent?.("fsync.parent");
@@ -1204,24 +1475,24 @@ async function durableWrite(path, bytes, deps) {
 async function persistJournal(journal, deps) {
   if (!valid(journal))
     fail5();
-  const root = await managedRoot(deps.env);
-  await durableWrite(join6(root, "transactions", journal.id, "journal.json"), new TextEncoder().encode(JSON.stringify(journal)), deps);
+  const root2 = await managedRoot(deps.env);
+  await durableWrite(join7(root2, "transactions", journal.id, "journal.json"), new TextEncoder().encode(JSON.stringify(journal)), deps);
 }
-async function persistPreimage(root, id, path, bytes, deps) {
-  await durableWrite(join6(root, "transactions", id, path), bytes, deps);
+async function persistPreimage(root2, id, path, bytes, deps) {
+  await durableWrite(join7(root2, "transactions", id, path), bytes, deps);
 }
-async function readJournal(root, id, _deps) {
-  let text2;
+async function readJournal(root2, id, _deps) {
+  let text3;
   try {
-    text2 = await readFile3(join6(root, "transactions", id, "journal.json"), "utf8");
+    text3 = await readFile3(join7(root2, "transactions", id, "journal.json"), "utf8");
   } catch (error) {
-    if (missing4(error))
+    if (missing5(error))
       return null;
     fail5();
   }
   let value;
   try {
-    value = JSON.parse(text2);
+    value = JSON.parse(text3);
   } catch {
     fail5();
   }
@@ -1236,7 +1507,7 @@ async function transitionJournal(journal, phase, deps) {
   journal.phase = phase;
   await persistJournal(journal, deps);
 }
-var journalPhases, missing4 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", fail5 = () => {
+var journalPhases, missing5 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", fail5 = () => {
   throw new CliError("E_JOURNAL");
 };
 var init_journal = __esm(() => {
@@ -1246,23 +1517,23 @@ var init_journal = __esm(() => {
 });
 
 // packages/tmux-pane-dash/src/transaction.ts
-import { createHash as createHash4, randomBytes as randomBytes3 } from "node:crypto";
+import { createHash as createHash5, randomBytes as randomBytes3 } from "node:crypto";
 import { chmod as chmod2, lstat as lstat4, mkdir as mkdir4, open as open3, readFile as readFile4, readlink as readlink3, readdir as readdir4, rename as rename3, rm as rm2, symlink } from "node:fs/promises";
-import { dirname as dirname3, join as join7 } from "node:path";
+import { dirname as dirname4, join as join8 } from "node:path";
 async function state(path) {
   try {
     const entry = await lstat4(path);
     if (entry.isSymbolicLink()) {
       const target = await readlink3(path);
-      return { type: "symlink", sha256: hash(new TextEncoder().encode(target)), mode: entry.mode & 511, target };
+      return { type: "symlink", sha256: hash2(new TextEncoder().encode(target)), mode: entry.mode & 511, target };
     }
     if (entry.isDirectory())
       return { type: "directory", sha256: null, mode: entry.mode & 511 };
     if (!entry.isFile())
       throw new CliError("E_RECOVERY");
-    return { type: "file", sha256: hash(await readFile4(path)), mode: entry.mode & 511 };
+    return { type: "file", sha256: hash2(await readFile4(path)), mode: entry.mode & 511 };
   } catch (error) {
-    if (missing5(error))
+    if (missing6(error))
       return absent;
     throw error;
   }
@@ -1271,10 +1542,10 @@ function same(left, right) {
   return left.type === right.type && left.sha256 === right.sha256 && left.mode === right.mode && left.target === right.target;
 }
 function temporary(path, deps, attempt) {
-  return join7(dirname3(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes3(8)).toString("hex")}.${attempt}`);
+  return join8(dirname4(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes3(8)).toString("hex")}.${attempt}`);
 }
 async function syncParent(path) {
-  const parent = await open3(dirname3(path), "r");
+  const parent = await open3(dirname4(path), "r");
   try {
     await parent.sync();
   } finally {
@@ -1282,7 +1553,7 @@ async function syncParent(path) {
   }
 }
 async function stageBytes(path, bytes, mode, deps) {
-  await mkdir4(dirname3(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname4(path), { recursive: true, mode: 448 });
   for (let attempt = 0;; attempt += 1) {
     const temp = temporary(path, deps, attempt);
     try {
@@ -1302,7 +1573,7 @@ async function stageBytes(path, bytes, mode, deps) {
   }
 }
 async function stageSymlink(path, target, deps) {
-  await mkdir4(dirname3(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname4(path), { recursive: true, mode: 448 });
   for (let attempt = 0;; attempt += 1) {
     const temp = temporary(path, deps, attempt);
     try {
@@ -1355,13 +1626,13 @@ async function verifyPlanned(mutation, deps) {
   if (resolved.resolvedPath !== mutation.resolvedPath || !sameChain(expected.symlinkChain, resolved.symlinkChain) || !same(await state(resolved.resolvedPath), expected.state))
     throw new CliError("E_RECOVERY");
 }
-async function capture(mutation, root, id, deps) {
+async function capture(mutation, root2, id, deps) {
   await verifyPlanned(mutation, deps);
   const pre = mutation.expectedPreimage?.state ?? await state(mutation.resolvedPath);
   if (pre.type !== "file")
     return { pre, preimage: null };
-  const bytes = mutation.expectedPreimage?.bytes ?? await readFile4(mutation.resolvedPath), preimage = join7("preimages", `${hash(new TextEncoder().encode(mutation.resolvedPath))}.bin`);
-  await persistPreimage(root, id, preimage, bytes, deps);
+  const bytes = mutation.expectedPreimage?.bytes ?? await readFile4(mutation.resolvedPath), preimage = join8("preimages", `${hash2(new TextEncoder().encode(mutation.resolvedPath))}.bin`);
+  await persistPreimage(root2, id, preimage, bytes, deps);
   return { pre, preimage };
 }
 async function record(journal, mutation, deps) {
@@ -1374,7 +1645,7 @@ async function markApplied(journal, mutation, deps) {
   mutation.applied = true;
   await persistJournal(journal, deps);
 }
-async function reverse(mutation, root, journalId, deps) {
+async function reverse(mutation, root2, journalId, deps) {
   const current = await state(mutation.resolvedPath);
   if (same(current, mutation.pre))
     return;
@@ -1399,33 +1670,33 @@ async function reverse(mutation, root, journalId, deps) {
     return;
   }
   if (mutation.pre.type === "file" && mutation.preimage) {
-    const staged = await stageBytes(mutation.resolvedPath, await readFile4(join7(root, "transactions", journalId, mutation.preimage)), mutation.pre.mode, deps);
+    const staged = await stageBytes(mutation.resolvedPath, await readFile4(join8(root2, "transactions", journalId, mutation.preimage)), mutation.pre.mode, deps);
     await publish(mutation.resolvedPath, staged.temp, mutation.post);
     return;
   }
   throw new CliError("E_RECOVERY");
 }
 async function rollback(journal, deps) {
-  const root = await managedRoot(deps.env);
+  const root2 = await managedRoot(deps.env);
   for (const mutation of [...journal.mutations].reverse())
-    await reverse(mutation, root, journal.id, deps);
+    await reverse(mutation, root2, journal.id, deps);
 }
-async function recoverIncomplete(root, deps) {
+async function recoverIncomplete(root2, deps) {
   let ids;
   try {
-    ids = await readdir4(join7(root, "transactions"));
+    ids = await readdir4(join8(root2, "transactions"));
   } catch (error) {
-    if (missing5(error))
+    if (missing6(error))
       return;
     throw error;
   }
   for (const id of ids) {
     if (id === "lock")
       continue;
-    const journal = await readJournal(root, id, deps);
+    const journal = await readJournal(root2, id, deps);
     if (journal && journal.phase !== "complete") {
       await rollback(journal, deps);
-      await rm2(join7(root, "transactions", id), { recursive: true, force: true });
+      await rm2(join8(root2, "transactions", id), { recursive: true, force: true });
     }
   }
 }
@@ -1473,9 +1744,9 @@ async function tombstoneMutation(journal, mutation, occurrence, deps) {
   crashMutation(deps, "current", occurrence, "applied");
 }
 async function executeTransaction(plan, deps) {
-  const root = await managedRoot(deps.env);
-  await ensureManagedRoot(root);
-  await recoverIncomplete(root, deps);
+  const root2 = await managedRoot(deps.env);
+  await ensureManagedRoot(root2);
+  await recoverIncomplete(root2, deps);
   signal(deps);
   const id = Buffer.from(deps.randomBytes?.(16) ?? randomBytes3(16)).toString("hex"), journal = createJournal({ id, command: plan.command, packageVersion: deps.executingVersion, previousCurrent: plan.previousCurrent, components: plan.components });
   await persistJournal(journal, deps);
@@ -1484,13 +1755,13 @@ async function executeTransaction(plan, deps) {
     if (deps.crashPhase === "prepared")
       throw new Error("E_CRASH");
     fault(deps, "prepared", "after");
-    const staged = await Promise.all(plan.configMutations.map(async (mutation) => ({ mutation, ...await capture(mutation, root, id, deps) })));
-    const version = join7(root, "versions", plan.desiredVersion);
+    const staged = await Promise.all(plan.configMutations.map(async (mutation) => ({ mutation, ...await capture(mutation, root2, id, deps) })));
+    const version = join8(root2, "versions", plan.desiredVersion);
     if (plan.uninstall?.tombstoneVersions) {
-      const tombstone = join7(root, "transactions", id, "tombstone", "versions"), source = join7(root, "versions"), pre = await state(source);
+      const tombstone = join8(root2, "transactions", id, "tombstone", "versions"), source = join8(root2, "versions"), pre = await state(source);
       if (pre.type !== "directory")
         throw new CliError("E_OWNERSHIP");
-      await mkdir4(dirname3(tombstone), { recursive: true, mode: 448 });
+      await mkdir4(dirname4(tombstone), { recursive: true, mode: 448 });
       await tombstoneMutation(journal, { operation: "tombstone", logicalPath: source, resolvedPath: source, pre, post: absent, preimage: null, backupPath: tombstone }, 1, deps);
     } else if (plan.versionActivation) {
       const pre = await state(version);
@@ -1502,7 +1773,7 @@ async function executeTransaction(plan, deps) {
     await phase(journal, "version_staged", deps);
     signal(deps);
     await phase(journal, "configs_staged", deps);
-    const current = join7(root, "current"), currentPre = await state(current), target = `versions/${plan.desiredVersion}`;
+    const current = join8(root2, "current"), currentPre = await state(current), target = `versions/${plan.desiredVersion}`;
     if (plan.uninstall?.removeCurrent)
       await removeMutation(journal, { operation: "current", logicalPath: current, resolvedPath: current, pre: currentPre, post: absent, preimage: null }, 1, deps);
     else {
@@ -1526,7 +1797,7 @@ async function executeTransaction(plan, deps) {
     }
     await phase(journal, "configs_committed", deps);
     signal(deps);
-    const ownershipPath = join7(root, "state", "ownership.json"), ownershipCapture = await capture({ logicalPath: ownershipPath, resolvedPath: ownershipPath, bytes: new Uint8Array }, root, id, deps);
+    const ownershipPath = join8(root2, "state", "ownership.json"), ownershipCapture = await capture({ logicalPath: ownershipPath, resolvedPath: ownershipPath, bytes: new Uint8Array }, root2, id, deps);
     if (plan.uninstall?.removeOwnership)
       await removeMutation(journal, { operation: "ownership", logicalPath: ownershipPath, resolvedPath: ownershipPath, pre: ownershipCapture.pre, post: absent, preimage: ownershipCapture.preimage }, 1, deps);
     else {
@@ -1535,20 +1806,20 @@ async function executeTransaction(plan, deps) {
     }
     await phase(journal, "ownership_committed", deps);
     await phase(journal, "complete", deps);
-    await rm2(join7(root, "transactions", id), { recursive: true, force: true });
+    await rm2(join8(root2, "transactions", id), { recursive: true, force: true });
   } catch (error) {
     if (error instanceof Error && error.message === "E_CRASH")
       throw error;
     try {
       await rollback(journal, deps);
-      await rm2(join7(root, "transactions", id), { recursive: true, force: true });
+      await rm2(join8(root2, "transactions", id), { recursive: true, force: true });
     } catch (rollbackError) {
       throw rollbackError;
     }
     throw error;
   }
 }
-var missing5 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", hash = (bytes) => createHash4("sha256").update(bytes).digest("hex"), absent;
+var missing6 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", hash2 = (bytes) => createHash5("sha256").update(bytes).digest("hex"), absent;
 var init_transaction = __esm(() => {
   init_errors();
   init_fs();
@@ -1563,24 +1834,24 @@ __export(exports_setup, {
   setup: () => setup,
   inventoryConflicts: () => inventoryConflicts
 });
-import { createHash as createHash5, randomBytes as randomBytes4 } from "node:crypto";
+import { createHash as createHash6, randomBytes as randomBytes4 } from "node:crypto";
 import { lstat as lstat5, readFile as readFile5 } from "node:fs/promises";
-import { dirname as dirname4, join as join8 } from "node:path";
+import { dirname as dirname5, join as join9 } from "node:path";
 async function readOr(path, fallback) {
   try {
     return new Uint8Array(await readFile5(path));
   } catch (error) {
-    if (missing6(error))
+    if (missing7(error))
       return encoder3.encode(fallback);
     throw error;
   }
 }
-async function exists(path) {
+async function exists2(path) {
   try {
     await lstat5(path);
     return true;
   } catch (error) {
-    if (missing6(error))
+    if (missing7(error))
       return false;
     throw error;
   }
@@ -1589,21 +1860,21 @@ function planned(mutation, resolved, bytes) {
   return { ...mutation, expectedPreimage: { state: resolved.preimageHash ? { type: "file", sha256: resolved.preimageHash, mode: resolved.mode ?? 384 } : { type: "absent", sha256: null, mode: null }, ...resolved.preimageHash ? { bytes } : {}, symlinkChain: resolved.symlinkChain } };
 }
 async function inventoryConflicts(input, deps) {
-  const root = await managedRoot(deps.env);
+  const root2 = await managedRoot(deps.env);
   let tmux = null, opencode = null, migrations = [];
   if (input.tmux) {
     if (!deps.env?.HOME)
       throw new CliError("E_ROOT");
-    const resolved = await resolveConfigPath(join8(deps.env.HOME, ".tmux.conf"), deps);
+    const resolved = await resolveConfigPath(join9(deps.env.HOME, ".tmux.conf"), deps);
     const bytes = await readOr(resolved.resolvedPath, "");
-    tmux = planned(planTmuxEdit({ ...resolved, bytes, mode: resolved.mode ?? 384, installRoot: root, migrate: input.migrate }), resolved, bytes);
+    tmux = planned(planTmuxEdit({ ...resolved, bytes, mode: resolved.mode ?? 384, installRoot: root2, migrate: input.migrate }), resolved, bytes);
   }
   if (input.opencode) {
     const logicalPath = await selectOpenCodeConfig(deps.env, deps), resolved = await resolveConfigPath(logicalPath, deps);
     const bytes = await readOr(resolved.resolvedPath, `{}
 `);
     opencode = planned(planOpenCodeEdit({ ...resolved, bytes, mode: resolved.mode ?? 384, migrate: input.migrate, packageEntry: input.packageEntry, ownedEntries: input.ownedOpenCodeEntries }), resolved, bytes);
-    migrations = await planOpenCodeMigration({ configDirectory: dirname4(logicalPath), installRoot: root, migrate: input.migrate });
+    migrations = await planOpenCodeMigration({ configDirectory: dirname5(logicalPath), installRoot: root2, migrate: input.migrate });
   }
   return { tmux, opencode, migrations };
 }
@@ -1611,29 +1882,29 @@ function owned(path, marker, packageEntries = []) {
   return { logicalPath: path.logicalPath, resolvedPath: path.resolvedPath, marker, packageEntries, baselineBackup: { logicalPath: path.logicalPath, sha256: digest2(path.bytes) } };
 }
 async function files(directory) {
-  const raw = JSON.parse(await readFile5(join8(directory, "manifest.json"), "utf8"));
-  return raw.files.map((file) => ({ logicalPath: join8(directory, file.path), resolvedPath: join8(directory, file.path), sha256: file.sha256, mode: Number.parseInt(file.mode, 8), type: "file" }));
+  const raw = JSON.parse(await readFile5(join9(directory, "manifest.json"), "utf8"));
+  return raw.files.map((file) => ({ logicalPath: join9(directory, file.path), resolvedPath: join9(directory, file.path), sha256: file.sha256, mode: Number.parseInt(file.mode, 8), type: "file" }));
 }
 async function setup(command, deps) {
-  const root = await managedRoot(deps.env);
-  if (await exists(root))
-    await validateManagedRoot(root, deps);
-  const prior = await readOwnership(root, deps);
+  const root2 = await managedRoot(deps.env);
+  if (await exists2(root2))
+    await validateManagedRoot(root2, deps);
+  const prior = await readOwnership(root2, deps);
   if (prior)
     assertDowngradeAllowed({ command, executingVersion: deps.executingVersion, ownedVersion: prior.releaseVersion });
   const record2 = selectRelease(parseReleaseManifest(deps.manifest), deps.platform, deps.arch);
   const packageEntry = `@xiopt/pane-dash-opencode@${deps.executingVersion}`, inventory2 = await inventoryConflicts({ ...command, packageEntry, ownedOpenCodeEntries: prior?.components.opencode?.packageEntries }, deps);
-  await ensureManagedRoot(root);
-  const staging = join8(root, "transactions", `payload-${Buffer.from(deps.randomBytes?.(8) ?? randomBytes4(8)).toString("hex")}`);
-  const acquired = await acquireRelease({ versionDirectory: join8(root, "versions", deps.executingVersion), stagingRoot: staging, record: record2, deps });
+  await ensureManagedRoot(root2);
+  const staging = join9(root2, "transactions", `payload-${Buffer.from(deps.randomBytes?.(8) ?? randomBytes4(8)).toString("hex")}`);
+  const acquired = await acquireRelease({ versionDirectory: join9(root2, "versions", deps.executingVersion), stagingRoot: staging, record: record2, deps });
   const payload = await files(acquired.versionDirectory), currentTarget = `versions/${deps.executingVersion}`;
   const ownership = { schemaVersion: 1, packageVersion: deps.executingVersion, releaseVersion: deps.executingVersion, archive: { target: record2.target, sha256: record2.sha256 }, files: payload, currentTarget, components: {
-    tmux: inventory2.tmux ? owned(inventory2.tmux, managedTmuxBlock(root)) : prior?.components.tmux ?? null,
+    tmux: inventory2.tmux ? owned(inventory2.tmux, managedTmuxBlock(root2)) : prior?.components.tmux ?? null,
     opencode: inventory2.opencode ? owned(inventory2.opencode, packageEntry, [packageEntry]) : prior?.components.opencode ?? null
   }, migrations: inventory2.migrations.map((item) => ({ from: item.logicalPath, to: item.resolvedPath, sha256: "" })) };
   await executeTransaction({ command: "setup", components: { tmux: command.tmux, opencode: command.opencode }, desiredVersion: deps.executingVersion, previousCurrent: prior?.currentTarget ?? null, configMutations: [inventory2.tmux, inventory2.opencode].filter((item) => item !== null), migrationUnlinks: inventory2.migrations, ownership, ...acquired.kind === "staged" ? { versionActivation: { stagingPath: acquired.versionDirectory } } : {} }, deps);
 }
-var encoder3, digest2 = (value) => createHash5("sha256").update(value).digest("hex"), missing6 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT";
+var encoder3, digest2 = (value) => createHash6("sha256").update(value).digest("hex"), missing7 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT";
 var init_setup = __esm(() => {
   init_acquire();
   init_config_opencode();
@@ -1653,21 +1924,21 @@ __export(exports_update, {
   update: () => update
 });
 import { readlink as readlink4 } from "node:fs/promises";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 async function update(deps) {
-  const root = await managedRoot(deps.env);
+  const root2 = await managedRoot(deps.env);
   try {
-    await validateManagedRoot(root, deps);
+    await validateManagedRoot(root2, deps);
   } catch (error) {
     if (error.code === "ENOENT")
       throw new CliError("E_USAGE", "no installation; run setup");
     throw error;
   }
-  const ownership = await readOwnership(root, deps);
+  const ownership = await readOwnership(root2, deps);
   if (!ownership)
     throw new CliError("E_USAGE", "no installation; run setup");
   try {
-    if (await readlink4(join9(root, "current")) !== ownership.currentTarget)
+    if (await readlink4(join10(root2, "current")) !== ownership.currentTarget)
       throw new CliError("E_OWNERSHIP", "owned current target changed");
   } catch (error) {
     if (error instanceof CliError)
@@ -1689,9 +1960,9 @@ var exports_uninstall = {};
 __export(exports_uninstall, {
   uninstall: () => uninstall
 });
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 import { readFile as readFile6, readlink as readlink5 } from "node:fs/promises";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 async function bytes(path) {
   return new Uint8Array(await readFile6(path));
 }
@@ -1699,28 +1970,28 @@ function planned2(mutation, resolved, content) {
   return { ...mutation, expectedPreimage: { state: { type: "file", sha256: digest3(content), mode: resolved.mode ?? 384 }, bytes: content, symlinkChain: resolved.symlinkChain } };
 }
 async function uninstall(deps) {
-  const root = await managedRoot(deps.env);
+  const root2 = await managedRoot(deps.env);
   try {
-    await validateManagedRoot(root, deps);
+    await validateManagedRoot(root2, deps);
   } catch (error) {
-    if (missing7(error))
+    if (missing8(error))
       return;
     throw error;
   }
-  const ownership = await readOwnership(root, deps);
+  const ownership = await readOwnership(root2, deps);
   if (!ownership) {
     if (deps.env?.HOME)
       try {
-        if ((await readFile6(join10(deps.env.HOME, ".tmux.conf"), "utf8")).includes("# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>"))
+        if ((await readFile6(join11(deps.env.HOME, ".tmux.conf"), "utf8")).includes("# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>"))
           throw new CliError("E_OWNERSHIP", "managed marker requires manual review");
       } catch (error) {
-        if (!missing7(error))
+        if (!missing8(error))
           throw error;
       }
     return;
   }
   try {
-    if (await readlink5(join10(root, "current")) !== ownership.currentTarget)
+    if (await readlink5(join11(root2, "current")) !== ownership.currentTarget)
       throw new CliError("E_OWNERSHIP", "owned current target changed");
   } catch (error) {
     if (error instanceof CliError)
@@ -1735,7 +2006,7 @@ async function uninstall(deps) {
   const edits = [];
   if (ownership.components.tmux) {
     const item = ownership.components.tmux, resolved = await resolveConfigPath(item.logicalPath, deps), content = await bytes(resolved.resolvedPath);
-    edits.push(planned2(planTmuxRemoval({ ...resolved, bytes: content, installRoot: root, mode: resolved.mode ?? 384 }), resolved, content));
+    edits.push(planned2(planTmuxRemoval({ ...resolved, bytes: content, installRoot: root2, mode: resolved.mode ?? 384 }), resolved, content));
   }
   if (ownership.components.opencode) {
     const item = ownership.components.opencode, resolved = await resolveConfigPath(item.logicalPath, deps), content = await bytes(resolved.resolvedPath);
@@ -1743,7 +2014,7 @@ async function uninstall(deps) {
   }
   await executeTransaction({ command: "uninstall", components: { tmux: ownership.components.tmux !== null, opencode: ownership.components.opencode !== null }, desiredVersion: ownership.releaseVersion, previousCurrent: ownership.currentTarget, configMutations: edits, uninstall: { tombstoneVersions: true, removeCurrent: true, removeOwnership: true } }, deps);
 }
-var missing7 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", digest3 = (value) => createHash6("sha256").update(value).digest("hex");
+var missing8 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", digest3 = (value) => createHash7("sha256").update(value).digest("hex");
 var init_uninstall = __esm(() => {
   init_config_opencode();
   init_config_tmux();
@@ -1779,8 +2050,12 @@ function assertDowngradeAllowed(input) {
 }
 async function runCli(argv, deps) {
   const command = parseArgs(argv);
-  if (command.name === "doctor")
-    return 0;
+  if (command.name === "doctor") {
+    const { doctor: doctor2, renderDoctorHuman: renderDoctorHuman2, renderDoctorJson: renderDoctorJson2 } = await Promise.resolve().then(() => (init_doctor(), exports_doctor));
+    const report = await doctor2(deps);
+    deps.doctorOutput?.(command.json ? renderDoctorJson2(report) : renderDoctorHuman2(report));
+    return report.healthy ? 0 : 1;
+  }
   if (command.name === "setup") {
     const manifest = parseReleaseManifest(deps.manifest);
     selectRelease(manifest, deps.platform, deps.arch);

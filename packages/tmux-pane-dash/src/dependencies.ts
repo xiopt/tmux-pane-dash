@@ -1,5 +1,6 @@
 import releaseManifest from "../generated/release-manifest.json"
 import { spawn } from "node:child_process"
+import { lstat, readFile, readdir, readlink } from "node:fs/promises"
 import process from "node:process"
 import type { Dependencies } from "./runtime"
 import { nodeFsOps } from "./fs"
@@ -12,5 +13,11 @@ export function nodeDependencies(): Dependencies {
     process.stdout.on("data", receive(stdout)); process.stderr.on("data", receive(stderr)); process.once("error", reject); process.once("close", (code) => { clearTimeout(timeout); if (overflow) reject(new Error("E_BINARY_OUTPUT")); else if (timedOut) reject(new Error("E_BINARY_TIMEOUT")); else resolve({ code: code ?? 1, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() }) })
   })
   const env = Object.getOwnPropertyDescriptor(process, "env")!.value as Record<string, string | undefined>
-  return { manifest: releaseManifest, platform: process.platform, arch: process.arch, executingVersion: releaseManifest.version, ...( { fs: nodeFsOps(), nowMs: Date.now, fetch: globalThis.fetch.bind(globalThis), spawn: child, env, pid: () => process.pid, uid: () => process.getuid?.() ?? 0, isPidAlive: (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } } } as any) }
+  const doctorFs = {
+    async readFile(path: string) { return new Uint8Array(await readFile(path)) },
+    async stat(path: string) { const entry = await lstat(path); return { kind: entry.isFile() ? "file" as const : entry.isDirectory() ? "directory" as const : entry.isSymbolicLink() ? "symlink" as const : "other" as const, mode: entry.mode & 0o7777, size: entry.size, dev: entry.dev, ino: entry.ino } },
+    readdir,
+    readlink,
+  }
+  return { manifest: releaseManifest, platform: process.platform, arch: process.arch, executingVersion: releaseManifest.version, ...( { fs: nodeFsOps(), doctorFs, doctorOutput: (text: string) => process.stdout.write(text), nowMs: Date.now, fetch: globalThis.fetch.bind(globalThis), spawn: child, env, pid: () => process.pid, uid: () => process.getuid?.() ?? 0, isPidAlive: (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } } } as any) }
 }

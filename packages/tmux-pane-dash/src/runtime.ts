@@ -7,6 +7,12 @@ import type { FsOps } from "./fs"
 export type FetchResponse = { status: number; headers?: Headers | Record<string, string | null | undefined>; body?: AsyncIterable<Uint8Array> | ReadableStream<Uint8Array> }
 export type TimerOps = { setTimeout(callback: () => void, milliseconds: number): unknown; clearTimeout(timer: unknown): void }
 export type SignalOps = { on(signal: "HUP" | "INT" | "TERM", callback: () => void): void; off(signal: "HUP" | "INT" | "TERM", callback: () => void): void }
+export type DoctorFs = {
+  readFile(path: string): Promise<Uint8Array>
+  stat(path: string): Promise<{ kind: "file" | "directory" | "symlink" | "other"; mode: number; size: number; dev?: number; ino?: number }>
+  readdir(path: string): Promise<string[]>
+  readlink(path: string): Promise<string>
+}
 
 export type Dependencies = {
   manifest: unknown
@@ -21,6 +27,9 @@ export type Dependencies = {
   timers?: TimerOps
   signals?: SignalOps
   spawn?: (path: string, args: readonly string[], options: { timeoutMs: number; env: Record<string, string>; maxOutputBytes: number }) => Promise<{ code: number; stdout: string; stderr: string }>
+  /** Read-only operations used exclusively by `doctor`. */
+  doctorFs?: DoctorFs
+  doctorOutput?: (text: string) => void
   /** Internal test seams; production supplies process values only. */
   env?: Record<string, string | undefined>
   pid?: () => number
@@ -58,7 +67,12 @@ export function assertDowngradeAllowed(input: { command: Command; executingVersi
 
 export async function runCli(argv: readonly string[], deps: Dependencies): Promise<number> {
   const command = parseArgs(argv)
-  if (command.name === "doctor") return 0
+  if (command.name === "doctor") {
+    const { doctor, renderDoctorHuman, renderDoctorJson } = await import("./commands/doctor")
+    const report = await doctor(deps)
+    deps.doctorOutput?.(command.json ? renderDoctorJson(report) : renderDoctorHuman(report))
+    return report.healthy ? 0 : 1
+  }
   if (command.name === "setup") { const manifest: ReleaseManifest = parseReleaseManifest(deps.manifest); selectRelease(manifest, deps.platform, deps.arch) }
   await deps.lock?.()
   if (command.name === "setup") await (await import("./commands/setup")).setup(command, deps)
