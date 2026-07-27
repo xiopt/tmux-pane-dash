@@ -4,6 +4,7 @@ import type { PlannedConfigMutation } from "./transaction"
 const encoder = new TextEncoder(), decoder = new TextDecoder()
 const begin = "# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>"
 const end = "# <<< tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 <<<"
+export const MANAGED_TMUX_BINDING_KEYS = { dashboard: "D", tag: "T", label: "M" } as const
 
 export type TmuxEditInput = Omit<PlannedConfigMutation, "bytes"> & { bytes: Uint8Array; installRoot: string; migrate: boolean }
 

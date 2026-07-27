@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import { dirname, join, relative, resolve } from "node:path"
-import { managedTmuxBlock } from "../config-tmux"
+import { parseJsonc } from "../config-opencode"
+import { managedTmuxBlock, MANAGED_TMUX_BINDING_KEYS } from "../config-tmux"
 import { managedRoot, type OwnershipRecord } from "../ownership"
 import type { Dependencies, DoctorFs } from "../runtime"
 
@@ -51,9 +52,19 @@ async function loadOwnership(fs: DoctorFs, installRoot: string): Promise<Ownersh
   return value
 }
 function inRoot(installRoot: string, path: string): boolean { const rel = relative(resolve(installRoot), resolve(path)); return rel !== "" && !rel.startsWith("..") && !rel.includes("/../") }
-function parseJsonc(bytes: Uint8Array): any { return JSON.parse(text.decode(bytes).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/[^\n]*/g, "$1")) }
 function tmuxVersion(value: string): boolean { const match = /^tmux\s+(\d+)\.(\d+)(?:\.|[a-z]|\s|$)/.exec(value.trim()); return !!match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 6) }
 async function run(deps: Dependencies, path: string, args: readonly string[]) { if (!deps.spawn) throw new Error("child execution unavailable"); return deps.spawn(path, args, { timeoutMs: 5_000, env: childEnv, maxOutputBytes: 8 * 1024 }) }
+type TmuxBinding = { key: string; action: string }
+function tmuxBindings(output: string): TmuxBinding[] {
+  return output.split("\n").flatMap(line => {
+    const match = /^bind(?:-key)?\s+-T\s+prefix\s+(\S+)\s+(.+)$/.exec(line)
+    return match ? [{ key: match[1]!, action: match[2]! }] : []
+  })
+}
+function hasSingleBinding(bindings: readonly TmuxBinding[], key: string, predicate: (action: string) => boolean): boolean {
+  const records = bindings.filter(binding => binding.key === key)
+  return records.length === 1 && predicate(records[0]!.action)
+}
 
 export async function doctor(deps: Dependencies): Promise<DoctorReport> {
   const fs = deps.doctorFs
@@ -110,22 +121,28 @@ export async function doctor(deps: Dependencies): Promise<DoctorReport> {
       const owned = ownership?.components.tmux
       if (!owned || !deps.env?.HOME || owned.logicalPath !== join(deps.env.HOME, ".tmux.conf") || owned.marker !== managedTmuxBlock(installRoot)) throw new Error("owned tmux route is invalid")
       const config = text.decode(await read(fs, owned.resolvedPath)), marker = owned.marker
-      if (config.split(marker).length !== 2 || hash(new TextEncoder().encode(config)) !== owned.baselineBackup.sha256 || /(?:@pane-dash-engine|@plugin\s+['"]xiopt\/tmux-pane-dash|pane_dash\.tmux)/.test(config.replace(marker, ""))) throw new Error("conflicting tmux route exists")
+       if (config.split(marker).length !== 2) throw new Error("owned tmux marker differs")
       checks.push(check("tmux.config", "ok", null, "tmux marker and route match"))
     } catch (error) { checks.push(check("tmux.config", "error", "E_TMUX_CONFIG", clean(error))) }
     try {
       const result = await run(deps, "tmux", ["list-keys", "-T", "prefix"])
       if (result.code !== 0) checks.push(check("tmux.server", "warning", "W_TMUX_SERVER", "tmux server is not running"))
-      else if (!result.stderr && ["scripts/open.sh", "scripts/tag.sh", "current"].every(token => result.stdout.includes(token))) checks.push(check("tmux.server", "ok", null, "tmux bindings use current route"))
-      else checks.push(check("tmux.server", "error", "E_TMUX_BINDINGS", "tmux bindings do not match"))
+       else {
+         const current = join(installRoot, "current"), bindings = tmuxBindings(result.stdout)
+         const dashboard = hasSingleBinding(bindings, MANAGED_TMUX_BINDING_KEYS.dashboard, action => action.includes("run-shell") && action.includes(`${current}/scripts/open.sh`))
+         const tag = hasSingleBinding(bindings, MANAGED_TMUX_BINDING_KEYS.tag, action => action.includes("run-shell") && action.includes(`${current}/scripts/tag.sh`) && /(?:^|\s)toggle(?:\s|$)/.test(action))
+         const label = hasSingleBinding(bindings, MANAGED_TMUX_BINDING_KEYS.label, action => action.includes("command-prompt") && action.includes(`${current}/scripts/tag.sh`) && /(?:^|\s)label-from-option(?:\s|$)/.test(action))
+         if (result.stderr || !dashboard || !tag || !label) checks.push(check("tmux.server", "error", "E_TMUX_BINDINGS", "tmux bindings do not match"))
+         else checks.push(check("tmux.server", "ok", null, "tmux bindings use current route"))
+       }
     } catch { checks.push(check("tmux.server", "warning", "W_TMUX_SERVER", "tmux server is not running")) }
     try {
       const owned = ownership?.components.opencode
       if (!owned) throw new Error("OpenCode ownership is missing")
       const selected = await selectDoctorOpenCodeConfig(fs, deps.env), expected = `@xiopt/pane-dash-opencode@${deps.executingVersion}`
       if (selected !== owned.logicalPath || owned.packageEntries.length !== 1 || owned.packageEntries[0] !== expected) throw new Error("OpenCode selection or ownership differs")
-      const configBytes = await read(fs, owned.resolvedPath), config = parseJsonc(configBytes), entries = config?.plugin
-      if (hash(configBytes) !== owned.baselineBackup.sha256 || !Array.isArray(entries) || entries.filter((entry: unknown) => entry === expected).length !== 1 || entries.filter((entry: unknown) => typeof entry === "string" && /pane-dash/i.test(entry)).length !== 1) throw new Error("OpenCode plugin entries differ")
+       const config = parseJsonc(text.decode(await read(fs, owned.resolvedPath))) as { plugin?: unknown }, entries = config?.plugin
+       if (!Array.isArray(entries) || entries.filter((entry: unknown) => entry === expected).length !== 1) throw new Error("OpenCode plugin entries differ")
       checks.push(check("opencode.config", "ok", null, "OpenCode plugin entry matches"))
     } catch (error) { checks.push(check("opencode.config", "error", "E_OPENCODE", clean(error))) }
     try {

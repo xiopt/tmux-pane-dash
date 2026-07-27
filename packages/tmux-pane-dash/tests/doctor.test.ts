@@ -24,6 +24,11 @@ function fixture(fault?: string) {
     if (bytes.has(path)) return { kind: "file" as const, mode: payload.find(([name]) => `${versionRoot}/${name}` === path)?.[2] ?? 0o600, size: Buffer.byteLength(bytes.get(path)!), dev: 1, ino: path === config ? 2 : 3 }
     throw Object.assign(new Error(`missing ${path}`), { code: "ENOENT" })
   }
+  let bindings = [
+    `bind-key -T prefix D run-shell '${root}/current/scripts/open.sh' '${root}/current/bin/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'`,
+    `bind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle '#{pane_id}'`,
+    `bind-key -T prefix M command-prompt -p 'pane-dash label:' \"set-option -p @pane_dash_label_input \\\"%%%\\\" ; run-shell '\"${root}/current/scripts/tag.sh\" label-from-option \\\"#{pane_id}\\\"'\"`,
+  ].join("\n")
   const calls = { fetch: 0, lock: 0, mutations: 0, child: 0 }
   const fs: DoctorFs = { stat: async path => info(path), readFile: async path => { const value = bytes.get(path); if (value === undefined) throw Object.assign(new Error(`missing ${path}`), { code: "ENOENT" }); return new TextEncoder().encode(value) }, readlink: async path => { if (path !== `${root}/current`) throw Object.assign(new Error("missing"), { code: "ENOENT" }); return fault === "current.target" ? "versions/bad" : `versions/${version}` }, readdir: async path => {
     if (path === `${root}/transactions`) return fault === "transaction.complete" ? ["pending"] : []
@@ -38,9 +43,15 @@ function fixture(fault?: string) {
     if (fault === "tmux.version" && args[0] === "-V") return { code: 0, stdout: "tmux 3.5\n", stderr: "" }
     if (args[0] === "-V") return { code: 0, stdout: "tmux 3.6\n", stderr: "" }
     if (fault === "tmux.server") return { code: 1, stdout: "", stderr: "no server" }
-    return { code: 0, stdout: path === "tmux" ? "bind scripts/open.sh scripts/tag.sh current" : "pane-dash 0.1.0\n", stderr: "" }
+    return { code: 0, stdout: path === "tmux" ? bindings : "pane-dash 0.1.0\n", stderr: "" }
   } }
-  return { deps, calls, tree: () => JSON.stringify([...bytes].sort(([left], [right]) => left.localeCompare(right))) }
+  return {
+    deps,
+    calls,
+    tree: () => JSON.stringify([...bytes].sort(([left], [right]) => left.localeCompare(right))),
+    mutate: (path: string, value: string) => bytes.set(path, value),
+    setBindings: (value: string) => { bindings = value },
+  }
 }
 
 test("doctor is offline read-only and stable", async () => {
@@ -64,6 +75,47 @@ test("server absence is the only warning and output is canonical", async () => {
   expect(report.checks.find(check => check.id === "tmux.server")).toMatchObject({ status: "warning" })
   expect(renderDoctorJson(report)).toBe(`${JSON.stringify(report)}\n`)
   expect(renderDoctorHuman(report).split("\n")).toHaveLength(DOCTOR_CHECK_IDS.length + 2)
+})
+
+test("doctor accepts valid lossless JSONC and unrelated owned-config changes", async () => {
+  const h = fixture()
+  h.mutate("/home/.tmux.conf", `${managedTmuxBlock(root)}\nset -g status-style bg=blue\n`)
+  h.mutate(config, `{
+    // unrelated comment
+    "plugin": [
+      "@xiopt/pane-dash-opencode@0.1.0", // owned package
+      "other-plugin", // unrelated plugin
+    ],
+    "nested": { "items": ["https://example.test//literal", "/* literal */",], },
+  }`)
+  expect((await doctor(h.deps)).healthy).toBeTrue()
+})
+
+test("doctor detects changes to its exact managed markers and package entry", async () => {
+  const tmux = fixture()
+  tmux.mutate("/home/.tmux.conf", managedTmuxBlock(root).replace("run-shell", "# run-shell"))
+  expect((await doctor(tmux.deps)).checks.find(check => check.id === "tmux.config")?.status).toBe("error")
+
+  const opencode = fixture()
+  opencode.mutate(config, '{"plugin":["@xiopt/pane-dash-opencode@0.1.1"]}')
+  expect((await doctor(opencode.deps)).checks.find(check => check.id === "opencode.config")?.status).toBe("error")
+})
+
+test("doctor validates distinct owned tmux binding records", async () => {
+  const valid = fixture()
+  expect((await doctor(valid.deps)).checks.find(check => check.id === "tmux.server")?.status).toBe("ok")
+
+  for (const [description, bindings] of [
+    ["missing label key", `bind-key -T prefix D run-shell '${root}/current/scripts/open.sh'\nbind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle`],
+    ["wrong label key", `bind-key -T prefix D run-shell '${root}/current/scripts/open.sh'\nbind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle\nbind-key -T prefix T command-prompt label-from-option '${root}/current/scripts/tag.sh'`],
+    ["stale dashboard route", `bind-key -T prefix D run-shell '${root}/old/current/scripts/open.sh'\nbind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle\nbind-key -T prefix M command-prompt label-from-option '${root}/current/scripts/tag.sh'`],
+    ["wrong tag action", `bind-key -T prefix D run-shell '${root}/current/scripts/open.sh'\nbind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\"\nbind-key -T prefix M command-prompt label-from-option '${root}/current/scripts/tag.sh'`],
+    ["duplicate dashboard key", `bind-key -T prefix D run-shell '${root}/current/scripts/open.sh'\nbind-key -T prefix D run-shell '${root}/current/scripts/open.sh'\nbind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle\nbind-key -T prefix M command-prompt label-from-option '${root}/current/scripts/tag.sh'`],
+  ]) {
+    const h = fixture()
+    h.setBindings(bindings)
+    expect((await doctor(h.deps)).checks.find(check => check.id === "tmux.server")?.status, description).toBe("error")
+  }
 })
 
 test("fatal report and messages remain bounded and safe", async () => {

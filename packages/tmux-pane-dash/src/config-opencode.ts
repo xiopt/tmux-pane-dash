@@ -46,6 +46,39 @@ export async function planOpenCodeMigration(input: { configDirectory: string; in
 function space(text: string, index: number): number { for (;;) { while (/\s/.test(text[index] ?? "")) index += 1; if (text.startsWith("//", index)) { const end = text.indexOf("\n", index + 2); index = end < 0 ? text.length : end + 1; continue } if (text.startsWith("/*", index)) { const end = text.indexOf("*/", index + 2); if (end < 0) fail(); index = end + 2; continue } return index } }
 function stringAt(text: string, index: number): { value: string; start: number; end: number } { if (text[index] !== '"') fail(); const start = index; let end = index + 1, escaped = false; while (end < text.length) { const char = text[end++]!; if (escaped) { escaped = false; continue } if (char === "\\") { escaped = true; continue } if (char === '"') { try { return { value: JSON.parse(text.slice(index, end)), start, end } } catch { fail() } } } fail() }
 function close(text: string, index: number, open: string, endChar: string) { let depth = 0; for (; index < text.length; index += 1) { index = space(text, index); if (text[index] === '"') { index = stringAt(text, index).end - 1; continue } if (text[index] === open) depth += 1; if (text[index] === endChar && --depth === 0) return index } fail() }
+type JsoncValue = { value: unknown; end: number }
+function jsoncValue(text: string, at: number): JsoncValue {
+  let index = space(text, at), char = text[index]
+  if (char === '"') { const string = stringAt(text, index); return { value: string.value, end: string.end } }
+  if (char === "{") {
+    const object: Record<string, unknown> = {}; index = space(text, index + 1)
+    while (text[index] !== "}") {
+      const key = stringAt(text, index); index = space(text, key.end); if (text[index++] !== ":") fail()
+      const entry = jsoncValue(text, index); object[key.value] = entry.value; index = space(text, entry.end)
+      if (text[index] !== ",") { if (text[index] !== "}") fail(); break }
+      index = space(text, index + 1)
+    }
+    return { value: object, end: index + 1 }
+  }
+  if (char === "[") {
+    const array: unknown[] = []; index = space(text, index + 1)
+    while (text[index] !== "]") {
+      const entry = jsoncValue(text, index); array.push(entry.value); index = space(text, entry.end)
+      if (text[index] !== ",") { if (text[index] !== "]") fail(); break }
+      index = space(text, index + 1)
+    }
+    return { value: array, end: index + 1 }
+  }
+  const literal = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text.slice(index))
+  if (!literal) fail()
+  return { value: JSON.parse(literal[0]), end: index + literal[0].length }
+}
+/** Parses JSONC with comments and trailing commas using the editor's token scanner. */
+export function parseJsonc(text: string): unknown {
+  const parsed = jsoncValue(text, 0)
+  if (space(text, parsed.end) !== text.length) fail()
+  return parsed.value
+}
 type PluginEntry = { value: string; start: number; end: number; comma?: number }
 type Plugin = { start: number; end: number; entries: PluginEntry[] }
 function rootPlugin(text: string): Plugin | null {
