@@ -5,13 +5,6 @@ import { apply, createStore, derive } from "./src/state"
 import { TmuxWriter } from "./src/writer"
 
 const HEARTBEAT_MS = 20_000
-const OPTIONS = [
-  "@pane_dash_status",
-  "@pane_dash_status_since",
-  "@pane_dash_heartbeat",
-  "@pane_dash_title",
-  "@pane_dash_model",
-] as const
 const STARTUP_OPTIONS = [
   "@pane_dash_status",
   "@pane_dash_status_since",
@@ -24,7 +17,7 @@ export const PaneDash = async () => {
   if (!pane) return {}
 
   const store = createStore()
-  const writer = new TmuxWriter(pane, (command, options) => Bun.spawn(command, options))
+  const writer = new TmuxWriter(pane)
 
   const publish = () => {
     const derived = derive(store)
@@ -51,16 +44,7 @@ export const PaneDash = async () => {
   const timer = setInterval(heartbeat, HEARTBEAT_MS)
   timer.unref?.()
 
-  const cleanup = () => {
-    for (const name of OPTIONS) {
-      try {
-        Bun.spawnSync(["tmux", "set-option", "-pu", "-t", pane, name])
-      } catch {
-        // The pane may already be gone.
-      }
-    }
-  }
-  process.on("exit", cleanup)
+  process.on("exit", () => writer.clearSync())
 
   publish()
 

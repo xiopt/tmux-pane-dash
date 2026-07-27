@@ -11,6 +11,8 @@ export type Spawn = (
 
 const SPAWN_OPTIONS = { stdout: "ignore", stderr: "ignore" } as const
 
+const defaultSpawn: Spawn = (command, options) => Bun.spawn(command, options)
+
 export class TmuxWriter {
   private pending = Promise.resolve()
   private draining = false
@@ -21,8 +23,22 @@ export class TmuxWriter {
 
   constructor(
     private readonly pane: string,
-    private readonly spawn: Spawn,
+    private readonly spawn: Spawn = defaultSpawn,
   ) {}
+
+  publish(options: Readonly<Record<string, string>>): void {
+    for (const [name, value] of Object.entries(options)) this.setOption(name, value)
+  }
+
+  clearSync(): void {
+    for (const name of this.desired.keys()) {
+      try {
+        Bun.spawnSync(["tmux", "set-option", "-pu", "-t", this.pane, name])
+      } catch {
+        // The pane may already be gone.
+      }
+    }
+  }
 
   get(name: string): string | undefined {
     return this.desired.get(name)
