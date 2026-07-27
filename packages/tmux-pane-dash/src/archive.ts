@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { join } from "node:path"
-import { createGunzip } from "node:zlib"
+import { createInflateRaw } from "node:zlib"
 import type { Dependencies } from "./runtime"
 import { canonicalPayloadPath, type FsOps } from "./fs"
 
@@ -8,11 +8,25 @@ const inventory = new Map<string, 0o755 | 0o644>([["bin/pane-dash", 0o755], ["pa
 const directories = new Map<string, 0o755>([["bin", 0o755], ["scripts", 0o755]])
 const text = new TextDecoder("utf-8", { fatal: true })
 const MAX_COMPRESSED_BYTES = 64 * 1024 * 1024
+const MAX_GZIP_HEADER_BYTES = 64 * 1024
 export interface ArchiveLimits { maxEntries: number; maxTotalBytes: number; maxFileBytes: number; timeoutMs: number }
 export type InternalManifest = { schemaVersion: 1; product: "tmux-pane-dash"; version: string; target: string; asset: string; files: Array<{ path: string; sha256: string; size: number; mode: "0755" | "0644" }> }
 
 const fail = (reason: string): never => { throw new Error(`E_ARCHIVE_ENTRY: ${reason}`) }
 const allZero = (value: Uint8Array) => value.every((byte) => byte === 0)
+const crcTable = (() => { const table = new Uint32Array(256); for (let value = 0; value < 256; value += 1) { let crc = value; for (let bit = 0; bit < 8; bit += 1) crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1; table[value] = crc >>> 0 } return table })()
+const crc32 = (crc: number, bytes: Uint8Array) => { let value = crc; for (const byte of bytes) value = (value >>> 8) ^ crcTable[(value ^ byte) & 0xff]!; return value >>> 0 }
+const littleEndian = (bytes: Uint8Array, offset: number) => (bytes[offset]! | (bytes[offset + 1]! << 8) | (bytes[offset + 2]! << 16) | (bytes[offset + 3]! << 24)) >>> 0
+function gzipHeaderLength(bytes: Uint8Array): number | undefined {
+  if (bytes.length < 10) return undefined
+  if (bytes[0] !== 0x1f || bytes[1] !== 0x8b || bytes[2] !== 8 || (bytes[3]! & 0xe0)) fail("gzip header")
+  const flags = bytes[3]!, has = (flag: number) => (flags & flag) !== 0
+  let offset = 10
+  if (has(4)) { if (bytes.length < offset + 2) return undefined; const length = bytes[offset]! | (bytes[offset + 1]! << 8); offset += 2 + length; if (bytes.length < offset) return undefined }
+  for (const flag of [8, 16]) if (has(flag)) { const end = bytes.indexOf(0, offset); if (end < 0) return undefined; offset = end + 1 }
+  if (has(2)) { if (bytes.length < offset + 2) return undefined; if (((crc32(0xffffffff, bytes.subarray(0, offset)) ^ 0xffffffff) & 0xffff) !== (bytes[offset]! | (bytes[offset + 1]! << 8))) fail("gzip header"); offset += 2 }
+  return offset
+}
 function field(header: Uint8Array, offset: number, length: number): string {
   const value = header.subarray(offset, offset + length), nul = value.indexOf(0)
   if (nul < 0 || value.subarray(nul + 1).some((byte) => byte !== 0)) fail("header field")
@@ -61,7 +75,7 @@ class TarParser {
     if (type === "0" || type === "\0") {
       if (fileMode === undefined || mode !== fileMode || size > this.limits.maxFileBytes || (this.total += size) > this.limits.maxTotalBytes) fail("file")
       this.current = { path, mode: fileMode, size, remaining: size, padding: Math.ceil(size / 512) * 512 - size, body: [] }
-      if (size === 0) await this.finishFile()
+      if (size === 0) { await this.finishFile(); this.current = undefined }
     } else if (type === "5") {
       if (directoryMode === undefined || mode !== directoryMode || size !== 0) fail("type")
       await this.wait(this.fs.mkdirPayloadDirectory(this.root, path, directoryMode))
@@ -110,23 +124,34 @@ export async function extractArchive(input: { archive: AsyncIterable<Uint8Array>
     try { const result = await Promise.race([promise, expired]); if (input.clock.nowMs() > deadline) fail("timeout"); return result } catch (error) { if (error instanceof Error && error.message === "timeout") fail("timeout"); throw error }
   }
   try {
-    const gunzip = createGunzip(), parser = new TarParser(input.stagingRoot, input.fs, input.limits, wait)
-    let compressed = 0, prior = new Uint8Array(), gzipHeaders = 0
+    const inflate = createInflateRaw(), parser = new TarParser(input.stagingRoot, input.fs, input.limits, wait)
+    let compressed = 0, header = new Uint8Array(), body = false, finished = false, footer = new Uint8Array(), crc = 0xffffffff, size = 0
+    const output = (async () => { for await (const chunk of inflate) { crc = crc32(crc, chunk); size = (size + chunk.length) >>> 0; await parser.push(chunk) } })(); void output.catch(() => undefined)
+    const write = async (chunk: Uint8Array) => {
+      if (finished) fail("gzip member")
+      const before = inflate.bytesWritten
+      await wait(new Promise<void>((resolve, reject) => inflate.write(chunk, (error) => error ? reject(error) : resolve())))
+      const consumed = inflate.bytesWritten - before
+      if (consumed < chunk.length) { footer = chunk.slice(consumed); finished = true }
+    }
     const writer = (async () => {
       try {
         for await (const chunk of input.archive) {
           compressed += chunk.length; if (compressed > MAX_COMPRESSED_BYTES) fail("compressed size")
-          const bytes = pieces([prior, chunk], prior.length + chunk.length)
-          for (let index = 0; index + 2 < bytes.length; index += 1) if (bytes[index] === 0x1f && bytes[index + 1] === 0x8b && bytes[index + 2] === 8 && ++gzipHeaders > 1) fail("gzip member")
-          prior = bytes.slice(Math.max(0, bytes.length - 2))
-          await wait(new Promise<void>((resolve, reject) => gunzip.write(chunk, (error) => error ? reject(error) : resolve())))
+          if (!body) {
+            header = pieces([header, chunk], header.length + chunk.length)
+            if (header.length > MAX_GZIP_HEADER_BYTES) fail("gzip header")
+            const length = gzipHeaderLength(header)
+            if (length === undefined) continue
+            body = true; await write(header.slice(length)); header = new Uint8Array()
+          } else await write(chunk)
         }
-        if (!gunzip.destroyed) await wait(new Promise<void>((resolve, reject) => gunzip.end((error) => error ? reject(error) : resolve())))
-      } catch (error) { gunzip.destroy(error instanceof Error ? error : new Error("gzip")); throw error }
+        if (!body || !finished || footer.length !== 8) fail("gzip footer")
+        await wait(new Promise<void>((resolve, reject) => inflate.end((error) => error ? reject(error) : resolve())))
+      } catch (error) { inflate.destroy(error instanceof Error ? error : new Error("gzip")); throw error }
     })()
-    try { for await (const chunk of gunzip) await parser.push(chunk) } catch (error) { if (error instanceof Error && error.message.startsWith("E_ARCHIVE_ENTRY")) throw error; fail("gzip") }
-    await wait(writer); parser.finish()
-  } catch (error) { await input.fs.rm(input.stagingRoot); if (error instanceof Error && error.message.startsWith("E_ARCHIVE_ENTRY")) throw error; if (error instanceof Error && error.message === "timeout") fail("timeout"); fail("gzip") } finally { clearTimeout(timer) }
+    try { await wait(writer); await output; if (((crc ^ 0xffffffff) >>> 0) !== littleEndian(footer, 0) || size !== littleEndian(footer, 4)) fail("gzip footer"); parser.finish() } catch (error) { await output.catch(() => undefined); if (error instanceof Error && error.message.startsWith("E_ARCHIVE_ENTRY")) throw error; fail("gzip") }
+  } catch (error) { try { await input.fs.rm(input.stagingRoot) } catch {} if (error instanceof Error && error.message.startsWith("E_ARCHIVE_ENTRY")) throw error; if (error instanceof Error && error.message === "timeout") fail("timeout"); fail("gzip") } finally { clearTimeout(timer) }
 }
 
 const manifestKeys = ["asset", "files", "product", "schemaVersion", "target", "version"]
