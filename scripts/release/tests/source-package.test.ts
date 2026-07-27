@@ -16,6 +16,12 @@ import {
 
 const fileRoots = new Set([".gitignore", "LICENSE", "Makefile", "README.md", "VERSION", "bun.lock", "package.json", "pane_dash.tmux"])
 const allDirectories = SOURCE_ROOTS.filter((path) => !fileRoots.has(path))
+const sensitiveNames = [".env", ".env.local", ".npmrc", "credentials.json", "password.txt", "secret.json", "token.txt", "auth-material.json"] as const
+const sensitivePathCases = sensitiveNames.flatMap((name) => [
+  { scope: "top-level", path: name, kind: "file" as const },
+  { scope: "nested", path: `packages/tmux-pane-dash/src/${name}`, kind: "directory" as const },
+])
+const benignNearMisses = ["tokenizer.ts", "authentication.ts", "author.ts", "secretary.md", "passwordless.txt"] as const
 
 async function writeFixture(root: string): Promise<void> {
   for (const path of allDirectories) await mkdir(join(root, path), { recursive: true })
@@ -116,6 +122,37 @@ test("source archives omit generated output, Cargo target, GitHub, and npm cache
     await mkdir(join(root, ".github"), { recursive: true })
     await writeFile(join(root, ".github", "workflow.yml"), "generated workflow\n")
     await expect(buildSourceArchive({ root, output, tag: "v0.1.0", epoch: 1_721_728_000 })).rejects.toThrow(".github")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("source manifests reject sensitive files and directories before any exclusion", async () => {
+  for (const testCase of [
+    ...sensitivePathCases,
+    { scope: "nested archive", path: "packages/tmux-pane-dash/src/token.tar.gz", kind: "file" as const },
+  ]) {
+    const root = await temporaryFixture()
+    try {
+      const absolute = join(root, testCase.path)
+      if (testCase.kind === "directory") await mkdir(absolute, { recursive: true })
+      else {
+        await mkdir(dirname(absolute), { recursive: true })
+        await writeFile(absolute, "sensitive\n")
+      }
+      await expect(collectSourceManifest(root)).rejects.toThrow(`sensitive source path: ${testCase.path}`)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+})
+
+test("source manifests retain benign near-miss names", async () => {
+  const root = await temporaryFixture()
+  try {
+    for (const name of benignNearMisses) await writeFile(join(root, "scripts", name), "ordinary source\n")
+    const paths = (await collectSourceManifest(root)).map((entry) => entry.path)
+    for (const name of benignNearMisses) expect(paths).toContain(`scripts/${name}`)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

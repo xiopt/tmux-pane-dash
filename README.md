@@ -40,6 +40,11 @@ It downloads only the exact immutable release selected by its package version,
 verifies the archive hash and size, checks the binary version, and then commits
 the installation atomically.
 
+npm resolves `@latest` to an immutable CLI package version; the CLI version
+derives and accepts only the matching GitHub tag `v<same-version>` for its
+release assets. It performs no GitHub latest-release lookup and never mixes
+package, CLI, or release versions.
+
 ### First install
 
 The default installs both tmux and OpenCode integration:

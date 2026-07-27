@@ -110,6 +110,14 @@ export function sourceArchiveName(tag = TAG): string {
   return `${SOURCE_ARCHIVE_PREFIX}${tag}${SOURCE_ARCHIVE_SUFFIX}`
 }
 
+function isSensitiveName(name: string): boolean {
+  return /^\.env(?:\..*)?$/i.test(name) || name.toLowerCase() === ".npmrc" || /(?:^|[._-])(?:credentials?|password|secret|token|auth)(?=$|[._-])/i.test(name)
+}
+
+function isSensitivePath(path: string): boolean {
+  return path.split("/").some(isSensitiveName)
+}
+
 function isGeneratedPath(path: string): boolean {
   const parts = path.split("/")
   const name = parts.at(-1) ?? ""
@@ -117,15 +125,14 @@ function isGeneratedPath(path: string): boolean {
   if (parts[0] === "release") return true
   if (parts.includes("dist")) return true
   if (parts[0] === "bin") return true
-  if (name === ".DS_Store" || name.startsWith("._") || name === ".npmrc") return true
-  if (/^\.env(?:\.|$)/i.test(name) || /(?:credential|password|secret|token|auth)/i.test(name)) return true
+  if (name === ".DS_Store" || name.startsWith("._")) return true
   if (/\.(?:tar|tar\.gz|tgz|zip|sha256)$/i.test(name)) return true
   if (path === "release-manifest.json" || path === "SHA256SUMS") return true
   return false
 }
 
 function isIgnorableTopLevel(name: string): boolean {
-  return name === ".git" || name === ".cortexkit" || name === "node_modules" || name === ".npm" || name === ".npm-cache" || name === "npm-cache" || name === "bun-cache" || name === "target" || name === "release" || name === "dist" || name === "bin" || name === ".DS_Store" || name.startsWith("._") || name === ".npmrc" || /\.(?:tar|tar\.gz|tgz|zip|sha256)$/i.test(name)
+  return name === ".git" || name === ".cortexkit" || name === "node_modules" || name === ".npm" || name === ".npm-cache" || name === "npm-cache" || name === "bun-cache" || name === "target" || name === "release" || name === "dist" || name === "bin" || name === ".DS_Store" || name.startsWith("._") || /\.(?:tar|tar\.gz|tgz|zip|sha256)$/i.test(name)
 }
 
 async function canonicalRoot(input: string): Promise<string> {
@@ -141,6 +148,7 @@ async function canonicalRoot(input: string): Promise<string> {
 async function validateTopLevel(root: string): Promise<void> {
   const entries = await readdir(root, { withFileTypes: true })
   for (const entry of entries) {
+    if (isSensitivePath(entry.name)) fail(`sensitive source path: ${entry.name}`)
     if (rootSet.has(entry.name) || isIgnorableTopLevel(entry.name)) continue
     if (entry.name === ".github") fail(".github is not part of the Task 13 source manifest")
     fail(`unlisted source root: ${entry.name}`)
@@ -167,6 +175,7 @@ function modeFor(path: string, mode: number): SourceMode {
 }
 
 async function collect(root: string, relativePath: string, output: SourceManifestEntry[]): Promise<void> {
+  if (relativePath && isSensitivePath(relativePath)) fail(`sensitive source path: ${relativePath}`)
   if (relativePath && isGeneratedPath(relativePath)) return
   const absolute = relativePath ? join(root, relativePath) : root
   const info = await lstat(absolute)
