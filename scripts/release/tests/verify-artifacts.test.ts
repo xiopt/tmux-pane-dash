@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { canonicalJson, sha256 } from "../canonical-json"
 import { TARGETS } from "../contracts"
-import { verifyReleaseDirectory } from "../verify-artifacts"
+import { verifyPackages, verifyReleaseDirectory } from "../verify-artifacts"
 
 const decoder = new TextDecoder()
 const epoch = 1784813242
@@ -40,6 +40,10 @@ test("verifier requires exactly four archives plus release manifest and checksum
   try {
     await expect(verifyReleaseDirectory(root, epoch)).rejects.toThrow("exactly six release assets")
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test("package verifier requires exact immutable metadata and npm inventory", async () => {
+  await expect(verifyPackages(process.cwd())).resolves.toBeUndefined()
 })
 
 test("verifier rejects a binary whose regenerated metadata names the wrong architecture", async () => {

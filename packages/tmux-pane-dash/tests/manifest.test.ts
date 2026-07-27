@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import { parseReleaseManifest, selectRelease } from "../src/manifest"
 import { CliError } from "../src/errors"
 
@@ -35,4 +38,13 @@ test("rejects schema, keys, targets, names, URLs, hashes, unsafe sizes, and over
     const value = manifest(); mutate(value)
     expect(() => parseReleaseManifest(value)).toThrow(CliError)
   }
+})
+
+test("generated package manifest is the canonical verified Task 4 release manifest", async () => {
+  const output = await mkdtemp(join(tmpdir(), "pane-dash-cli-manifest-"))
+  try {
+    const child = Bun.spawn([process.execPath, "scripts/release/build.ts", "--local-fixtures", "--tag-commit", "7bc976a", "--output", output], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" })
+    expect(await child.exited, await new Response(child.stderr).text()).toBe(0)
+    expect(await readFile(resolve(import.meta.dir, "..", "generated", "release-manifest.json"))).toEqual(await readFile(join(output, "release-manifest.json")))
+  } finally { await rm(output, { recursive: true, force: true }) }
 })

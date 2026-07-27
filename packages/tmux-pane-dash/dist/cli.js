@@ -4,11 +4,11 @@
 import process2 from "node:process";
 // packages/tmux-pane-dash/generated/release-manifest.json
 var release_manifest_default = {
-  schemaVersion: 1,
+  assets: { "darwin-arm64": { asset: "tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz", sha256: "dce292f658e6265354a2491d92a2de6fd2f3bfd88f84be980cb20d3506b0c99c", size: 880264, target: "aarch64-apple-darwin", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz" }, "darwin-x64": { asset: "tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz", sha256: "02505027b8ec72851517c1b4c212058e257db4a5291f2a7be335dd1537617c69", size: 9263, target: "x86_64-apple-darwin", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz" }, "linux-arm64": { asset: "tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz", sha256: "35f36307dead44f99b713b043473b498ac6593bd00d718e2b125133faee435e4", size: 9265, target: "aarch64-unknown-linux-musl", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz" }, "linux-x64": { asset: "tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz", sha256: "50a53833c1339cb7d2f6aee609e81b4b0385c129244ae51752de10c37418e1b4", size: 9268, target: "x86_64-unknown-linux-musl", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz" } },
   repository: "xiopt/tmux-pane-dash",
-  version: "0.1.0",
+  schemaVersion: 1,
   tag: "v0.1.0",
-  assets: { "darwin-arm64": { target: "aarch64-apple-darwin", asset: "tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz", sha256: "0000000000000000000000000000000000000000000000000000000000000000", size: 1 }, "darwin-x64": { target: "x86_64-apple-darwin", asset: "tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz", sha256: "1111111111111111111111111111111111111111111111111111111111111111", size: 1 }, "linux-arm64": { target: "aarch64-unknown-linux-musl", asset: "tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz", sha256: "2222222222222222222222222222222222222222222222222222222222222222", size: 1 }, "linux-x64": { target: "x86_64-unknown-linux-musl", asset: "tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz", sha256: "3333333333333333333333333333333333333333333333333333333333333333", size: 1 } }
+  version: "0.1.0"
 };
 
 // packages/tmux-pane-dash/src/dependencies.ts

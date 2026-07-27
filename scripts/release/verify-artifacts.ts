@@ -2,7 +2,7 @@ import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { gunzipSync } from "node:zlib"
-import { ARCHIVE_PAYLOAD, RELEASE_ASSETS, TAG, TAG_COMMIT, TARGETS } from "./contracts"
+import { ARCHIVE_PAYLOAD, CLI_PACKAGE_FILES, RELEASE_ASSETS, TAG, TAG_COMMIT, TARGETS } from "./contracts"
 import { canonicalJson, sha256 } from "./canonical-json"
 import { inspectArchive } from "./archive"
 import { inspectBinary } from "./inspect-binary"
@@ -19,8 +19,8 @@ function tarFiles(bytes: Uint8Array): Map<string, Uint8Array> {
 
 const hostTarget = () => process.platform === "darwin" ? process.arch === "arm64" ? "aarch64-apple-darwin" : process.arch === "x64" ? "x86_64-apple-darwin" : undefined : process.platform === "linux" ? process.arch === "arm64" ? "aarch64-unknown-linux-musl" : process.arch === "x64" ? "x86_64-unknown-linux-musl" : undefined : undefined
 
-async function command(argv: string[], env?: Record<string, string>): Promise<{ stdout: string; stderr: string; code: number }> {
-  const child = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", env: env ?? process.env })
+async function command(argv: string[], env?: Record<string, string>, cwd?: string): Promise<{ stdout: string; stderr: string; code: number }> {
+  const child = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", env: env ?? process.env, cwd })
   const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
   return { stdout, stderr, code }
 }
@@ -90,7 +90,26 @@ export async function verifyReleaseDirectory(path: string, expectedEpoch?: numbe
   if (decoder.decode(sums) !== checksumLines.sort((a, b) => Buffer.from(a.asset).compare(Buffer.from(b.asset))).map(({ line }) => line).join("\n") + "\n") throw new Error("invalid SHA256SUMS")
 }
 
+export async function verifyPackages(root: string): Promise<void> {
+  const packageRoot = join(root, "packages", "tmux-pane-dash")
+  const pkg = parseJson(await readFile(join(packageRoot, "package.json")))
+  const files = ["dist/cli.js", "dist/runtime.js", "generated/release-manifest.json", "README.md", "LICENSE"]
+  if (pkg.name !== "@xiopt/tmux-pane-dash" || pkg.version !== "0.1.0" || pkg.type !== "module" || JSON.stringify(pkg.engines) !== JSON.stringify({ node: ">=20" }) || JSON.stringify(pkg.bin) !== JSON.stringify({ "tmux-pane-dash": "dist/cli.js" }) || JSON.stringify(pkg.files) !== JSON.stringify(files) || JSON.stringify(pkg.repository) !== JSON.stringify({ type: "git", url: "git+https://github.com/xiopt/tmux-pane-dash.git" }) || pkg.homepage !== "https://github.com/xiopt/tmux-pane-dash#readme" || JSON.stringify(pkg.bugs) !== JSON.stringify({ url: "https://github.com/xiopt/tmux-pane-dash/issues" }) || JSON.stringify(pkg.publishConfig) !== JSON.stringify({ access: "public" }) || Object.hasOwn(pkg, "exports") || ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "bundledDependencies", "gypfile", "preinstall", "install", "postinstall", "prepare", "prepublish", "prepublishOnly", "prepack", "postpack"].some((key) => Object.hasOwn(pkg, key))) throw new Error("invalid CLI package metadata")
+  const node = process.env.NODE_20_BIN, npm = process.env.NPM_20_CLI
+  if (!node || !npm) throw new Error("CLI package check requires with-node20")
+  const packed = await command([node, npm, "pack", "--json", "--dry-run", "--workspace", "packages/tmux-pane-dash"], undefined, root)
+  if (packed.code !== 0) throw new Error(`CLI package pack failed: ${packed.stderr.trim()}`)
+  const result = JSON.parse(packed.stdout) as Array<{ files?: Array<{ path?: string }> }>
+  const inventory = result[0]?.files?.map((file) => `package/${file.path}`).sort()
+  if (!inventory || JSON.stringify(inventory) !== JSON.stringify([...CLI_PACKAGE_FILES].sort())) throw new Error("CLI package inventory is not exact")
+}
+
 if (import.meta.main) {
-  const directory = process.argv[2]; if (!directory) throw new Error("usage: verify-artifacts.ts DIRECTORY")
-  await verifyReleaseDirectory(directory); console.log("archives=4 assets=6 inventories=exact reproducible=PASS")
+  const [argument, extra] = process.argv.slice(2)
+  if (!argument || extra) throw new Error("usage: verify-artifacts.ts DIRECTORY | --packages")
+  if (argument === "--packages") {
+    await verifyPackages(process.cwd()); console.log("packages=1 inventory=exact PASS")
+  } else {
+    await verifyReleaseDirectory(argument); console.log("archives=4 assets=6 inventories=exact reproducible=PASS")
+  }
 }
