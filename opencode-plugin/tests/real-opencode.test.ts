@@ -6,17 +6,12 @@ import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join, relative, resolve } from "node:path"
 import { startLocalRegistry, type LocalPackage } from "../../scripts/release/local-registry"
+import { resolveCompatibilityRows } from "./helpers/real-opencode"
 
 const SPEC = "@xiopt/pane-dash-opencode@0.1.0"
 const INITIALIZATION_COMMAND = ["run", "--command", "noop", "--print-logs", "--log-level", "DEBUG"] as const
-const SHA256 = "14a4583c9a3685875f011d6dd4dfbd00498893942be0bb1d2c27e30e70144c89"
 const OPTIONS = ["@pane_dash_status", "@pane_dash_status_since", "@pane_dash_heartbeat", "@pane_dash_title", "@pane_dash_model"] as const
 const root = resolve(import.meta.dir, "../..")
-
-const rows = [
-  { name: "pinned-1.17.20", binary: process.env.OPENCODE_1_17_20_BIN, version: "1.17.20" },
-  { name: "latest-stable-1.17.20", binary: process.env.OPENCODE_LATEST_BIN, version: "1.17.20" },
-] as const
 
 async function command(argv: string[], cwd = root, env = process.env, allowFailure = false): Promise<{ stdout: string; stderr: string; code: number }> {
   const child = Bun.spawn(argv, { cwd, env, stdout: "pipe", stderr: "pipe" })
@@ -24,6 +19,13 @@ async function command(argv: string[], cwd = root, env = process.env, allowFailu
   if (code !== 0 && !allowFailure) throw new Error(`${argv.join(" ")} failed (${code}): ${stderr}`)
   return { code, stdout, stderr }
 }
+
+const rows = await resolveCompatibilityRows(
+  process.env.OPENCODE_1_17_20_BIN,
+  process.env.OPENCODE_LATEST_BIN,
+  async binary => (await command([binary, "--version"])).stdout,
+  readFile,
+)
 
 async function pack(directory: string, destination: string): Promise<LocalPackage> {
   const node = process.env.NODE_20_BIN!, npm = process.env.NPM_20_CLI!
@@ -126,11 +128,8 @@ test("actual packed plugin loads through the loopback registry in JSON and JSONC
   try {
     const plugin = await assertPackedPlugin(scratch), companionPackage = await companion(scratch)
     for (const row of rows) {
-      await expect(Bun.file(row.binary!).exists()).resolves.toBe(true)
-      expect((await command([row.binary!, "--version"])).stdout.trim().replace(/^v/, "")).toBe(row.version)
-      expect(createHash("sha256").update(await readFile(row.binary!)).digest("hex")).toBe(SHA256)
       await runVariant(row, "json", plugin, companionPackage); await runVariant(row, "jsonc", plugin, companionPackage)
-      console.log(`${row.name} version=${row.version} sha256=${SHA256} status=PASS cleanup=PASS public-network-requests=0`)
+      console.log(`${row.name} version=${row.version} sha256=${row.sha256} status=PASS cleanup=PASS public-network-requests=0`)
     }
   } finally { await rm(scratch, { recursive: true, force: true }) }
 })
