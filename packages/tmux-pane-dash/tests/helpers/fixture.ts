@@ -7,7 +7,14 @@ import { nodeFsOps, type FsOps } from "../../src/fs"
 import type { Dependencies, FetchResponse } from "../../src/runtime"
 
 export const asset = "tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz"
-export const record = { target: "x86_64-unknown-linux-musl", asset, url: `https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/${asset}`, sha256: "", size: 0 }
+export const record = { target: "x86_64-unknown-linux-musl", asset, url: `https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/${asset}`, sha256: "0".repeat(64), size: 1 }
+const releaseTargets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"] as const
+export function releaseManifest(selected = record) {
+  return { schemaVersion: 1, repository: "xiopt/tmux-pane-dash", version: "0.1.0", tag: "v0.1.0", assets: Object.fromEntries(releaseTargets.map((target, index) => {
+    const name = `tmux-pane-dash-v0.1.0-${target}.tar.gz`, assetRecord = target === selected.target ? selected : { target, asset: name, url: `https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/${name}`, sha256: `${index}`.repeat(64), size: index + 1 }
+    return [["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"][index], assetRecord]
+  })) }
+}
 export const payload = new Map<string, [string, number]>([["bin/pane-dash", ["binary", 0o755]], ["pane_dash.tmux", ["tmux", 0o755]], ["scripts/open.sh", ["open", 0o755]], ["scripts/tag.sh", ["tag", 0o755]], ["README.md", ["readme", 0o644]], ["LICENSE", ["license", 0o644]], ["VERSION", ["0.1.0\n", 0o644]]])
 export type Operation = { name: string; args: readonly unknown[] }
 export type Fault = { name: string; nth?: number }
@@ -23,7 +30,7 @@ export function fixtureDependencies(input: { responses?: FetchResponse[]; fault?
   const wrap = <K extends keyof FsOps>(name: K) => async (...args: Parameters<FsOps[K]>) => { calls.fs += 1; call(`fs.${name}`, ...args); return (base[name] as (...values: Parameters<FsOps[K]>) => ReturnType<FsOps[K]>)(...args) }
   const fs: FsOps = { mkdir: wrap("mkdir"), mkdirPayloadDirectory: wrap("mkdirPayloadDirectory"), readFile: wrap("readFile"), writeFileExclusive: wrap("writeFileExclusive"), openExclusive: wrap("openExclusive"), write: wrap("write"), close: wrap("close"), stat: wrap("stat"), readdir: wrap("readdir"), rm: wrap("rm") }
   const deps: Dependencies = {
-    manifest: {}, platform: "linux", arch: "x64", executingVersion: "0.1.0", fs, nowMs: () => 0,
+    manifest: releaseManifest(), platform: "linux", arch: "x64", executingVersion: "0.1.0", fs, nowMs: () => 0,
     fetch: async (url, init) => { calls.fetch += 1; call("fetch", url, init); return input.responses?.shift() ?? { status: 500 } },
     spawn: async (path, args, options) => { calls.child += 1; call("spawn", path, args, options); return { code: 0, stdout: "pane-dash 0.1.0\n", stderr: "" } },
     timers: input.timers ?? { setTimeout: (callback, milliseconds) => { calls.timer += 1; call("timer.setTimeout", milliseconds); return callback }, clearTimeout: (timer) => { call("timer.clearTimeout", timer) } },

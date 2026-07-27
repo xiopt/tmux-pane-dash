@@ -73,7 +73,7 @@ export async function runCli(argv: readonly string[], deps: Dependencies): Promi
     deps.doctorOutput?.(command.json ? renderDoctorJson(report) : renderDoctorHuman(report))
     return report.healthy ? 0 : 1
   }
-  if (command.name === "setup") { const manifest: ReleaseManifest = parseReleaseManifest(deps.manifest); selectRelease(manifest, deps.platform, deps.arch) }
+  if (command.name === "setup" || command.name === "update") { const manifest: ReleaseManifest = parseReleaseManifest(deps.manifest); if (manifest.version !== deps.executingVersion) throw new CliError("E_VERSION", "release manifest version does not match executing version"); if (command.name === "setup") selectRelease(manifest, deps.platform, deps.arch) }
   await deps.lock?.()
   if (command.name === "setup") await (await import("./commands/setup")).setup(command, deps)
   else if (command.name === "update") await (await import("./commands/update")).update(deps)

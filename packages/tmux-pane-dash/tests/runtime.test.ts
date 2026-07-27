@@ -34,6 +34,19 @@ test("rejects unsupported platforms before any fetch", async () => {
   expect(fetched).toBe(false)
 })
 
+test("rejects a release manifest that does not match the executing version before lock or fetch", async () => {
+  const mismatchedManifest = { ...manifest, version: "0.1.1", tag: "v0.1.1", assets: Object.fromEntries(Object.entries(manifest.assets).map(([key, record]) => {
+    const asset = record.asset.replaceAll("0.1.0", "0.1.1")
+    return [key, { ...record, asset, url: record.url.replaceAll("0.1.0", "0.1.1") }]
+  })) }
+  for (const argv of [["setup"], ["update"]]) {
+    let locked = false, fetched = false
+    await expect(runCli(argv, { manifest: mismatchedManifest, platform: "linux", arch: "x64", executingVersion: "0.1.0", lock: () => { locked = true }, fetch: () => { fetched = true; throw new Error("unexpected fetch") } })).rejects.toThrow("E_VERSION")
+    expect(locked).toBeFalse()
+    expect(fetched).toBeFalse()
+  }
+})
+
 test("packages the unexported runtime only as an absolute file module", async () => {
   const pkg = JSON.parse(await readFile(resolve(import.meta.dir, "..", "package.json"), "utf8"))
   expect(pkg.repository).toEqual({ type: "git", url: "git+https://github.com/xiopt/tmux-pane-dash.git" })

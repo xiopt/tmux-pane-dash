@@ -6,6 +6,7 @@ import type { FsOps } from "./fs"
 import { CliError } from "./errors"
 import type { Dependencies, FetchResponse } from "./runtime"
 import { selectTarget } from "./platform"
+import { parseReleaseManifest, selectRelease } from "./manifest"
 
 export type AcquireContext = { versionDirectory: string; stagingRoot: string; record: ReleaseAssetRecord; deps: Dependencies; fs?: FsOps; limits?: ArchiveLimits }
 const MAX = 64 * 1024 * 1024
@@ -18,13 +19,13 @@ function code(error: unknown) { return error instanceof CliError ? error.code : 
 function isMissing(error: unknown) { return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT" }
 function isValidatedCorruption(error: unknown) { return isMissing(error) || error instanceof SyntaxError || /^(E_ARCHIVE_ENTRY|E_BINARY_VERSION|E_VERSION)/.test(code(error)) }
 
-function initialUrl(record: ReleaseAssetRecord): string {
+function initialUrl(record: ReleaseAssetRecord, tag: string): string {
   let parsed: URL
   try { parsed = new URL(record.url) } catch { fail("E_DOWNLOAD_URL") }
-  const expectedPath = `/xiopt/tmux-pane-dash/releases/download/v0.1.0/${record.asset}`
+  const expectedPath = `/xiopt/tmux-pane-dash/releases/download/${tag}/${record.asset}`
   if (parsed.protocol !== "https:" || parsed.username || parsed.password || (parsed.port && parsed.port !== "443") || parsed.hostname !== "github.com" || parsed.pathname !== expectedPath || parsed.search || parsed.hash) fail("E_DOWNLOAD_URL")
-  const exact = `https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/${record.asset}`
-  const explicit = `https://github.com:443/xiopt/tmux-pane-dash/releases/download/v0.1.0/${record.asset}`
+  const exact = `https://github.com/xiopt/tmux-pane-dash/releases/download/${tag}/${record.asset}`
+  const explicit = `https://github.com:443/xiopt/tmux-pane-dash/releases/download/${tag}/${record.asset}`
   if (record.url !== exact && record.url !== explicit) fail("E_DOWNLOAD_URL")
   return record.url
 }
@@ -50,7 +51,7 @@ async function* responseBody(source: FetchResponse["body"]): AsyncIterable<Uint8
   try { for (;;) { const part = await reader.read(); if (part.done) return; yield part.value } } finally { reader.releaseLock() }
 }
 
-export async function downloadAsset(record: ReleaseAssetRecord, destination: string, deps: Dependencies): Promise<void> {
+export async function downloadAsset(record: ReleaseAssetRecord, destination: string, deps: Dependencies, tag: string): Promise<void> {
   if (!Number.isSafeInteger(record.size) || record.size < 0 || record.size > MAX) fail("E_ARCHIVE_SIZE")
   if (!deps.fetch) fail("E_DOWNLOAD_FETCH")
   if (!deps.fs) fail("E_DOWNLOAD_FS")
@@ -73,7 +74,7 @@ export async function downloadAsset(record: ReleaseAssetRecord, destination: str
       const responseTimer = arm(30_000)
       try { return await race(deps.fetch!(url, { redirect: "manual", signal: controller.signal, headers: emptyHeaders })) } finally { clear(responseTimer) }
     }
-    let response = await request(initialUrl(record))
+    let response = await request(initialUrl(record, tag))
     for (let redirects = 0; response.status >= 300 && response.status < 400; redirects += 1) {
       if (redirects >= 2) fail("E_REDIRECT")
       response = await request(redirectUrl(location(response)))
@@ -104,36 +105,37 @@ export async function downloadAsset(record: ReleaseAssetRecord, destination: str
   }
 }
 
-function validateRecord(context: AcquireContext): void {
-  const selected = selectTarget(context.deps.platform, context.deps.arch)
+function validateRecord(record: ReleaseAssetRecord, version: string, selected: string): void {
   const expected: Record<string, string> = { "darwin-arm64": "aarch64-apple-darwin", "darwin-x64": "x86_64-apple-darwin", "linux-arm64": "aarch64-unknown-linux-musl", "linux-x64": "x86_64-unknown-linux-musl" }
-  if (context.record.target !== expected[selected] || context.record.asset !== `tmux-pane-dash-v0.1.0-${context.record.target}.tar.gz`) fail("E_PLATFORM")
+  if (record.target !== expected[selected] || record.asset !== `tmux-pane-dash-v${version}-${record.target}.tar.gz`) fail("E_PLATFORM")
 }
 
-async function validatePayload(root: string, record: ReleaseAssetRecord, deps: Dependencies, fs: FsOps): Promise<void> {
+async function validatePayload(root: string, record: ReleaseAssetRecord, version: string, deps: Dependencies, fs: FsOps): Promise<void> {
   const manifest = JSON.parse(new TextDecoder().decode(await fs.readFile(join(root, "manifest.json")))) as InternalManifest
   await inspectPayload(root, manifest, { ...deps, fs })
-  if (manifest.version !== "0.1.0" || manifest.target !== record.target || manifest.asset !== record.asset) fail("E_VERSION")
+  if (manifest.version !== version || manifest.target !== record.target || manifest.asset !== record.asset) fail("E_VERSION")
   await verifyBinary(join(root, "bin/pane-dash"), manifest.version, deps)
 }
 
 export async function acquireRelease(context: AcquireContext): Promise<{ kind: "reused" | "staged"; versionDirectory: string }> {
   const fs = context.fs ?? context.deps.fs
   if (!fs) fail("E_FILESYSTEM")
-  validateRecord(context)
+  const manifest = parseReleaseManifest(context.deps.manifest), selected = selectTarget(context.deps.platform, context.deps.arch), record = selectRelease(manifest, context.deps.platform, context.deps.arch)
+  if (context.record.target !== record.target || context.record.asset !== record.asset || context.record.url !== record.url || context.record.sha256 !== record.sha256 || context.record.size !== record.size) fail("E_PLATFORM")
+  validateRecord(record, manifest.version, selected)
   try {
-    await validatePayload(context.versionDirectory, context.record, context.deps, fs)
+    await validatePayload(context.versionDirectory, record, manifest.version, context.deps, fs)
     return { kind: "reused", versionDirectory: context.versionDirectory }
   } catch (error) { if (!isValidatedCorruption(error)) throw error }
   const archive = `${context.stagingRoot}.download.tar.gz`
   await fs.rm(context.stagingRoot)
   await fs.mkdir(context.stagingRoot)
   try {
-    await downloadAsset(context.record, archive, { ...context.deps, fs })
+    await downloadAsset(record, archive, { ...context.deps, fs }, manifest.tag)
     const bytes = await fs.readFile(archive)
     async function* stream() { yield bytes }
     await extractArchive({ archive: stream(), stagingRoot: context.stagingRoot, fs, clock: { nowMs: context.deps.nowMs ?? Date.now }, limits: context.limits ?? archiveLimits })
-    await validatePayload(context.stagingRoot, context.record, context.deps, fs)
+    await validatePayload(context.stagingRoot, record, manifest.version, context.deps, fs)
     return { kind: "staged", versionDirectory: context.stagingRoot }
   } catch (error) {
     await fs.rm(context.stagingRoot)
