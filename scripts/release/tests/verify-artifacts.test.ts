@@ -46,6 +46,21 @@ test("package verifier requires exact immutable metadata and npm inventory", asy
   await expect(verifyPackages(process.cwd())).resolves.toBeUndefined()
 })
 
+test("package verifier executes and imports the packed Node artifact", async () => {
+  const packageRoot = join(process.cwd(), "packages", "tmux-pane-dash")
+  const cliPath = join(packageRoot, "dist", "cli.js"), runtimePath = join(packageRoot, "dist", "runtime.js")
+  const [cli, runtime] = await Promise.all([readFile(cliPath), readFile(runtimePath)])
+  try {
+    await writeFile(cliPath, "process.argv.slice(2); process.exit(0)\n")
+    await expect(verifyPackages(process.cwd())).rejects.toThrow("packed CLI")
+    await writeFile(cliPath, cli)
+    await writeFile(runtimePath, "export const missingRunCli = true\n")
+    await expect(verifyPackages(process.cwd())).rejects.toThrow("packed runtime")
+  } finally {
+    await Promise.all([writeFile(cliPath, cli), writeFile(runtimePath, runtime)])
+  }
+})
+
 test("verifier rejects a binary whose regenerated metadata names the wrong architecture", async () => {
   const root = await mkdtemp(join(tmpdir(), "pane-dash-release-"))
   try {

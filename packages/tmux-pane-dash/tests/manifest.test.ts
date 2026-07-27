@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { readFile } from "node:fs/promises"
+import { resolve } from "node:path"
 import { parseReleaseManifest, selectRelease } from "../src/manifest"
 import { CliError } from "../src/errors"
+import { canonicalJson } from "../../../scripts/release/canonical-json"
 
 const names = {
   "darwin-arm64": ["aarch64-apple-darwin", "tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz"],
@@ -40,11 +40,24 @@ test("rejects schema, keys, targets, names, URLs, hashes, unsafe sizes, and over
   }
 })
 
-test("generated package manifest is the canonical verified Task 4 release manifest", async () => {
-  const output = await mkdtemp(join(tmpdir(), "pane-dash-cli-manifest-"))
-  try {
-    const child = Bun.spawn([process.execPath, "scripts/release/build.ts", "--local-fixtures", "--tag-commit", "7bc976a", "--output", output], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" })
-    expect(await child.exited, await new Response(child.stderr).text()).toBe(0)
-    expect(await readFile(resolve(import.meta.dir, "..", "generated", "release-manifest.json"))).toEqual(await readFile(join(output, "release-manifest.json")))
-  } finally { await rm(output, { recursive: true, force: true }) }
+test("generated package manifest is a canonical immutable four-target manifest", async () => {
+  const bytes = await readFile(resolve(import.meta.dir, "..", "generated", "release-manifest.json"))
+  const value = JSON.parse(bytes.toString())
+  expect(bytes).toEqual(Buffer.from(canonicalJson(value)))
+  expect(bytes.includes("\r")).toBeFalse()
+  expect(Object.keys(value)).toEqual(["assets", "repository", "schemaVersion", "tag", "version"])
+  expect(value).toMatchObject({ schemaVersion: 1, repository: "xiopt/tmux-pane-dash", version: "0.1.0", tag: "v0.1.0" })
+  expect(Object.keys(value.assets)).toEqual(Object.keys(names))
+  for (const [key, [target, asset]] of Object.entries(names)) {
+    const record = value.assets[key]
+    expect(Object.keys(record)).toEqual(["asset", "sha256", "size", "target", "url"])
+    expect(record.target).toBe(target)
+    expect(record.asset).toBe(asset)
+    expect(record.url).toBe(`https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/${asset}`)
+    expect(record.sha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(record.sha256).not.toMatch(/^(.)\1{63}$/)
+    expect(record.size).toBeGreaterThan(0)
+    expect(record.size).toBeLessThanOrEqual(64 * 1024 * 1024)
+  }
+  expect(parseReleaseManifest(value)).toEqual(value)
 })

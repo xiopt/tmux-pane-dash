@@ -1,6 +1,7 @@
-import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, isAbsolute, join, relative } from "node:path"
+import { pathToFileURL } from "node:url"
 import { gunzipSync } from "node:zlib"
 import { ARCHIVE_PAYLOAD, CLI_PACKAGE_FILES, RELEASE_ASSETS, TAG, TAG_COMMIT, TARGETS } from "./contracts"
 import { canonicalJson, sha256 } from "./canonical-json"
@@ -94,14 +95,39 @@ export async function verifyPackages(root: string): Promise<void> {
   const packageRoot = join(root, "packages", "tmux-pane-dash")
   const pkg = parseJson(await readFile(join(packageRoot, "package.json")))
   const files = ["dist/cli.js", "dist/runtime.js", "generated/release-manifest.json", "README.md", "LICENSE"]
-  if (pkg.name !== "@xiopt/tmux-pane-dash" || pkg.version !== "0.1.0" || pkg.type !== "module" || JSON.stringify(pkg.engines) !== JSON.stringify({ node: ">=20" }) || JSON.stringify(pkg.bin) !== JSON.stringify({ "tmux-pane-dash": "dist/cli.js" }) || JSON.stringify(pkg.files) !== JSON.stringify(files) || JSON.stringify(pkg.repository) !== JSON.stringify({ type: "git", url: "git+https://github.com/xiopt/tmux-pane-dash.git" }) || pkg.homepage !== "https://github.com/xiopt/tmux-pane-dash#readme" || JSON.stringify(pkg.bugs) !== JSON.stringify({ url: "https://github.com/xiopt/tmux-pane-dash/issues" }) || JSON.stringify(pkg.publishConfig) !== JSON.stringify({ access: "public" }) || Object.hasOwn(pkg, "exports") || ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "bundledDependencies", "gypfile", "preinstall", "install", "postinstall", "prepare", "prepublish", "prepublishOnly", "prepack", "postpack"].some((key) => Object.hasOwn(pkg, key))) throw new Error("invalid CLI package metadata")
+  const packageKeys = ["name", "version", "description", "type", "engines", "bin", "files", "repository", "homepage", "bugs", "license", "publishConfig"]
+  if (!hasExactKeys(pkg, packageKeys) || pkg.name !== "@xiopt/tmux-pane-dash" || pkg.version !== "0.1.0" || pkg.description !== "Immutable installer for tmux-pane-dash" || pkg.type !== "module" || JSON.stringify(pkg.engines) !== JSON.stringify({ node: ">=20" }) || JSON.stringify(pkg.bin) !== JSON.stringify({ "tmux-pane-dash": "dist/cli.js" }) || JSON.stringify(pkg.files) !== JSON.stringify(files) || JSON.stringify(pkg.repository) !== JSON.stringify({ type: "git", url: "git+https://github.com/xiopt/tmux-pane-dash.git" }) || pkg.homepage !== "https://github.com/xiopt/tmux-pane-dash#readme" || JSON.stringify(pkg.bugs) !== JSON.stringify({ url: "https://github.com/xiopt/tmux-pane-dash/issues" }) || pkg.license !== "MIT" || JSON.stringify(pkg.publishConfig) !== JSON.stringify({ access: "public" }) || Object.hasOwn(pkg, "exports") || ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "bundledDependencies", "gypfile", "os", "cpu", "binary", "preinstall", "install", "postinstall", "prepare", "prepublish", "prepublishOnly", "prepack", "postpack"].some((key) => Object.hasOwn(pkg, key))) throw new Error("invalid CLI package metadata")
   const node = process.env.NODE_20_BIN, npm = process.env.NPM_20_CLI
   if (!node || !npm) throw new Error("CLI package check requires with-node20")
-  const packed = await command([node, npm, "pack", "--json", "--dry-run", "--workspace", "packages/tmux-pane-dash"], undefined, root)
-  if (packed.code !== 0) throw new Error(`CLI package pack failed: ${packed.stderr.trim()}`)
-  const result = JSON.parse(packed.stdout) as Array<{ files?: Array<{ path?: string }> }>
-  const inventory = result[0]?.files?.map((file) => `package/${file.path}`).sort()
-  if (!inventory || JSON.stringify(inventory) !== JSON.stringify([...CLI_PACKAGE_FILES].sort())) throw new Error("CLI package inventory is not exact")
+  const output = await mkdtemp(join(tmpdir(), "pane-dash-cli-pack-"))
+  try {
+    const packed = await command([node, npm, "pack", "--json", "--workspace", "packages/tmux-pane-dash", "--pack-destination", output], undefined, root)
+    if (packed.code !== 0) throw new Error(`CLI package pack failed: ${packed.stderr.trim()}`)
+    const result = JSON.parse(packed.stdout) as Array<{ filename?: string; files?: Array<{ path?: string }> }>
+    const inventory = result[0]?.files?.map((file) => `package/${file.path}`).sort()
+    if (!inventory || JSON.stringify(inventory) !== JSON.stringify([...CLI_PACKAGE_FILES].sort())) throw new Error("CLI package inventory is not exact")
+    const filename = result[0]?.filename
+    if (!filename || basename(filename) !== filename) throw new Error("CLI package tarball name is invalid")
+    const extracted = join(output, "extracted")
+    for (const [name, content] of tarFiles(await readFile(join(output, filename)))) {
+      if (!name.startsWith("package/") || isAbsolute(name) || relative("package", name).startsWith("..")) throw new Error("CLI package tarball path is invalid")
+      const destination = join(extracted, name)
+      await mkdir(dirname(destination), { recursive: true })
+      await writeFile(destination, content)
+    }
+    const packedRoot = join(extracted, "package")
+    const packedMetadata = parseJson(await readFile(join(packedRoot, "package.json")))
+    if (JSON.stringify(packedMetadata) !== JSON.stringify(pkg)) throw new Error("packed package metadata differs")
+    const [cli, runtime] = await Promise.all([readFile(join(packedRoot, "dist", "cli.js"), "utf8"), readFile(join(packedRoot, "dist", "runtime.js"), "utf8")])
+    for (const bundle of [cli, runtime]) {
+      if (/\bBun\b|\bbun:|sourceMappingURL|\.map\b|process\d*\.env|\b(?:latest|endpoint|checksum|installRoot|rootDir)\b/i.test(bundle)) throw new Error("packed Node artifact contains forbidden override or Bun data")
+    }
+    if ((cli.match(/\.argv/g) ?? []).length !== 1 || !/\.argv\.slice\(2\)/.test(cli) || /\.argv/.test(runtime)) throw new Error("packed Node artifact has an invalid argv override")
+    const noCommand = await command([node, join(packedRoot, "dist", "cli.js")], { ...process.env, PATH: "/usr/bin:/bin" })
+    if (noCommand.code !== 2 || noCommand.stdout !== "" || !noCommand.stderr.startsWith("E_USAGE:") || noCommand.stderr.length > 241) throw new Error("packed CLI does not return bounded E_USAGE")
+    const imported = await command([node, "--input-type=module", "--eval", `import(${JSON.stringify(pathToFileURL(join(packedRoot, "dist", "runtime.js")).href)}).then((module) => process.exit(typeof module.runCli === "function" ? 0 : 1))`], { ...process.env, PATH: "/usr/bin:/bin" })
+    if (imported.code !== 0) throw new Error("packed runtime does not export runCli")
+  } finally { await rm(output, { recursive: true, force: true }) }
 }
 
 if (import.meta.main) {
