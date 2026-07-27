@@ -1223,11 +1223,12 @@ async function extractArchive(input) {
             fail3("compressed size");
           if (!body) {
             header = pieces([header, chunk], header.length + chunk.length);
-            if (header.length > MAX_GZIP_HEADER_BYTES)
-              fail3("gzip header");
             const length = gzipHeaderLength(header);
-            if (length === undefined)
+            if (length === undefined) {
+              if (header.length > MAX_GZIP_HEADER_BYTES)
+                fail3("gzip header");
               continue;
+            }
             body = true;
             await write(header.slice(length));
             header = new Uint8Array;

@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { extractArchive } from "../src/archive"
 import { inspectPayload, verifyBinary } from "../src/archive"
-import { internalManifest, installedFixture, releaseArchive } from "./helpers/fixture"
+import { internalManifest, installedFixture, payload, releaseArchive } from "./helpers/fixture"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -28,6 +29,17 @@ function archive(...entries: Uint8Array[]) {
 async function* chunks(value: Uint8Array) { yield value }
 const limits = { maxEntries: 64, maxTotalBytes: 268435456, maxFileBytes: 134217728, timeoutMs: 30000 } as const
 
+function largeReleaseArchive() {
+  const readme = new Uint8Array(72 * 1024)
+  let state = 0x12345678
+  for (let index = 0; index < readme.length; index += 1) { state = (state * 1664525 + 1013904223) >>> 0; readme[index] = state >>> 24 }
+  const manifest = internalManifest(), readmeFile = manifest.files.find((file) => file.path === "README.md")!
+  readmeFile.size = readme.length
+  readmeFile.sha256 = createHash("sha256").update(readme).digest("hex")
+  const entries = [entry("bin", new Uint8Array(), "0755", "5"), entry("scripts", new Uint8Array(), "0755", "5"), ...[...payload].map(([path, [content, mode]]) => entry(path, path === "README.md" ? readme : encoder.encode(content), mode.toString(8))), entry("manifest.json", encoder.encode(JSON.stringify(manifest)))]
+  return { bytes: archive(...entries), manifest }
+}
+
 test("rejects hostile ustar paths and unsupported entry types before filesystem writes", async () => {
   for (const [path, type] of [["/absolute", "0"], ["", "0"], [".", "0"], ["a/../b", "0"], ["a\\b", "0"], ["unexpected", "0"], ["bin/pane-dash", "1"], ["bin/pane-dash", "2"], ["bin/pane-dash", "3"], ["bin/pane-dash", "4"], ["bin/pane-dash", "5"], ["bin/pane-dash", "6"], ["bin/pane-dash", "7"], ["PaxHeader", "x"], ["GNU", "g"]] as const) {
     await expect(extractArchive({ archive: chunks(archive(entry(path, new Uint8Array(), "0644", type))), stagingRoot: "/stage", fs: {} as never, clock: { nowMs: () => 0 }, limits: { maxEntries: 64, maxTotalBytes: 268435456, maxFileBytes: 134217728, timeoutMs: 30000 } })).rejects.toThrow()
@@ -39,6 +51,18 @@ test("rejects malformed gzip and tar structure", async () => {
   for (const value of [new Uint8Array([1, 2, 3]), archive(badChecksum), gzipSync(new Uint8Array(513))]) {
     await expect(extractArchive({ archive: chunks(value), stagingRoot: "/stage", fs: {} as never, clock: { nowMs: () => 0 }, limits: { maxEntries: 64, maxTotalBytes: 268435456, maxFileBytes: 134217728, timeoutMs: 30000 } })).rejects.toThrow()
   }
+})
+
+test("accepts a large valid archive delivered in one chunk but rejects an oversized incomplete gzip header", async () => {
+  const { bytes, manifest } = largeReleaseArchive(), root = await mkdtemp(join(tmpdir(), "pane-dash-gzip-header-"))
+  const incompleteHeader = new Uint8Array(64 * 1024 + 1).fill(0x61)
+  incompleteHeader.set([0x1f, 0x8b, 8, 8])
+  expect(bytes.length).toBeGreaterThan(64 * 1024)
+  try {
+    await expect(extractArchive({ archive: chunks(bytes), stagingRoot: root, fs: nodeFsOps(), clock: { nowMs: () => 0 }, limits })).resolves.toBeUndefined()
+    await expect(inspectPayload(root, manifest, { fs: nodeFsOps() })).resolves.toBeUndefined()
+    await expect(extractArchive({ archive: chunks(incompleteHeader), stagingRoot: "/stage", fs: { rm: async () => undefined } as never, clock: { nowMs: () => 0 }, limits })).rejects.toThrow("E_ARCHIVE_ENTRY: gzip header")
+  } finally { await rm(root, { recursive: true, force: true }) }
 })
 
 test("accepts a single stored-DEFLATE member containing a gzip signature and rejects a real second member", async () => {

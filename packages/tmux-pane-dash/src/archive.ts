@@ -148,9 +148,8 @@ export async function extractArchive(input: { archive: AsyncIterable<Uint8Array>
           compressed += chunk.length; if (compressed > MAX_COMPRESSED_BYTES) fail("compressed size")
           if (!body) {
             header = pieces([header, chunk], header.length + chunk.length)
-            if (header.length > MAX_GZIP_HEADER_BYTES) fail("gzip header")
             const length = gzipHeaderLength(header)
-            if (length === undefined) continue
+            if (length === undefined) { if (header.length > MAX_GZIP_HEADER_BYTES) fail("gzip header"); continue }
             body = true; await write(header.slice(length)); header = new Uint8Array()
           } else await write(chunk)
         }
