@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test"
 import { gzipSync } from "node:zlib"
 import { extractArchive } from "../src/archive"
+import { inspectPayload, verifyBinary } from "../src/archive"
+import { internalManifest, installedFixture } from "./helpers/fixture"
+import { rm } from "node:fs/promises"
 
 const encoder = new TextEncoder()
 
@@ -32,4 +35,23 @@ test("rejects malformed gzip and tar structure", async () => {
   for (const value of [new Uint8Array([1, 2, 3]), archive(badChecksum), gzipSync(new Uint8Array(513))]) {
     await expect(extractArchive({ archive: chunks(value), stagingRoot: "/stage", fs: {} as never, clock: { nowMs: () => 0 }, limits: { maxEntries: 64, maxTotalBytes: 268435456, maxFileBytes: 134217728, timeoutMs: 30000 } })).rejects.toThrow()
   }
+})
+
+test("rejects duplicate, noncanonical, malformed metadata, and cleans the partial root", async () => {
+  const limits = { maxEntries: 64, maxTotalBytes: 268435456, maxFileBytes: 134217728, timeoutMs: 30000 } as const
+  for (const value of [archive(entry("README.md"), entry("README.md")), archive(entry("scripts//open.sh")), archive(entry("README.md", new Uint8Array(), "0755")), archive(...Array.from({ length: 65 }, () => entry("README.md")))]) {
+    let writes = 0, removed = 0
+    await expect(extractArchive({ archive: chunks(value), stagingRoot: "/stage", fs: { writeFileExclusive: async () => { writes += 1 }, rm: async () => { removed += 1 } } as never, clock: { nowMs: () => 0 }, limits })).rejects.toThrow()
+    expect(removed).toBe(1)
+    expect(writes).toBeLessThanOrEqual(1)
+  }
+})
+
+test("inspects the exact payload schema and constrains binary execution", async () => {
+  const h = await installedFixture()
+  try {
+    await expect(inspectPayload(h.versionDirectory, internalManifest(), h.context.deps)).resolves.toBeUndefined()
+    await expect(verifyBinary("/stage/bin/pane-dash", "0.1.0", { ...h.context.deps, spawn: async (_path, args, options) => { expect(args).toEqual(["--version"]); expect(options).toEqual({ timeoutMs: 5000, env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" }, maxOutputBytes: 4096 }); return { code: 0, stdout: "0.1.0\n", stderr: "" } } })).resolves.toBeUndefined()
+    await expect(verifyBinary("/stage/bin/pane-dash", "0.1.0", { ...h.context.deps, spawn: async () => ({ code: 0, stdout: "wrong\n", stderr: "" }) })).rejects.toThrow("E_BINARY_VERSION")
+  } finally { await rm(h.root, { recursive: true, force: true }) }
 })

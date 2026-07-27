@@ -2,6 +2,11 @@ import { parseArgs } from "./args"
 import type { Command, ReleaseManifest } from "./contracts"
 import { CliError } from "./errors"
 import { parseReleaseManifest, selectRelease } from "./manifest"
+import type { FsOps } from "./fs"
+
+export type FetchResponse = { status: number; headers?: Headers | Record<string, string | null | undefined>; body?: AsyncIterable<Uint8Array> | ReadableStream<Uint8Array> }
+export type TimerOps = { setTimeout(callback: () => void, milliseconds: number): unknown; clearTimeout(timer: unknown): void }
+export type SignalOps = { on(signal: "HUP" | "INT" | "TERM", callback: () => void): void; off(signal: "HUP" | "INT" | "TERM", callback: () => void): void }
 
 export type Dependencies = {
   manifest: unknown
@@ -10,7 +15,12 @@ export type Dependencies = {
   executingVersion: string
   ownedVersion?: string
   lock?: () => void | Promise<void>
-  fetch?: () => void | Promise<void>
+  fetch?: (url: string, init: { redirect: "manual"; signal: AbortSignal; headers: Record<string, never> }) => Promise<FetchResponse>
+  fs?: FsOps
+  nowMs?: () => number
+  timers?: TimerOps
+  signals?: SignalOps
+  spawn?: (path: string, args: readonly string[], options: { timeoutMs: number; env: Record<string, string>; maxOutputBytes: number }) => Promise<{ code: number; stdout: string; stderr: string }>
 }
 
 function versionParts(version: string): readonly [number, number, number] {
