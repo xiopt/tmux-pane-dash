@@ -67,9 +67,8 @@ function tagRuleset(): Record<string, unknown> {
   }
 }
 
-function environmentBody(name: string, reviewerId: number): Record<string, unknown> {
+function environmentBody(reviewerId: number): Record<string, unknown> {
   return {
-    name,
     reviewers: [{ type: "User", id: reviewerId }],
     wait_timer: 0,
     prevent_self_review: false,
@@ -132,8 +131,8 @@ function validateBranchRuleset(value: unknown): number {
 
 function validateEnvironmentBody(value: unknown, environment: string, reviewerId: number): void {
   const body = object(value, `${environment} environment`)
-  exactKeys(body, ["name", "reviewers", "wait_timer", "prevent_self_review", "deployment_branch_policy"], `${environment} environment`)
-  if (body.name !== environment || body.wait_timer !== 0 || body.prevent_self_review !== false) fail(`${environment} environment identity or protection is invalid`)
+  exactKeys(body, ["reviewers", "wait_timer", "prevent_self_review", "deployment_branch_policy"], `${environment} environment`)
+  if (body.wait_timer !== 0 || body.prevent_self_review !== false) fail(`${environment} environment protection is invalid`)
   if (!Array.isArray(body.reviewers) || body.reviewers.length !== 1) fail(`${environment} environment must have one reviewer`)
   const reviewer = object(body.reviewers[0], `${environment} reviewer`)
   exactKeys(reviewer, ["type", "id"], `${environment} reviewer`)
@@ -181,7 +180,7 @@ export async function writeBootstrapConfig(input: BootstrapInput): Promise<Boots
   const entries: Array<[string, unknown]> = [
     ["branch-ruleset.json", branchRuleset(input.reviewerId)],
     ["tag-ruleset.json", tagRuleset()],
-    ...environments.map((name) => [`${name}.json`, environmentBody(name, input.reviewerId)] as [string, unknown]),
+    ...environments.map((name) => [`${name}.json`, environmentBody(input.reviewerId)] as [string, unknown]),
     ...environments.map((name) => [`${name}-deployment-branch-policy.json`, deploymentBranchPolicy()] as [string, unknown]),
   ]
   for (const [name, value] of entries) await writeJson(join(output, name), value)

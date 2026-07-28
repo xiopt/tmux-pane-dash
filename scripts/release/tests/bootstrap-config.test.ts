@@ -50,7 +50,9 @@ test("bootstrap writes active branch/tag rulesets, selected environments, and ex
     for (const environment of environments) {
       const body = JSON.parse(await readFile(join(output, environmentFile(environment)), "utf8"))
       const policy = JSON.parse(await readFile(join(output, policyFile(environment)), "utf8"))
-      expect(body).toMatchObject({ name: environment, reviewers: [{ type: "User", id: reviewerId }], prevent_self_review: false })
+      expect(Object.keys(body).sort()).toEqual(["deployment_branch_policy", "prevent_self_review", "reviewers", "wait_timer"])
+      expect(body).not.toHaveProperty("name")
+      expect(body).toMatchObject({ reviewers: [{ type: "User", id: reviewerId }], prevent_self_review: false })
       expect(body.deployment_branch_policy).toEqual({ protected_branches: false, custom_branch_policies: true })
       expect(body).not.toHaveProperty("repository")
       expect(policy).toEqual({ name: "v*", type: "tag" })
@@ -116,6 +118,15 @@ test("bootstrap validation rejects self-review and reviewer or status-check subs
         const path = join(output, environmentFile(environments[0]))
         const body = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
         body.prevent_self_review = true
+        await writeFile(path, `${JSON.stringify(body)}\n`)
+      },
+    },
+    {
+      name: "environment name in body",
+      async apply(output) {
+        const path = join(output, environmentFile(environments[0]))
+        const body = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
+        body.name = environments[0]
         await writeFile(path, `${JSON.stringify(body)}\n`)
       },
     },
