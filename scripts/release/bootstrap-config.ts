@@ -17,6 +17,7 @@ const environments = ["github-draft", "npm-production", "release-promotion"] as 
 const environmentFiles = environments.map((name) => `${name}.json`)
 const deploymentBranchPolicyFiles = environments.map((name) => `${name}-deployment-branch-policy.json`)
 const expectedFiles = ["branch-ruleset.json", "tag-ruleset.json", ...environmentFiles, ...deploymentBranchPolicyFiles]
+const requiredStatusCheck = { context: "archive-dry-run", integration_id: 15368 } as const
 
 function fail(message: string): never {
   throw new Error(`bootstrap-config: ${message}`)
@@ -48,7 +49,7 @@ function branchRuleset(reviewerId: number): Record<string, unknown> {
     conditions: { ref_name: { include: ["refs/heads/master"], exclude: [] } },
     rules: [
       { type: "pull_request", parameters: { dismiss_stale_reviews_on_push: true, require_code_owner_review: false, require_last_push_approval: true, required_approving_review_count: 1, required_review_thread_resolution: true } },
-      { type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, do_not_enforce_on_create: false, required_status_checks: [{ context: "ci", integration_id: 15368 }] } },
+      { type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, do_not_enforce_on_create: false, required_status_checks: [requiredStatusCheck] } },
       { type: "non_fast_forward" },
       { type: "deletion" },
     ],
@@ -71,7 +72,7 @@ function environmentBody(name: string, reviewerId: number): Record<string, unkno
     name,
     reviewers: [{ type: "User", id: reviewerId }],
     wait_timer: 0,
-    prevent_self_review: true,
+    prevent_self_review: false,
     deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
   }
 }
@@ -108,14 +109,35 @@ async function readPrivateJson(path: string, label: string): Promise<unknown> {
   }
 }
 
-function validateEnvironmentBody(value: unknown, environment: string): void {
+function validateBranchRuleset(value: unknown): number {
+  const body = object(value, "branch ruleset")
+  const rules = body.rules
+  if (!Array.isArray(rules)) fail("branch ruleset rules are invalid")
+  const statusRules = rules.filter((rule) => typeof rule === "object" && rule !== null && !Array.isArray(rule) && (rule as Record<string, unknown>).type === "required_status_checks")
+  if (statusRules.length !== 1) fail("branch ruleset must have one required status-check rule")
+  const statusRule = object(statusRules[0], "branch required status-check rule")
+  const parameters = object(statusRule.parameters, "branch required status-check parameters")
+  if (parameters.strict_required_status_checks_policy !== true || parameters.do_not_enforce_on_create !== false) fail("branch required status-check policy is invalid")
+  if (!Array.isArray(parameters.required_status_checks) || parameters.required_status_checks.length !== 1) fail("branch ruleset must require one status context")
+  const statusCheck = object(parameters.required_status_checks[0], "branch required status context")
+  exactKeys(statusCheck, ["context", "integration_id"], "branch required status context")
+  if (statusCheck.context !== requiredStatusCheck.context || statusCheck.integration_id !== requiredStatusCheck.integration_id) fail("branch ruleset must require the terminal archive-dry-run status")
+
+  if (!Array.isArray(body.bypass_actors) || body.bypass_actors.length !== 1) fail("branch ruleset must have one bypass actor")
+  const bypassActor = object(body.bypass_actors[0], "branch ruleset bypass actor")
+  exactKeys(bypassActor, ["actor_id", "actor_type", "bypass_mode"], "branch ruleset bypass actor")
+  if (bypassActor.actor_type !== "User" || bypassActor.bypass_mode !== "always" || !Number.isSafeInteger(bypassActor.actor_id) || (bypassActor.actor_id as number) <= 0) fail("branch ruleset bypass actor is invalid")
+  return bypassActor.actor_id as number
+}
+
+function validateEnvironmentBody(value: unknown, environment: string, reviewerId: number): void {
   const body = object(value, `${environment} environment`)
   exactKeys(body, ["name", "reviewers", "wait_timer", "prevent_self_review", "deployment_branch_policy"], `${environment} environment`)
-  if (body.name !== environment || body.wait_timer !== 0 || body.prevent_self_review !== true) fail(`${environment} environment identity or protection is invalid`)
+  if (body.name !== environment || body.wait_timer !== 0 || body.prevent_self_review !== false) fail(`${environment} environment identity or protection is invalid`)
   if (!Array.isArray(body.reviewers) || body.reviewers.length !== 1) fail(`${environment} environment must have one reviewer`)
   const reviewer = object(body.reviewers[0], `${environment} reviewer`)
   exactKeys(reviewer, ["type", "id"], `${environment} reviewer`)
-  if (reviewer.type !== "User" || !Number.isSafeInteger(reviewer.id) || (reviewer.id as number) <= 0) fail(`${environment} reviewer is invalid`)
+  if (reviewer.type !== "User" || reviewer.id !== reviewerId || !Number.isSafeInteger(reviewer.id) || (reviewer.id as number) <= 0) fail(`${environment} reviewer is invalid or substituted`)
   const branchPolicy = object(body.deployment_branch_policy, `${environment} deployment branch policy`)
   exactKeys(branchPolicy, ["protected_branches", "custom_branch_policies"], `${environment} deployment branch policy`)
   if (branchPolicy.protected_branches !== false || branchPolicy.custom_branch_policies !== true) fail(`${environment} must select custom deployment branch policies`)
@@ -132,10 +154,10 @@ async function validateOutput(output: string): Promise<readonly string[]> {
   const expected = [...expectedFiles].sort()
   if (actual.length !== expected.length || actual.some((name, index) => name !== expected[index])) fail("output must contain exactly the bootstrap request bodies and one policy per environment")
 
-  await readPrivateJson(join(output, "branch-ruleset.json"), "branch ruleset")
+  const reviewerId = validateBranchRuleset(await readPrivateJson(join(output, "branch-ruleset.json"), "branch ruleset"))
   await readPrivateJson(join(output, "tag-ruleset.json"), "tag ruleset")
   for (const environment of environments) {
-    validateEnvironmentBody(await readPrivateJson(join(output, `${environment}.json`), `${environment} environment`), environment)
+    validateEnvironmentBody(await readPrivateJson(join(output, `${environment}.json`), `${environment} environment`), environment, reviewerId)
     validateDeploymentBranchPolicy(await readPrivateJson(join(output, `${environment}-deployment-branch-policy.json`), `${environment} deployment branch policy`), environment)
   }
   return expectedFiles.map((name) => join(output, name))

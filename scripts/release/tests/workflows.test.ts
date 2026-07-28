@@ -275,6 +275,20 @@ test("CI is read-only, ordered, and runs all four target commands plus isolated 
   expect(text.indexOf("needs: rust")).toBeLessThan(text.indexOf("needs: cli-tests"))
 })
 
+test("archive-dry-run is the terminal CI status and reaches the required CI graph", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  const terminal = parsed.jobs["archive-dry-run"]
+  expect(terminal).toBeDefined()
+  expect(terminal?.needs).toEqual(["packed-e2e"])
+  expect(terminal?.steps.some((step) => (step.run ?? "").includes("scripts/release/dry-run.ts"))).toBe(true)
+
+  for (const producer of ["packed-e2e", "installer-faults", "cli-tests", "four-targets", "rust", "version-check"]) {
+    expect(dependsOn(parsed, "archive-dry-run", producer), `archive-dry-run depends on ${producer}`).toBe(true)
+  }
+  expect(Object.values(parsed.jobs).every((job) => !job.needs.includes("archive-dry-run"))).toBe(true)
+})
+
 test("weekly compatibility is read-only, pinned at the minimum, and resolves latest once", async () => {
   const text = await workflow("opencode-weekly.yml")
   expect(text).toContain("schedule:")
