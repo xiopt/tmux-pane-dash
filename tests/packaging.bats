@@ -1,14 +1,13 @@
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   SCRATCH="$BATS_TEST_TMPDIR/source"
-  mkdir -p "$SCRATCH/pane-dash/src" "$SCRATCH/scripts" "$SCRATCH/docs"
+  mkdir -p "$SCRATCH/pane-dash/src" "$SCRATCH/scripts"
   cp "$ROOT/Makefile" "$SCRATCH/Makefile"
   cp "$ROOT/pane-dash/Cargo.toml" "$ROOT/pane-dash/Cargo.lock" "$SCRATCH/pane-dash/"
   cp "$ROOT/pane-dash/src/main.rs" "$SCRATCH/pane-dash/src/"
   cp "$ROOT/README.md" "$SCRATCH/README.md"
   cp "$ROOT/pane_dash.tmux" "$SCRATCH/"
   cp "$ROOT/scripts/open.sh" "$ROOT/scripts/tag.sh" "$SCRATCH/scripts/"
-  cp "$ROOT/docs/superpowers/specs/2026-07-22-v2-phase7-packaging-design.md" "$SCRATCH/docs/"
 
   FAKE_BIN="$BATS_TEST_TMPDIR/fake-bin"
   mkdir -p "$FAKE_BIN"

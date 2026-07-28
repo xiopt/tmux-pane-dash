@@ -56,7 +56,6 @@ test("the source manifest names the approved roots and executable policy", async
     "VERSION",
     "bun.lock",
     "package.json",
-    "docs",
     "opencode-plugin",
     "packages",
     "pane-dash",
@@ -74,14 +73,12 @@ test("the source manifest names the approved roots and executable policy", async
   expect(SOURCE_EXECUTABLES).not.toContain("packages/tmux-pane-dash/dist/cli.js")
 })
 
-test("the checked-in tree includes committed source roots and docs but no generated output", async () => {
+test("the checked-in tree includes approved source roots and omits local docs", async () => {
   const entries = await collectSourceManifest(process.cwd())
   const paths = entries.map((entry) => entry.path)
 
   for (const path of SOURCE_ROOTS) expect(paths.some((entry) => entry === path || entry.startsWith(`${path}/`))).toBe(true)
-  expect(paths).toContain("docs/superpowers/specs/2026-07-23-v0.1-release-distribution-design.md")
-  expect(paths).toContain("docs/release-bootstrap.md")
-  expect(paths).toContain("docs/release-runbook.md")
+  expect(paths.some((path) => path === "docs" || path.startsWith("docs/"))).toBe(false)
   expect(paths).toContain("scripts/release/clean-room.sh")
   expect(paths).toContain("scripts/release/ci-tmux.sh")
   expect(paths).toContain(".github/workflows/ci.yml")
@@ -98,7 +95,7 @@ test("the checked-in tree includes committed source roots and docs but no genera
 
 test("Task14 source packaging requires the three workflows and warms one disposable cache", async () => {
   const script = await readFile(join(process.cwd(), "tests/source_package.sh"), "utf8")
-  expect(script).toContain("MANIFEST=(.github .gitignore LICENSE Makefile README.md VERSION bun.lock package.json docs opencode-plugin packages pane-dash pane_dash.tmux release scripts spike tests tools)")
+  expect(script).toContain("MANIFEST=(.github .gitignore LICENSE Makefile README.md VERSION bun.lock package.json opencode-plugin packages pane-dash pane_dash.tmux release scripts spike tests tools)")
   expect(script).toContain("ci.yml opencode-weekly.yml release.yml")
   expect(script).toContain("release/verify-npm-provenance.ts")
   expect(script).toContain("release/tests/verify-npm-provenance.test.ts")
@@ -136,7 +133,7 @@ test("source archives are byte-identical across roots, with canonical root, path
 
     const inventory = await inspectSourceArchive(outputLeft, { tag: "v0.1.0", epoch: 1_721_728_000 })
     expect(inventory[0]).toMatchObject({ path: "tmux-pane-dash-v0.1.0", kind: "directory", mode: "0755", mtime: 1_721_728_000 })
-    expect(inventory.some((entry) => entry.path === "tmux-pane-dash-v0.1.0/docs/committed/guide.md")).toBe(true)
+    expect(inventory.some((entry) => entry.path === "tmux-pane-dash-v0.1.0/docs" || entry.path.includes("/docs/") )).toBe(false)
     expect(inventory.map((entry) => entry.path)).toEqual([...inventory.map((entry) => entry.path)].sort((a, b) => Buffer.from(a).compare(Buffer.from(b))))
     expect(inventory.every((entry) => entry.mtime === 1_721_728_000)).toBe(true)
     expect(inventory.find((entry) => entry.path.endsWith("/pane_dash.tmux"))?.mode).toBe("0755")
@@ -207,7 +204,7 @@ test("source manifests retain benign near-miss names", async () => {
 test("source archives reject an executable that is not in the explicit mode allowlist", async () => {
   const root = await temporaryFixture()
   try {
-    const path = join(root, "docs", "unlisted.sh")
+    const path = join(root, "scripts", "unlisted.sh")
     await writeFile(path, "#!/bin/sh\n")
     await chmod(path, 0o755)
     await expect(collectSourceManifest(root)).rejects.toThrow("unlisted executable")

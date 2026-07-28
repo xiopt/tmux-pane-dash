@@ -1,3 +1,10 @@
 pane-dash/target/
 bin/pane-dash
-.cortexkit/
+/.cortexkit/
+/docs/
+/.opencode/
+/.claude/
+/.agents/
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md

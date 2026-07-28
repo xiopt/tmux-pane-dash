@@ -28,9 +28,10 @@ section() {
 check_requirements() {
   local file=$1 rows
   rows="$(section "$file" Requirements)"
-  printf '%s\n' "$rows" | grep -Fxq '| tmux | >=3.6 | Always; v2 wire-format support floor |' || return
-  printf '%s\n' "$rows" | grep -Fxq '| Rust + Cargo | toolchain supporting Rust edition 2024 | Source build only |' || return
-  printf '%s\n' "$rows" | grep -Fxq '| make + standard `install` utility | Available locally | Source packaging |' || return
+  printf '%s\n' "$rows" | grep -Fxq '| tmux | >=3.6 | Dashboard runtime |' || return
+  printf '%s\n' "$rows" | grep -Fxq '| Node.js | >=20 | `npx` commands only |' || return
+  printf '%s\n' "$rows" | grep -Fxq '| Rust + Cargo | Rust edition 2024 toolchain | TPM and manual source builds |' || return
+  printf '%s\n' "$rows" | grep -Fxq '| make + standard `install` utility | Available locally | TPM and manual source builds |' || return
   printf '%s\n' "$rows" | grep -Fxq '| OpenCode | optional | Companion status producer only |'
 }
 
@@ -44,6 +45,7 @@ check_legacy_drift() {
   ! grep -Eq '^\| `⊘ stale` \|.*~' <<<"$status" || return
   ! grep -Fq '✖' "$file" || return
   ! grep -Eq '^\| `@pane-dash-(width|height)` \| `(80%|70%)`' <<<"$options" || return
+  ! grep -Fq 'docs/' "$file" || return
 
   for obsolete in \
     '@pane-dash-preview-layout' \
@@ -53,6 +55,7 @@ check_legacy_drift() {
     'open_v2.sh'; do
     ! grep -Fq -- "$obsolete" "$file" || return
   done
+  ! grep -Fiq 'release distribution' "$file"
   ! grep -Fiq 'v1.1 roadmap' "$file"
 }
 
@@ -117,23 +120,21 @@ check_keys() {
   require_text "$file" 'Printable unmodified/Shift text edits the query; `Backspace` deletes one Unicode scalar; `Esc` returns to navigation and retains the query. `?` is query text, not help.'
 }
 
-check_engine_policy() {
-  local file=$1 policy
-  for text in \
-    'With no `@pane-dash-engine` option, the plugin is Rust-first.' \
-    '`set -g @pane-dash-engine rust` is valid but unnecessary.' \
-    '`set -g @pane-dash-engine fzf` explicitly selects the legacy dashboard even if a Rust binary exists.' \
-    'An explicitly empty engine option is invalid, not absent.' \
-    "pane-dash: Rust binary not found; using legacy fzf (run 'make build' in the plugin directory or 'make install')" \
-    'pane-dash: @pane-dash-engine fzf is deprecated; supported through v2.x, removed no earlier than v3.0' \
-    'pane-dash: invalid @pane-dash-engine value; using Rust-first resolution' \
-    'fzf is deprecated in v2 but supported through v2.x and removed no earlier than v3.0.' \
-    'The legacy scripts stay present and tested until removal.'; do
-    require_text "$file" "$text" || return
+check_cli_commands() {
+  local file=$1
+  for command in \
+    'npx @xiopt/tmux-pane-dash@latest setup' \
+    'npx @xiopt/tmux-pane-dash@latest update' \
+    'npx @xiopt/tmux-pane-dash@latest doctor' \
+    'npx @xiopt/tmux-pane-dash@latest doctor --json' \
+    'npx @xiopt/tmux-pane-dash@latest uninstall' \
+    '--no-tmux' \
+    '--no-opencode' \
+    '--migrate' \
+    '--allow-downgrade'; do
+    require_text "$file" "$command" || return
   done
-  policy="$(section "$file" 'Engine migration and compatibility')"
-  ! grep -Eiq 'removed (in|during|before) v2' <<<"$policy" || return
-  ! grep -Eiq 'Rust dashboard.*requires fzf|fzf.*required.*Rust dashboard' <<<"$policy" || return
+  ! grep -Fq 'docs/' "$file"
 }
 
 check_config() {
@@ -181,22 +182,23 @@ PY
 
 @test "installation names the unconfigured-remote placeholder and executable local workflows" {
   for text in \
-    "set -g @plugin 'OWNER/tmux-pane-dash'" \
-    'this checkout has no configured canonical remote' \
-    'substitute the owner from the published repository URL before TPM use' \
+    "set -g @plugin 'xiopt/tmux-pane-dash'" \
     '<prefix> I' '<prefix> U' '$HOME/.tmux/plugins/tmux-pane-dash' \
-    'git clone <repository-url> "$HOME/.tmux/plugins/tmux-pane-dash"' \
-    'Replace `<repository-url>` with the published repository URL' \
+    'git clone https://github.com/xiopt/tmux-pane-dash.git "$HOME/.tmux/plugins/tmux-pane-dash"' \
     'cd "$HOME/.tmux/plugins/tmux-pane-dash"' \
     'run-shell "$HOME/.tmux/plugins/tmux-pane-dash/pane_dash.tmux"' \
     'tmux source-file "$HOME/.tmux.conf"'; do
     require_text "$README" "$text" || return
   done
-  ! grep -Fq 'youruser' "$README"
+  ! grep -Fq 'OWNER/tmux-pane-dash' "$README"
+  ! grep -Fq '<repository-url>' "$README"
 }
 
 @test "OpenCode companion status plugin setup and removal are actionable" {
   for text in \
+    '@xiopt/pane-dash-opencode@0.1.0' \
+    '--no-opencode' \
+    'OpenCode >=1.17.20' \
     'mkdir -p "$HOME/.config/opencode/plugin"' \
     'ln -sf "$PWD/opencode-plugin/pane-dash.ts" "$HOME/.config/opencode/plugin/pane-dash.ts"' \
     'Restart or reopen the OpenCode process' \
@@ -204,6 +206,10 @@ PY
     'Without the plugin, command-matched panes remain visible with `? unknown` status.'; do
     require_text "$README" "$text" || return
   done
+}
+
+@test "CLI commands and flags are documented exactly" {
+  check_cli_commands "$README"
 }
 
 @test "option status and key tables pair every current contract" {
@@ -216,8 +222,14 @@ PY
   check_config "$README"
 }
 
-@test "local verification includes the quoting integration gate" {
-  require_text "$README" 'tests/rust_engine_quoting_integration.sh'
+@test "installation safety guidance is actionable" {
+  for text in \
+    'only files recorded as owned by this package' \
+    'does not remove unrelated tmux or OpenCode settings' \
+    'stops before any mutation' \
+    '`--migrate` only for a recognized legacy ownership route'; do
+    require_text "$README" "$text" || return
+  done
 }
 
 @test "obsolete support claims are rejected only in their authoritative tables" {

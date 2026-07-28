@@ -168,54 +168,6 @@ SH
   [[ "$output" == *"BUN_BOOTSTRAP must be an exact Bun 1.3.14 executable"* ]]
 }
 
-@test "Task 1 gate commands use the validated Bun bootstrap outside Rust gates" {
-  plan="$repo_root/docs/superpowers/plans/2026-07-23-v0.1-release-distribution.md"
-  task_one="$BATS_TEST_TMPDIR/task-one.md"
-  sed -n '279,303p' "$plan" > "$task_one"
-  awk '/^### Task 1:/{keep=1} /^### Task 2:/{keep=0} keep' "$plan" >> "$task_one"
-
-  validate_task_one_commands() {
-    local commands=$1
-    ! grep -Eq '(^|[[:space:]`])bun([[:space:]`]|$)' "$commands" || return 1
-    ! grep -Eq '^tests/release/with-(rust|npa)\.sh -- scripts/release/clean-room\.sh -- .*spikes\.ts --musl ' "$commands" || return 1
-  }
-
-  required_commands=(
-    'tests/release/with-npa.sh -- scripts/release/clean-room.sh -- "$BUN_BOOTSTRAP" test scripts/release/tests/contracts.test.ts scripts/release/tests/spikes.test.ts scripts/release/tests/local-registry.test.ts'
-    'scripts/release/clean-room.sh -- "$BUN_BOOTSTRAP" test --cwd opencode-plugin'
-    'OPENCODE_PINNED_VERSION="$(scripts/release/clean-room.sh -- "$BUN_BOOTSTRAP" scripts/release/spikes.ts --normalize-opencode-version "$OPENCODE_1_17_20_BIN")"'
-    'scripts/release/clean-room.sh -- "$BUN_BOOTSTRAP" scripts/release/spikes.ts --musl aarch64-unknown-linux-musl --network=none'
-    'scripts/release/clean-room.sh -- "$BUN_BOOTSTRAP" scripts/release/spikes.ts --musl x86_64-unknown-linux-musl --network=none'
-    'tests/release/with-npa.sh -- scripts/release/clean-room.sh -- "$BUN_BOOTSTRAP" scripts/release/spikes.ts --opencode-1.17.20 "$OPENCODE_1_17_20_BIN" --registry-host=127.0.0.1'
-  )
-  for command in "${required_commands[@]}"; do
-    grep -F -- "$command" "$task_one"
-  done
-  grep -F -- 'tests/release/with-npa.sh -- scripts/release/clean-room.sh -- "$BUN_BOOTSTRAP" -e ' "$task_one"
-  grep -F -- 'npa("@xiopt/pane-dash-opencode@0.1.0").rawSpec !== "0.1.0"' "$task_one"
-  grep -Fx ': "${BUN_BOOTSTRAP:?BUN_BOOTSTRAP must name Bun 1.3.14}"' "$task_one"
-  grep -Fx 'case "$BUN_BOOTSTRAP" in /*) test -x "$BUN_BOOTSTRAP" ;; *) exit 64 ;; esac' "$task_one"
-  grep -Fx 'test "$("$BUN_BOOTSTRAP" --version)" = 1.3.14' "$task_one"
-
-  run validate_task_one_commands "$task_one"
-  [ "$status" -eq 0 ]
-
-  cp "$task_one" "$task_one.bare-bun"
-  printf '\nbun test scripts/release/tests/spikes.test.ts\n' >> "$task_one.bare-bun"
-  run validate_task_one_commands "$task_one.bare-bun"
-  [ "$status" -eq 1 ]
-
-  cp "$task_one" "$task_one.with-rust-musl"
-  printf '\ntests/release/with-rust.sh -- scripts/release/clean-room.sh -- "$BUN_BOOTSTRAP" scripts/release/spikes.ts --musl x86_64-unknown-linux-musl --network=none\n' >> "$task_one.with-rust-musl"
-  run validate_task_one_commands "$task_one.with-rust-musl"
-  [ "$status" -eq 1 ]
-
-  cp "$task_one" "$task_one.with-npa-musl"
-  printf '\ntests/release/with-npa.sh -- scripts/release/clean-room.sh -- "$BUN_BOOTSTRAP" scripts/release/spikes.ts --musl x86_64-unknown-linux-musl --network=none\n' >> "$task_one.with-npa-musl"
-  run validate_task_one_commands "$task_one.with-npa-musl"
-  [ "$status" -eq 1 ]
-}
-
 @test "uses a short unique tmux socket name for macOS unix-socket limits" {
   run "$repo_root/scripts/release/clean-room.sh" -- sh -c 'case "$PANE_DASH_TMUX_SOCKET" in pd-????????) [ "${#PANE_DASH_TMUX_SOCKET}" -le 11 ] ;; *) exit 1 ;; esac'
   [ "$status" -eq 0 ]

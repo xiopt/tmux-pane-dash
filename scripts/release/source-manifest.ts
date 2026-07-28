@@ -13,7 +13,6 @@ export const SOURCE_ROOTS = [
   "VERSION",
   "bun.lock",
   "package.json",
-  "docs",
   "opencode-plugin",
   "packages",
   "pane-dash",
@@ -136,7 +135,7 @@ function isGeneratedPath(path: string): boolean {
 }
 
 function isIgnorableTopLevel(name: string): boolean {
-  return name === ".git" || name === ".cortexkit" || name === "node_modules" || name === ".npm" || name === ".npm-cache" || name === "npm-cache" || name === "bun-cache" || name === "target" || name === "dist" || name === "bin" || name === ".DS_Store" || name.startsWith("._") || /\.(?:tar|tar\.gz|tgz|zip|sha256)$/i.test(name)
+  return name === ".git" || name === "docs" || name === ".cortexkit" || name === ".opencode" || name === ".claude" || name === ".agents" || name === "AGENTS.md" || name === "CLAUDE.md" || name === "GEMINI.md" || name === "node_modules" || name === ".npm" || name === ".npm-cache" || name === "npm-cache" || name === "bun-cache" || name === "target" || name === "dist" || name === "bin" || name === ".DS_Store" || name.startsWith("._") || /\.(?:tar|tar\.gz|tgz|zip|sha256)$/i.test(name)
 }
 
 async function canonicalRoot(input: string): Promise<string> {

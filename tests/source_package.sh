@@ -4,7 +4,7 @@ set -euo pipefail
 set -m
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-MANIFEST=(.github .gitignore LICENSE Makefile README.md VERSION bun.lock package.json docs opencode-plugin packages pane-dash pane_dash.tmux release scripts spike tests tools)
+MANIFEST=(.github .gitignore LICENSE Makefile README.md VERSION bun.lock package.json opencode-plugin packages pane-dash pane_dash.tmux release scripts spike tests tools)
 EXPECTED_WORKFLOWS=(ci.yml opencode-weekly.yml release.yml)
 scratch_root="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/pane-dash-source-package.XXXXXX")" && pwd -P)"
 archive="$scratch_root/pane-dash-source.tar"
@@ -307,8 +307,7 @@ done
   done
   [ -f "$extracted/release/verify-npm-provenance.ts" ] || fail 'source archive is missing the release verifier source'
   [ -f "$extracted/release/tests/verify-npm-provenance.test.ts" ] || fail 'source archive is missing the release verifier test'
-  [ -f "$extracted/docs/release-bootstrap.md" ] || fail 'source archive is missing the release bootstrap documentation'
-  [ -f "$extracted/docs/release-runbook.md" ] || fail 'source archive is missing the release runbook documentation'
+  [ ! -e "$extracted/docs" ] || fail 'source archive contains ignored documentation'
   [ -x "$extracted/scripts/release/ci-tmux.sh" ] || fail 'source archive is missing the executable CI tmux helper'
   assert_no_forbidden_paths
   BUN_INSTALL_CACHE_DIR="$warm_cache" npm_config_cache="$warm_cache" "$bun_bin" install --frozen-lockfile --offline --ignore-scripts --cwd "$extracted" >/dev/null
