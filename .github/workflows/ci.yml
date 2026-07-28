@@ -43,8 +43,8 @@ jobs:
           test "$(rustc --version | awk '{print $2}')" = "1.96.1"
           cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check
           cargo clippy --workspace --all-targets --all-features --manifest-path pane-dash/Cargo.toml -- -D warnings
-          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml
-          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml -- --ignored
+          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml -- --test-threads=1
+          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml -- --ignored --test-threads=1
       - run: |
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- bats tests
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- shellcheck pane_dash.tmux scripts/*.sh tests/*.sh spike/*.sh spike/probes/*.sh spike/perf/*.sh
@@ -134,7 +134,7 @@ jobs:
           rustup target add "${{ matrix.rust_target }}"
           if [[ "${{ matrix.rust_target }}" == *unknown-linux-musl ]]; then sudo apt-get update; sudo apt-get install -y musl-tools; fi
           cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"
-          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"
+          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}" -- --test-threads=1
           test -x "pane-dash/target/${{ matrix.rust_target }}/release/pane-dash"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

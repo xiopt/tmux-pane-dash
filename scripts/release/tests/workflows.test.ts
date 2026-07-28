@@ -246,6 +246,26 @@ function assertCiCliNpaIsolation(workflow: ParsedWorkflow): void {
   }
 }
 
+const cargoTestPrefix = "cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml"
+
+function assertSerialCargoTestCommands(body: string, expected: string[], label: string): void {
+  const commands = body.split("\n").map((line) => line.trim()).filter((line) => line.startsWith(cargoTestPrefix))
+  if (JSON.stringify(commands) !== JSON.stringify(expected)) throw new Error(`${label} must use exact serial commands`)
+}
+
+function assertRustTestSerialization(body: string): void {
+  const expected = [
+    `${cargoTestPrefix} -- --test-threads=1`,
+    `${cargoTestPrefix} -- --ignored --test-threads=1`,
+  ]
+  assertSerialCargoTestCommands(body, expected, "rust process-spawning tests")
+}
+
+function assertFourTargetTestSerialization(body: string): void {
+  const target = `${cargoTestPrefix} --target "\${{ matrix.rust_target }}"`
+  assertSerialCargoTestCommands(body, [`${target} -- --test-threads=1`], "four-target process-spawning tests")
+}
+
 function assertPromotionGraph(workflow: ParsedWorkflow): void {
   const job = workflow.jobs["promote-release"]
   if (!job) throw new Error("promote-release is missing")
@@ -290,7 +310,7 @@ test("CI is read-only, ordered, and runs all four target commands plus isolated 
     "x86_64-unknown-linux-musl",
   ]) expect(text).toContain(target)
   expect(text).toContain('cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"')
-  expect(text).toContain('cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"')
+  expect(text).toContain('cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}" -- --test-threads=1')
   for (const command of [
     "cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check",
     "cargo clippy --workspace --all-targets --all-features --manifest-path pane-dash/Cargo.toml -- -D warnings",
@@ -306,6 +326,25 @@ test("CI is read-only, ordered, and runs all four target commands plus isolated 
   }
   expect(text.indexOf("needs: version-check")).toBeLessThan(text.indexOf("needs: rust"))
   expect(text.indexOf("needs: rust")).toBeLessThan(text.indexOf("needs: cli-tests"))
+})
+
+test("Rust and four-target process-spawning tests reject missing or parallel commands", async () => {
+  const text = await workflow("ci.yml")
+  const rust = job(text, "rust")
+  const fourTargets = job(text, "four-targets")
+  const active = `${cargoTestPrefix} -- --test-threads=1`
+  const ignored = `${cargoTestPrefix} -- --ignored --test-threads=1`
+  const target = `${cargoTestPrefix} --target "\${{ matrix.rust_target }}" -- --test-threads=1`
+
+  expect(() => assertRustTestSerialization(rust)).not.toThrow()
+  expect(() => assertRustTestSerialization(rust.replace(ignored, ""))).toThrow(/exact serial commands/)
+  expect(() => assertRustTestSerialization(rust.replace(active, active.replace(" -- --test-threads=1", "")))).toThrow(/exact serial commands/)
+  const reversed = rust.replace(active, "__active__").replace(ignored, active).replace("__active__", ignored)
+  expect(() => assertRustTestSerialization(reversed)).toThrow(/exact serial commands/)
+
+  expect(() => assertFourTargetTestSerialization(fourTargets)).not.toThrow()
+  expect(() => assertFourTargetTestSerialization(fourTargets.replace(target, ""))).toThrow(/exact serial commands/)
+  expect(() => assertFourTargetTestSerialization(fourTargets.replace(target, target.replace(" -- --test-threads=1", "")))).toThrow(/exact serial commands/)
 })
 
 test("archive-dry-run is the terminal CI status and reaches the required CI graph", async () => {
