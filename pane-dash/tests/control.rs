@@ -5,7 +5,7 @@ use pane_dash::control::{
 
 #[cfg(unix)]
 mod actor_tests {
-    use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+    use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path};
 
     use pane_dash::control::{CONTROL_SNAPSHOT_COMMAND, ControlEvent, connect_control};
     use tempfile::TempDir;
@@ -35,10 +35,37 @@ mod actor_tests {
         .expect("marker timed out")
     }
 
+    fn run_shell_detector(fake: &Path, marker: &Path, input: &[u8]) {
+        let mut child = std::process::Command::new(fake)
+            .arg(marker)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
     fn real_tmux() -> std::path::PathBuf {
         std::env::var_os("TMUX_BIN")
             .unwrap_or_else(|| "tmux".into())
             .into()
+    }
+
+    #[test]
+    fn shell_detector_ignores_eof_and_records_actual_commands() {
+        let dir = TempDir::new().unwrap();
+        let no_second = dir.path().join("no-second");
+        let early = dir.path().join("early");
+        let fake = fake_tmux(
+            &dir,
+            "IFS= read -r _\nexec 3<&0\n(\n  if IFS= read -r command <&3; then\n    printf '%s\\n' \"$command\" > \"$1\"\n  fi\n) &\nreader=$!\nexec 3<&-\nwait \"$reader\"",
+        );
+
+        run_shell_detector(&fake, &no_second, b"first\n");
+        assert!(!no_second.exists());
+
+        run_shell_detector(&fake, &early, b"first\nearly second\n");
+        assert_eq!(fs::read_to_string(early).unwrap(), "early second\n");
     }
 
     #[tokio::test]
@@ -177,7 +204,7 @@ mod actor_tests {
         let fake = fake_tmux(
             &dir,
             &format!(
-                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\necho first > '{}'\n(\n  echo armed > '{}'\n  IFS= read -r command\n  printf '%s\\n' \"$command\" > '{}'\n) <&0 &\nreader=$!\nIFS= read -r _ < '{}'\nkill \"$reader\" 2>/dev/null || :\nwait \"$reader\" 2>/dev/null || :\nprintf '%s\\n' '%begin 2 2 1'\nprintf '\\036$7\\037%%1\\n'\nprintf '%s\\n' '%end 2 2 1'\nIFS= read -r _\necho second > '{}'\nprintf '%s\\n' '%begin 2 3 1' '%end 2 3 1'",
+                "printf '%s\\n' '%begin 1 1 1' '%end 1 1 1'\nIFS= read -r _\necho first > '{}'\nexec 3<&0\n(\n  echo armed > '{}'\n  if IFS= read -r command <&3; then\n    printf '%s\\n' \"$command\" > '{}'\n  fi\n) &\nreader=$!\nexec 3<&-\nIFS= read -r _ < '{}'\nkill \"$reader\" 2>/dev/null || :\nwait \"$reader\" 2>/dev/null || :\nprintf '%s\\n' '%begin 2 2 1'\nprintf '\\036$7\\037%%1\\n'\nprintf '%s\\n' '%end 2 2 1'\nIFS= read -r _\necho second > '{}'\nprintf '%s\\n' '%begin 2 3 1' '%end 2 3 1'",
                 first_read.display(),
                 reader_armed.display(),
                 early_write.display(),
