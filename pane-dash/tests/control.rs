@@ -45,6 +45,7 @@ mod actor_tests {
         assert!(child.wait().unwrap().success());
     }
 
+    #[cfg(target_os = "macos")]
     fn real_tmux() -> std::path::PathBuf {
         std::env::var_os("TMUX_BIN")
             .unwrap_or_else(|| "tmux".into())
@@ -823,6 +824,7 @@ mod actor_tests {
         assert_eq!(marker(&exited).await, "exited\n");
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     #[ignore = "requires installed tmux >= 3.6 and macOS script(1) PTY support"]
     async fn real_tmux_control_actor() {
@@ -925,6 +927,26 @@ mod actor_tests {
             let _ = pty.wait();
         });
     }
+}
+
+#[test]
+fn real_tmux_control_actor_keeps_the_macos_only_ignore_contract() {
+    const CONTRACT: [&str; 4] = [
+        "#[cfg(target_os = \"macos\")]",
+        "#[tokio::test]",
+        "#[ignore = \"requires installed tmux >= 3.6 and macOS script(1) PTY support\"]",
+        "async fn real_tmux_control_actor()",
+    ];
+
+    let source = include_str!("control.rs")
+        .lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        source.contains(&CONTRACT.join("\n")),
+        "real_tmux_control_actor must remain macOS-only and ignored"
+    );
 }
 
 fn guard(timestamp: u64, command_number: u64) -> GuardId {
