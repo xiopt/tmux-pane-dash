@@ -205,6 +205,27 @@ function assertTmuxProvisioning(workflow: ParsedWorkflow, workflowName: string):
   }
 }
 
+const wrappedBatsCommand = "tests/release/with-rust.sh -- scripts/release/clean-room.sh -- bats tests"
+
+const isBatsProvision = (step: ParsedStep): boolean => {
+  const run = step.run ?? ""
+  return run.includes("sudo apt-get install -y bats") &&
+    run.includes('test "$(command -v bats)" = "/usr/bin/bats"') &&
+    run.includes("bats_version=$(/usr/bin/bats --version)") &&
+    run.includes('test -n "$bats_version"') &&
+    run.includes('[[ "$bats_version" =~ ^Bats[[:space:]]+([1-9][0-9]*)\\. ]]')
+}
+
+function assertBatsProvisioning(workflow: ParsedWorkflow): void {
+  const rust = workflow.jobs["rust"]
+  if (!rust) throw new Error("rust job is missing")
+  const provision = rust.steps.findIndex(isBatsProvision)
+  const bats = rust.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === wrappedBatsCommand))
+  if (bats < 0) throw new Error("rust job must run Bats through with-rust and clean-room")
+  if (provision < 0) throw new Error("rust job must provision distro Bats at /usr/bin")
+  if (provision >= bats) throw new Error("rust job must provision Bats before the wrapped Bats command")
+}
+
 function assertArchiveDryRunDependencies(workflow: ParsedWorkflow): void {
   const job = workflow.jobs["archive-dry-run"]
   if (!job) throw new Error("archive-dry-run is missing")
@@ -286,7 +307,10 @@ function assertWorkflowGraph(text: string, workflowName: string): void {
   assertArtifactGraph(workflow)
   assertTmuxProvisioning(workflow, workflowName)
   assertPackedE2EGraph(workflow)
-  if (workflowName === "ci.yml") assertCiCliNpaIsolation(workflow)
+  if (workflowName === "ci.yml") {
+    assertCiCliNpaIsolation(workflow)
+    assertBatsProvisioning(workflow)
+  }
   if (workflowName === "release.yml") assertPromotionGraph(workflow)
 }
 
@@ -616,6 +640,33 @@ test("workflow graph rejects clean-room work without a prior tmux and Bun export
   const nextStep = text.indexOf("      - run:", provisionStart)
   const broken = text.slice(0, provisionStart) + text.slice(nextStep)
   expect(() => assertWorkflowGraph(broken, "ci.yml")).toThrow(/TMUX_BIN and BUN_BOOTSTRAP/)
+})
+
+test("Rust Bats requires ordered distro provisioning and the wrapped command", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  const rust = parsed.jobs["rust"]
+  if (!rust) throw new Error("rust job is missing")
+  const provisionIndex = rust.steps.findIndex(isBatsProvision)
+  const batsIndex = rust.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === wrappedBatsCommand))
+  if (provisionIndex < 0 || batsIndex < 0) throw new Error("fixture workflow is missing the Bats steps")
+  expect(() => assertBatsProvisioning(parsed)).not.toThrow()
+
+  const withRustSteps = (steps: ParsedStep[]): ParsedWorkflow => ({
+    ...parsed,
+    jobs: { ...parsed.jobs, rust: { ...rust, steps } },
+  })
+  expect(() => assertBatsProvisioning(withRustSteps(rust.steps.filter((_, index) => index !== provisionIndex)))).toThrow(/provision/)
+
+  const reorderedSteps = [...rust.steps]
+  const provisionStep = reorderedSteps.splice(provisionIndex, 1)[0]!
+  reorderedSteps.splice(batsIndex, 0, provisionStep)
+  expect(() => assertBatsProvisioning(withRustSteps(reorderedSteps))).toThrow(/before/)
+
+  for (const command of ["bats tests", "/usr/bin/bats tests"]) {
+    const bareInvocation = rust.steps.map((step, index) => index === batsIndex ? { ...step, run: (step.run ?? "").replace(wrappedBatsCommand, command) } : step)
+    expect(() => assertBatsProvisioning(withRustSteps(bareInvocation))).toThrow(/with-rust/)
+  }
 })
 
 test("workflow graph rejects a bare packed E2E command", async () => {
