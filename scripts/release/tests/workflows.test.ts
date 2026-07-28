@@ -26,6 +26,217 @@ const permissions = (body: string): Record<string, string> => {
   return Object.fromEntries([...block.matchAll(/^      ([A-Za-z-]+): ([^\n]+)$/gm)].map((match) => [match[1], match[2]]))
 }
 
+type ParsedStep = {
+  name?: string
+  uses?: string
+  run?: string
+  with: Record<string, string>
+  env: Record<string, string>
+}
+
+type ParsedJob = {
+  name: string
+  needs: string[]
+  env: Record<string, string>
+  permissions: Record<string, string>
+  steps: ParsedStep[]
+}
+
+type ParsedWorkflow = { jobs: Record<string, ParsedJob> }
+
+const indentOf = (line: string): number => line.length - line.trimStart().length
+const scalar = (value: string): string => value.trim().replace(/\s+#.*$/, "")
+
+function nestedMap(lines: string[], start: number, end: number, headerIndent: number, header: string): Record<string, string> {
+  const result: Record<string, string> = {}
+  const headerIndex = lines.findIndex((line, index) => index >= start && index < end && indentOf(line) === headerIndent && line.trimStart().startsWith(`${header}:`))
+  if (headerIndex < 0) return result
+  for (let index = headerIndex + 1; index < end; index += 1) {
+    const line = lines[index]!
+    const indent = indentOf(line)
+    if (line.trim() && indent <= headerIndent) break
+    if (indent !== headerIndent + 2) continue
+    const match = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line.trim())
+    if (match) result[match[1]!] = scalar(match[2]!)
+  }
+  return result
+}
+
+function parseStep(lines: string[], start: number, end: number): ParsedStep {
+  const step: ParsedStep = { with: {}, env: {} }
+  const header = lines[start]!.trim().slice(1).trim()
+  const headerMatch = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(header)
+  if (headerMatch) {
+    const key = headerMatch[1]!, value = scalar(headerMatch[2]!)
+    if (key === "name") step.name = value
+    else if (key === "uses") step.uses = value
+    else if (key === "run") step.run = value === "|" || value === ">" ? lines.slice(start + 1, end).map((line) => line.trimStart()).join("\n") : value
+  }
+  for (let index = start + 1; index < end; index += 1) {
+    const line = lines[index]!
+    if (!line.trim() || indentOf(line) !== 8) continue
+    const match = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line.trim())
+    if (!match) continue
+    const key = match[1]!, value = scalar(match[2]!)
+    if (key === "name") step.name = value
+    else if (key === "uses") step.uses = value
+    else if (key === "run") {
+      if (value === "|" || value === ">") {
+        const block: string[] = []
+        for (let body = index + 1; body < end; body += 1) {
+          const bodyLine = lines[body]!
+          if (bodyLine.trim() && indentOf(bodyLine) <= 8) break
+          block.push(bodyLine.trimStart())
+        }
+        step.run = block.join("\n")
+      } else step.run = value
+    } else if (key === "with" || key === "env") {
+      const target = key === "with" ? step.with : step.env
+      for (let nested = index + 1; nested < end; nested += 1) {
+        const nestedLine = lines[nested]!
+        const nestedIndent = indentOf(nestedLine)
+        if (nestedLine.trim() && nestedIndent <= 8) break
+        if (nestedIndent !== 10) continue
+        const nestedMatch = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(nestedLine.trim())
+        if (nestedMatch) target[nestedMatch[1]!] = scalar(nestedMatch[2]!)
+      }
+    }
+  }
+  return step
+}
+
+function parseWorkflow(text: string): ParsedWorkflow {
+  const lines = text.replaceAll("\r\n", "\n").split("\n")
+  const starts = lines.flatMap((line, index) => {
+    const match = /^  ([A-Za-z0-9_-]+):\s*$/.exec(line)
+    return match ? [{ index, name: match[1]! }] : []
+  })
+  const jobs: Record<string, ParsedJob> = {}
+  for (const [position, current] of starts.entries()) {
+    const end = starts[position + 1]?.index ?? lines.length
+    const needsLine = lines.slice(current.index + 1, end).find((line) => indentOf(line) === 4 && line.trimStart().startsWith("needs:"))
+    const needsValue = needsLine?.slice(needsLine.indexOf(":") + 1).trim() ?? ""
+    const needs = needsValue.startsWith("[")
+      ? needsValue.slice(1, -1).split(",").map((value) => scalar(value)).filter(Boolean)
+      : needsValue ? [scalar(needsValue)] : []
+    const stepStarts = lines.flatMap((line, index) => index > current.index && index < end && indentOf(line) === 6 && /^-\s/.test(line.trimStart()) ? [index] : [])
+    const steps = stepStarts.map((index, stepPosition) => parseStep(lines, index, stepStarts[stepPosition + 1] ?? end))
+    jobs[current.name] = {
+      name: current.name,
+      needs,
+      env: nestedMap(lines, current.index + 1, end, 4, "env"),
+      permissions: nestedMap(lines, current.index + 1, end, 4, "permissions"),
+      steps,
+    }
+  }
+  return { jobs }
+}
+
+const stepCommands = (step: ParsedStep): string[] => (step.run ?? "").split("\n").filter((line) => !line.trimStart().startsWith("#"))
+const hasGhCommand = (step: ParsedStep): boolean => stepCommands(step).some((line) => /\bgh\s+(?:api|release|run|attestation)\b/.test(line))
+const jobHasGhAuth = (job: ParsedJob): boolean => job.env.GH_TOKEN === "${{ github.token }}" || job.steps.some((step) => step.env.GH_TOKEN === "${{ github.token }}")
+
+function assertGhAuthentication(workflow: ParsedWorkflow, text: string): void {
+  if (/\b(?:NPM_TOKEN|NODE_AUTH_TOKEN|GITHUB_TOKEN)\b/.test(text)) throw new Error("workflow contains a forbidden credential")
+  for (const job of Object.values(workflow.jobs)) {
+    const gh = job.steps.some(hasGhCommand)
+    if (gh !== jobHasGhAuth(job)) throw new Error(`${job.name} GH commands must map to exactly one GH_TOKEN-authenticated job`)
+  }
+  const expected: Record<string, Record<string, string>> = {
+    "draft-release": { contents: "write", "id-token": "write", attestations: "write" },
+    "validate-draft": { contents: "read" },
+    "promote-release": { contents: "write", actions: "read", deployments: "read" },
+  }
+  for (const [name, permissions] of Object.entries(expected)) {
+    const job = workflow.jobs[name]
+    if (job && jobHasGhAuth(job) && JSON.stringify(job.permissions) !== JSON.stringify(permissions)) throw new Error(`${name} has broader or different permissions than its GH commands require`)
+  }
+}
+
+const normalizedArtifact = (value: string): string => value.replace(/\$\{\{[^}]+\}\}/g, "*")
+const globMatches = (value: string, pattern: string): boolean => {
+  const escaped = normalizedArtifact(pattern).replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*")
+  return new RegExp(`^${escaped}$`).test(normalizedArtifact(value))
+}
+
+function dependsOn(workflow: ParsedWorkflow, consumer: string, producer: string, seen = new Set<string>()): boolean {
+  if (consumer === producer) return true
+  if (seen.has(consumer)) return false
+  seen.add(consumer)
+  return (workflow.jobs[consumer]?.needs ?? []).some((need) => need === producer || dependsOn(workflow, need, producer, seen))
+}
+
+function assertArtifactGraph(workflow: ParsedWorkflow): void {
+  const producers: Array<{ name: string; job: string }> = []
+  const consumers: Array<{ name?: string; pattern?: string; job: string }> = []
+  for (const job of Object.values(workflow.jobs)) for (const step of job.steps) {
+    if (step.uses?.startsWith("actions/upload-artifact@")) {
+      if (!step.with.name) throw new Error(`${job.name} artifact producer has no name`)
+      producers.push({ name: step.with.name, job: job.name })
+    }
+    if (step.uses?.startsWith("actions/download-artifact@")) {
+      if (!step.with.name && !step.with.pattern) throw new Error(`${job.name} artifact consumer has no name or pattern`)
+      consumers.push({ name: step.with.name, pattern: step.with.pattern, job: job.name })
+    }
+  }
+  for (const consumer of consumers) {
+    const matches = producers.filter((producer) => consumer.name ? globMatches(producer.name, consumer.name) : globMatches(producer.name, consumer.pattern!))
+    if (matches.length === 0) throw new Error(`${consumer.job} consumes an artifact without a producer`)
+    if (matches.some((producer) => !dependsOn(workflow, consumer.job, producer.job))) throw new Error(`${consumer.job} consumes an artifact before its producer`)
+  }
+}
+
+function hasToolProvision(job: ParsedJob, before: number): boolean {
+  return job.steps.slice(0, before).some((step) => {
+    const run = step.run ?? ""
+    return run.includes("scripts/release/ci-tmux.sh") && run.includes("export TMUX_BIN") && run.includes("BUN_BOOTSTRAP=") && run.includes("GITHUB_ENV")
+  })
+}
+
+function assertTmuxProvisioning(workflow: ParsedWorkflow, workflowName: string): void {
+  const explicitlyRequired = workflowName === "release.yml" ? ["build-test", "build-four-targets", "validate-draft"] : workflowName === "ci.yml" ? ["four-targets"] : []
+  for (const job of Object.values(workflow.jobs)) {
+    const dependentStep = job.steps.findIndex((step) => {
+      const run = step.run ?? ""
+      return run.includes("scripts/release/clean-room.sh") || run.includes("packed-e2e.test.ts") || run.includes("tests/source_package.sh") || /\bbats\s+tests\b/.test(run)
+    })
+    const required = dependentStep >= 0 ? dependentStep : explicitlyRequired.includes(job.name) ? job.steps.length : -1
+    if (required >= 0 && !hasToolProvision(job, required)) throw new Error(`${workflowName}:${job.name} needs TMUX_BIN and BUN_BOOTSTRAP before clean-room or tmux work`)
+  }
+}
+
+function assertPackedE2EGraph(workflow: ParsedWorkflow): void {
+  for (const job of Object.values(workflow.jobs)) for (const step of job.steps) {
+    const run = step.run ?? ""
+    if (!run.includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts")) continue
+    for (const wrapper of ["tests/release/with-node20.sh --", "tests/release/with-rust.sh --", "scripts/release/clean-room.sh --"]) if (!run.includes(wrapper)) throw new Error(`${job.name} has a bare packed E2E invocation`)
+    if (!run.includes("TARGET_KEY=linux-x64")) throw new Error(`${job.name} packed E2E must select linux-x64`)
+  }
+}
+
+function assertPromotionGraph(workflow: ParsedWorkflow): void {
+  const job = workflow.jobs["promote-release"]
+  if (!job) throw new Error("promote-release is missing")
+  if (job.steps.some((step) => (step.run ?? "").includes("approval-evidence") || step.with.name === "approval-evidence")) throw new Error("promotion has an impossible approval-evidence artifact dependency")
+  const proof = job.steps.findIndex((step) => {
+    const run = step.run ?? ""
+    return run.includes("/environments/release-promotion") && run.includes("deployments?sha=$GITHUB_SHA") && run.includes("/statuses?") && run.includes("actions/runs/$GITHUB_RUN_ID/jobs") && run.includes("required_reviewers") && run.includes('state !== "in_progress"')
+  })
+  const mutation = job.steps.findIndex((step) => (step.run ?? "").includes("gh release edit"))
+  if (proof < 0 || mutation < 0 || proof >= mutation) throw new Error("promotion mutation is not preceded by direct live deployment proof")
+  const proofRun = job.steps[proof]!.run ?? ""
+  if (proofRun.includes("conclusion !== \"success\"") || proofRun.includes("approval-response")) throw new Error("promotion uses synthetic completed-job or approval artifact proof")
+}
+
+function assertWorkflowGraph(text: string, workflowName: string): void {
+  const workflow = parseWorkflow(text)
+  assertGhAuthentication(workflow, text)
+  assertArtifactGraph(workflow)
+  assertTmuxProvisioning(workflow, workflowName)
+  assertPackedE2EGraph(workflow)
+  if (workflowName === "release.yml") assertPromotionGraph(workflow)
+}
+
 test("CI is read-only, ordered, and runs all four target commands plus isolated contracts", async () => {
   const text = await workflow("ci.yml")
   expect(text).toContain("pull_request:")
@@ -258,16 +469,17 @@ test("draft validation verifies each exact release asset with the tagged workflo
   expect(validation).not.toContain('gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY"; done')
 })
 
-test("promotion consumes sanitized approval and environment proof before draft=false", async () => {
+test("promotion consumes live protected-environment proof before draft=false", async () => {
   const text = await workflow("release.yml")
   const promote = job(text, "promote-release")
-  for (const value of ["--verify-environment", "--tagged-workflow", "--approval-evidence", "--deployments", "--deployment-statuses", "--jobs", "environment-approval"]) expect(promote).toContain(value)
-  const proof = promote.indexOf("--verify-environment")
+  for (const value of ["/environments/release-promotion", "deployments?sha=$GITHUB_SHA", "/statuses?per_page=100", "actions/runs/$GITHUB_RUN_ID/jobs", "required_reviewers", 'state !== "in_progress"']) expect(promote).toContain(value)
+  const proof = promote.indexOf("Prove the active approved release-promotion deployment")
   const edit = promote.indexOf("gh release edit")
   expect(proof).toBeGreaterThanOrEqual(0)
   expect(edit).toBeGreaterThan(proof)
-  expect(promote).toContain("approval-evidence.json")
-  expect(promote).toContain("approval-request.sha256")
+  expect(promote).not.toContain("approval-evidence")
+  expect(promote).not.toContain("--verify-environment")
+  expect(promote).not.toContain("conclusion !== \"success\"")
 })
 
 test("both publishable package manifests retain the exact public repository URL", async () => {
@@ -275,4 +487,35 @@ test("both publishable package manifests retain the exact public repository URL"
     const pkg = JSON.parse(await readFile(join(root, path), "utf8"))
     expect(pkg.repository).toEqual({ type: "git", url: "git+https://github.com/xiopt/tmux-pane-dash.git" })
   }
+})
+
+test("workflow graph proves authentication, artifact producers, isolated tmux, and packed E2E edges", async () => {
+  for (const name of ["ci.yml", "opencode-weekly.yml", "release.yml"]) assertWorkflowGraph(await workflow(name), name)
+})
+
+test("workflow graph rejects a GH command without authenticated job scope", async () => {
+  const text = await workflow("release.yml")
+  const broken = text.replace("      GH_TOKEN: ${{ github.token }}\n", "")
+  expect(() => assertWorkflowGraph(broken, "release.yml")).toThrow(/GH_TOKEN-authenticated/)
+})
+
+test("workflow graph rejects an artifact consumer without a reachable producer", async () => {
+  const text = await workflow("release.yml")
+  const broken = text.replace(/      - uses: actions\/upload-artifact@[^\n]+\n        with:\n          name: verified-handoff\n[\s\S]*?          if-no-files-found: error\n/, "")
+  expect(broken).not.toContain("name: verified-handoff\n          path: ${{ runner.temp }}/verified-handoff/*")
+  expect(() => assertWorkflowGraph(broken, "release.yml")).toThrow(/without a producer|producer/)
+})
+
+test("workflow graph rejects clean-room work without a prior tmux and Bun export", async () => {
+  const text = await workflow("ci.yml")
+  const provisionStart = text.indexOf("      - name: Provision CI tmux and Bun paths\n")
+  const nextStep = text.indexOf("      - run:", provisionStart)
+  const broken = text.slice(0, provisionStart) + text.slice(nextStep)
+  expect(() => assertWorkflowGraph(broken, "ci.yml")).toThrow(/TMUX_BIN and BUN_BOOTSTRAP/)
+})
+
+test("workflow graph rejects a bare packed E2E command", async () => {
+  const text = await workflow("release.yml")
+  const broken = text.replace("          tests/release/with-rust.sh -- env \\\n", "          bun test \\\n")
+  expect(() => assertWorkflowGraph(broken, "release.yml")).toThrow(/bare packed E2E/)
 })

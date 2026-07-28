@@ -39,6 +39,18 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
+        with:
+          bun-version: 1.3.14
+      - name: Provision CI tmux and Bun paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TMUX_BIN="$(scripts/release/ci-tmux.sh)" BUN_BOOTSTRAP="$(command -v bun)"
+          test -x "$TMUX_BIN"
+          test -x "$BUN_BOOTSTRAP"
+          test "$($BUN_BOOTSTRAP --version)" = "1.3.14"
+          printf 'TMUX_BIN=%s\nBUN_BOOTSTRAP=%s\n' "$TMUX_BIN" "$BUN_BOOTSTRAP" >> "$GITHUB_ENV"
       - name: Rust formatting and tests
         run: |
           set -euo pipefail
@@ -79,6 +91,15 @@ jobs:
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
         with:
           bun-version: 1.3.14
+      - name: Provision CI tmux and Bun paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TMUX_BIN="$(scripts/release/ci-tmux.sh)" BUN_BOOTSTRAP="$(command -v bun)"
+          test -x "$TMUX_BIN"
+          test -x "$BUN_BOOTSTRAP"
+          test "$($BUN_BOOTSTRAP --version)" = "1.3.14"
+          printf 'TMUX_BIN=%s\nBUN_BOOTSTRAP=%s\n' "$TMUX_BIN" "$BUN_BOOTSTRAP" >> "$GITHUB_ENV"
       - name: Build and test the matching target
         shell: bash
         env:
@@ -203,6 +224,8 @@ jobs:
     needs: assemble-verified
     runs-on: ubuntu-24.04
     environment: github-draft
+    env:
+      GH_TOKEN: ${{ github.token }}
     permissions:
       contents: write
       id-token: write
@@ -254,6 +277,8 @@ jobs:
   validate-draft:
     needs: draft-release
     runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
     permissions:
       contents: read
     steps:
@@ -264,6 +289,15 @@ jobs:
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
         with:
           bun-version: 1.3.14
+      - name: Provision CI tmux and Bun paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TMUX_BIN="$(scripts/release/ci-tmux.sh)" BUN_BOOTSTRAP="$(command -v bun)"
+          test -x "$TMUX_BIN"
+          test -x "$BUN_BOOTSTRAP"
+          test "$($BUN_BOOTSTRAP --version)" = "1.3.14"
+          printf 'TMUX_BIN=%s\nBUN_BOOTSTRAP=%s\n' "$TMUX_BIN" "$BUN_BOOTSTRAP" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: verified-handoff
@@ -323,8 +357,23 @@ jobs:
                --source-digest "$GITHUB_SHA" \
                --signer-digest "$GITHUB_SHA"
            done
-          echo "attestation-subjects=6"
-          bun test packages/tmux-pane-dash/tests/packed-e2e.test.ts
+           echo "attestation-subjects=6"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20.0.0"
+      - name: Run packed E2E with exact Node 20 and isolated Rust and tmux
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e 'if (process.version !== "v20.0.0") process.exit(1)'
+          export NODE_20_BIN="$(command -v node)" NPM_20_CLI="$(command -v npm)"
+          export BUN_BOOTSTRAP="${BUN_BOOTSTRAP:?BUN_BOOTSTRAP is required}"
+          export TMUX_BIN="${TMUX_BIN:?TMUX_BIN is required}" TARGET_KEY=linux-x64
+          test -x "$NODE_20_BIN" && test -x "$NPM_20_CLI" && test -x "$BUN_BOOTSTRAP" && test -x "$TMUX_BIN"
+          tests/release/with-rust.sh -- env \
+            PANE_DASH_NODE20_PREPROVIDED=1 NODE_20_BIN="$NODE_20_BIN" NPM_20_CLI="$NPM_20_CLI" \
+            tests/release/with-node20.sh -- scripts/release/clean-room.sh -- \
+            "$BUN_BOOTSTRAP" test packages/tmux-pane-dash/tests/packed-e2e.test.ts
 
   npm-production:
     needs: validate-draft
@@ -386,6 +435,8 @@ jobs:
     needs: npm-production
     runs-on: ubuntu-24.04
     environment: release-promotion
+    env:
+      GH_TOKEN: ${{ github.token }}
     permissions:
       contents: write
       actions: read
@@ -402,52 +453,64 @@ jobs:
         with:
           name: verified-handoff
           path: ${{ runner.temp }}/verified-handoff
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: approval-evidence
-          path: ${{ runner.temp }}/approval-evidence
       - name: Verify immutable handoff before proof collection
         shell: bash
         run: |
           set -euo pipefail
           export NODE_24_BIN="$(command -v node)"
           export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
-           export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
-           test -f "$VERIFIED_HANDOFF"
-           test -f "$VERIFIER_BUNDLE"
-           "$NODE_24_BIN" -e 'if (process.version !== "v24.12.0") process.exit(1)'
-           "$NODE_24_BIN" -e 'const fs=require("node:fs"),c=require("node:crypto");const [h,b]=process.argv.slice(1),j=JSON.parse(fs.readFileSync(h,"utf8")),x=fs.readFileSync(b);if(j.verifier.filename!=="verify-npm-provenance.mjs"||j.verifier.size!==x.length||j.verifier.sha256!==c.createHash("sha256").update(x).digest("hex"))process.exit(1)' "$VERIFIED_HANDOFF" "$VERIFIER_BUNDLE"
-          test -f "$RUNNER_TEMP/approval-evidence/approval-evidence.json"
-          test -f "$RUNNER_TEMP/approval-evidence/approval-response.json"
-          test -f "$RUNNER_TEMP/approval-evidence/approval-request.sha256"
-          DEPLOYMENT_ID="$($NODE_24_BIN -e 'const fs=require("node:fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(r.httpStatus!==200||!Number.isSafeInteger(r.deploymentId)||r.deploymentId<=0)process.exit(1);process.stdout.write(String(r.deploymentId))' "$RUNNER_TEMP/approval-evidence/approval-response.json")"
-          printf 'DEPLOYMENT_ID=%s\n' "$DEPLOYMENT_ID" >> "$GITHUB_ENV"
-          echo "environment-approval=sanitized-evidence-required"
-      - name: Collect tagged workflow and environment proof
+          export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
+          test -f "$VERIFIED_HANDOFF"
+          test -f "$VERIFIER_BUNDLE"
+          "$NODE_24_BIN" -e 'if (process.version !== "v24.12.0") process.exit(1)'
+          "$NODE_24_BIN" -e 'const fs=require("node:fs"),c=require("node:crypto");const [h,b]=process.argv.slice(1),j=JSON.parse(fs.readFileSync(h,"utf8")),x=fs.readFileSync(b);if(j.verifier.filename!=="verify-npm-provenance.mjs"||j.verifier.size!==x.length||j.verifier.sha256!==c.createHash("sha256").update(x).digest("hex"))process.exit(1)' "$VERIFIED_HANDOFF" "$VERIFIER_BUNDLE"
+      - name: Reverify published package provenance before promotion
         shell: bash
         run: |
           set -euo pipefail
           export NODE_24_BIN="$(command -v node)"
-           export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
-           export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
-           git show "$GITHUB_SHA:.github/workflows/release.yml" > "$RUNNER_TEMP/tagged-release.yml"
-          gh run view "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --json workflowName,headSha,event,status > "$RUNNER_TEMP/tagged-run.json"
-          "$NODE_24_BIN" -e 'const fs=require("node:fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(r.workflowName!=="Release"||r.headSha!==process.env.GITHUB_SHA||r.event!=="push"||r.status!=="in_progress")process.exit(1)' "$RUNNER_TEMP/tagged-run.json"
-           bun scripts/release/wait-run.ts --run-id "$GITHUB_RUN_ID" --job npm-production --conclusion success --timeout 1800 --poll 15
-           gh api "/repos/$GITHUB_REPOSITORY/deployments/${DEPLOYMENT_ID:?DEPLOYMENT_ID is required}/statuses" > "$RUNNER_TEMP/deployment-statuses.json"
-           gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest" > "$RUNNER_TEMP/jobs.json"
-          "$NODE_24_BIN" --input-type=module - "$RUNNER_TEMP/approval-evidence/approval-response.json" "$RUNNER_TEMP/deployments.json" <<'NODE'
-          import { readFileSync, writeFileSync } from "node:fs";
-          import { dirname } from "node:path";
-          const response = JSON.parse(readFileSync(process.argv[2], "utf8"));
-          if (response.httpStatus !== 200 || response.approved !== true) throw new Error("approval response is not sanitized HTTP 200 proof");
-          const id = response.deploymentId;
-          const deployment = { url: `https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/${id}`, id, node_id: "sanitized", sha: response.sha, ref: response.ref, task: "deploy", payload: {}, original_environment: response.environment, environment: response.environment, description: "sanitized", creator: {}, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", statuses_url: `https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/${id}/statuses`, repository_url: "https://api.github.com/repos/xiopt/tmux-pane-dash", transient_environment: false, production_environment: response.environment === "npm-production", performed_via_github_app: null };
-          writeFileSync(process.argv[3], JSON.stringify([deployment]) + "\n", { mode: 0o600 });
+          export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
+          export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
+          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/pane-dash-opencode --version 0.1.0 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.0
+          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/tmux-pane-dash --version 0.1.0 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.0
+      - name: Prove the active approved release-promotion deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NODE_24_BIN="$(command -v node)"
+          environment_json="$RUNNER_TEMP/release-promotion-environment.json"
+          deployments_json="$RUNNER_TEMP/release-promotion-deployments.json"
+          statuses_json="$RUNNER_TEMP/release-promotion-statuses.json"
+          jobs_json="$RUNNER_TEMP/release-promotion-jobs.json"
+          test "$GITHUB_REF" = "refs/tags/$GITHUB_REF_NAME"
+          gh api "/repos/$GITHUB_REPOSITORY/environments/release-promotion" > "$environment_json"
+          gh api "/repos/$GITHUB_REPOSITORY/deployments?sha=$GITHUB_SHA&ref=$GITHUB_REF&environment=release-promotion&task=deploy&per_page=100" > "$deployments_json"
+          deployment_id="$("$NODE_24_BIN" -e 'const fs=require("node:fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Array.isArray(r)||r.length!==1||!Number.isSafeInteger(r[0].id)||r[0].id<=0)process.exit(1);process.stdout.write(String(r[0].id))' "$deployments_json")"
+          gh api "/repos/$GITHUB_REPOSITORY/deployments/$deployment_id/statuses?per_page=100" > "$statuses_json"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest" > "$jobs_json"
+          "$NODE_24_BIN" --input-type=module - "$environment_json" "$deployments_json" "$statuses_json" "$jobs_json" <<'NODE'
+          import { readFileSync } from "node:fs";
+          const [environmentPath, deploymentsPath, statusesPath, jobsPath] = process.argv.slice(2);
+          const read = (path) => JSON.parse(readFileSync(path, "utf8"));
+          const environment = read(environmentPath);
+          if (!Number.isSafeInteger(environment.id) || environment.id <= 0 || environment.name !== "release-promotion") throw new Error("release-promotion environment identity is invalid");
+          if (!Array.isArray(environment.protection_rules) || !environment.protection_rules.some((rule) => rule?.type === "required_reviewers")) throw new Error("release-promotion required-reviewer protection is not configured");
+          const deployments = read(deploymentsPath);
+          if (!Array.isArray(deployments) || deployments.length !== 1) throw new Error("expected exactly one release-promotion deployment");
+          const deployment = deployments[0];
+          if (!Number.isSafeInteger(deployment.id) || deployment.id <= 0 || deployment.sha !== process.env.GITHUB_SHA || !/^refs\/tags\//.test(deployment.ref) || deployment.ref !== process.env.GITHUB_REF || deployment.environment !== "release-promotion" || deployment.original_environment !== "release-promotion" || deployment.task !== "deploy") throw new Error("deployment identity does not match this tagged run");
+          const statuses = read(statusesPath);
+          const matching = Array.isArray(statuses) ? statuses.filter((status) => status?.deployment_id === deployment.id) : [];
+          if (matching.length === 0) throw new Error("deployment has no status");
+          const latest = [...matching].sort((left, right) => Date.parse(right.updated_at ?? right.created_at ?? "") - Date.parse(left.updated_at ?? left.created_at ?? ""))[0];
+          if (!latest || !Number.isSafeInteger(latest.id) || latest.id <= 0 || latest.state !== "in_progress") throw new Error("latest release-promotion status is not active");
+          const jobs = read(jobsPath);
+          const currentJobs = Array.isArray(jobs.jobs) ? jobs.jobs.filter((job) => job?.name === "promote-release") : [];
+          if (currentJobs.length !== 1) throw new Error("current promote-release job is not unique");
+          const currentJob = currentJobs[0];
+          if (currentJob.status !== "in_progress" || (currentJob.conclusion !== null && currentJob.conclusion !== undefined) || currentJob.head_sha !== process.env.GITHUB_SHA || typeof currentJob.started_at !== "string") throw new Error("current promote-release job is not active for this commit");
           NODE
-          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --verify-environment --handoff "$VERIFIED_HANDOFF" --tagged-workflow "$RUNNER_TEMP/tagged-release.yml" --approval-evidence "$RUNNER_TEMP/approval-evidence/approval-evidence.json" --deployments "$RUNNER_TEMP/deployments.json" --deployment-statuses "$RUNNER_TEMP/deployment-statuses.json" --jobs "$RUNNER_TEMP/jobs.json" --commit "$GITHUB_SHA" --environment release-promotion --job promote-release > "$RUNNER_TEMP/environment-proof.json"
-          test -s "$RUNNER_TEMP/environment-proof.json"
-      - name: Promote the existing draft only after proof
+      - name: Promote the existing draft only after live proof
         shell: bash
         run: |
           set -euo pipefail

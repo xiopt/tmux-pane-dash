@@ -36,6 +36,7 @@ export const SOURCE_EXECUTABLES = [
   "pane_dash.tmux",
   "scripts/open.sh",
   "scripts/release/clean-room.sh",
+  "scripts/release/ci-tmux.sh",
   "scripts/release/public-smoke.sh",
   "scripts/tag.sh",
   "spike/lib.sh",
