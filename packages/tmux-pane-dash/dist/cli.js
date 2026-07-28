@@ -38,10 +38,95 @@ var init_errors = __esm(() => {
   };
 });
 
+// packages/tmux-pane-dash/src/ownership.ts
+import { lstat, mkdir, readFile, readlink, readdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
+async function managedRoot(env) {
+  const xdg = env?.XDG_DATA_HOME;
+  if (xdg)
+    return join(xdg, "tmux-pane-dash");
+  if (!env?.HOME)
+    fail("E_ROOT");
+  return join(env.HOME, ".local", "share", "tmux-pane-dash");
+}
+function inside(root, path) {
+  return path === root || path.startsWith(`${root}/`);
+}
+async function safeDirectory(path, uid) {
+  const entry = await lstat(path);
+  if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== uid || (entry.mode & 18) !== 0)
+    fail("E_CONFLICT");
+}
+async function validateManagedRoot(root, deps) {
+  const canonical = resolve(root), uid = deps.uid?.() ?? process.getuid?.() ?? 0;
+  await safeDirectory(canonical, uid);
+  const allowed = new Set(["versions", "state", "transactions", "current"]);
+  for (const name of await readdir(canonical))
+    if (!allowed.has(name))
+      fail("E_CONFLICT");
+  for (const name of ["versions", "state", "transactions"]) {
+    try {
+      await safeDirectory(join(canonical, name), uid);
+    } catch (error) {
+      if (!missing(error))
+        throw error;
+    }
+  }
+  try {
+    const current = join(canonical, "current"), target = await readlink(current);
+    if (target.startsWith("/") || !target.startsWith("versions/") || target.split("/").some((part) => !part || part === "." || part === "..") || !inside(canonical, resolve(canonical, target)))
+      fail("E_CONFLICT");
+  } catch (error) {
+    if (!missing(error))
+      throw error;
+  }
+  try {
+    for (const version of await readdir(join(canonical, "versions")))
+      await safeDirectory(join(canonical, "versions", version), uid);
+  } catch (error) {
+    if (!missing(error))
+      throw error;
+  }
+}
+function validOwnership(value) {
+  return value && typeof value === "object" && value.schemaVersion === 1 && typeof value.packageVersion === "string" && typeof value.releaseVersion === "string" && value.archive && typeof value.archive.target === "string" && typeof value.archive.sha256 === "string" && Array.isArray(value.files) && typeof value.currentTarget === "string" && value.components && Array.isArray(value.migrations);
+}
+async function readOwnership(root, _deps) {
+  let bytes;
+  try {
+    bytes = await readFile(join(root, "state", "ownership.json"));
+  } catch (error) {
+    if (missing(error))
+      return null;
+    fail("E_OWNERSHIP");
+  }
+  let value;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    fail("E_OWNERSHIP");
+  }
+  if (!validOwnership(value))
+    fail("E_OWNERSHIP");
+  return value;
+}
+async function ensureManagedRoot(root) {
+  await mkdir(root, { recursive: true, mode: 448 });
+  await mkdir(join(root, "versions"), { recursive: true, mode: 448 });
+  await mkdir(join(root, "state"), { recursive: true, mode: 448 });
+  await mkdir(join(root, "transactions"), { recursive: true, mode: 448 });
+}
+var missing = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", fail = (code) => {
+  throw new CliError(code);
+};
+var init_ownership = __esm(() => {
+  init_errors();
+});
+
 // packages/tmux-pane-dash/src/fs.ts
-import { chmod, lstat, mkdir, open, readdir, readFile, readlink, rename, rm } from "node:fs/promises";
-import { createHash, randomBytes } from "node:crypto";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { chmod, lstat as lstat2, mkdir as mkdir3, open, readdir as readdir2, readFile as readFile3, readlink as readlink2, rename as rename2, rm as rm2 } from "node:fs/promises";
+import { createHash, randomBytes as randomBytes2 } from "node:crypto";
+import { dirname, isAbsolute, join as join3, resolve as resolve2, sep } from "node:path";
 function canonicalPayloadPath(path) {
   if (!path || path.includes("\x00") || path.includes("\\") || path.startsWith("/") || path.endsWith("/") || path.includes("//"))
     throw new Error("invalid payload path");
@@ -50,7 +135,7 @@ function canonicalPayloadPath(path) {
   return path;
 }
 function within(root, relative) {
-  const base = resolve(root), path = resolve(base, canonicalPayloadPath(relative));
+  const base = resolve2(root), path = resolve2(base, canonicalPayloadPath(relative));
   if (!path.startsWith(`${base}${sep}`))
     throw new Error("path escapes root");
   return path;
@@ -58,19 +143,19 @@ function within(root, relative) {
 function nodeFsOps() {
   return {
     async mkdir(path) {
-      await mkdir(path, { recursive: true, mode: 448 });
+      await mkdir3(path, { recursive: true, mode: 448 });
     },
     async readFile(path) {
-      return new Uint8Array(await readFile(path));
+      return new Uint8Array(await readFile3(path));
     },
     async mkdirPayloadDirectory(root, relative, mode) {
       const path = within(root, relative);
-      await mkdir(path, { recursive: false, mode: mode & 511 });
+      await mkdir3(path, { recursive: false, mode: mode & 511 });
       await chmod(path, mode & 511);
     },
     async writeFileExclusive(root, relative, bytes, mode) {
       const path = within(root, relative);
-      await mkdir(dirname(path), { recursive: true, mode: 448 });
+      await mkdir3(dirname(path), { recursive: true, mode: 448 });
       const file = await open(path, "wx", mode & 511);
       try {
         await file.writeFile(bytes);
@@ -88,14 +173,14 @@ function nodeFsOps() {
       await file.close();
     },
     async stat(path) {
-      const entry = await lstat(path);
+      const entry = await lstat2(path);
       return { kind: entry.isFile() ? "file" : entry.isDirectory() ? "directory" : entry.isSymbolicLink() ? "symlink" : "other", mode: entry.mode & 4095, size: entry.size, dev: entry.dev, ino: entry.ino };
     },
     async readdir(path) {
-      return readdir(path);
+      return readdir2(path);
     },
     async rm(path) {
-      await rm(path, { recursive: true, force: true });
+      await rm2(path, { recursive: true, force: true });
     }
   };
 }
@@ -104,9 +189,9 @@ async function resolveConfigPath(logicalPath, _deps) {
   for (let count = 0;count <= 16; count += 1) {
     let entry;
     try {
-      entry = await lstat(path);
+      entry = await lstat2(path);
     } catch (error) {
-      if (missing(error) && count === 0)
+      if (missing3(error) && count === 0)
         return { logicalPath, resolvedPath: logicalPath, symlinkChain: [] };
       configError();
     }
@@ -115,22 +200,22 @@ async function resolveConfigPath(logicalPath, _deps) {
         configError();
       let target;
       try {
-        target = await readlink(path);
+        target = await readlink2(path);
       } catch {
         configError();
       }
       links.push({ path, target, dev: entry.dev, ino: entry.ino });
-      path = isAbsolute(target) ? target : resolve(dirname(path), target);
+      path = isAbsolute(target) ? target : resolve2(dirname(path), target);
       continue;
     }
     if (!entry.isFile())
       configError();
-    const content = new Uint8Array(await readFile(path));
+    const content = new Uint8Array(await readFile3(path));
     return { logicalPath, resolvedPath: path, symlinkChain: links, mode: entry.mode & 511, preimageHash: digest(content) };
   }
   configError();
 }
-var missing = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", digest = (value) => createHash("sha256").update(value).digest("hex"), configError = () => {
+var missing3 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", digest = (value) => createHash("sha256").update(value).digest("hex"), configError = () => {
   throw new CliError("E_CONFIG");
 };
 var init_fs = __esm(() => {
@@ -224,17 +309,17 @@ var init_manifest = __esm(() => {
 });
 
 // packages/tmux-pane-dash/src/config-opencode.ts
-import { lstat as lstat3, readdir as readdir3, realpath, stat } from "node:fs/promises";
-import { join as join2 } from "node:path";
+import { lstat as lstat4, readdir as readdir4, realpath, stat } from "node:fs/promises";
+import { join as join4 } from "node:path";
 async function selectOpenCodeConfig(env, deps) {
-  const root = env?.XDG_CONFIG_HOME ? join2(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join2(env.HOME, ".config", "opencode") : fail("E_ROOT");
-  const json = join2(root, "opencode.json"), jsonc = join2(root, "opencode.jsonc");
+  const root = env?.XDG_CONFIG_HOME ? join4(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join4(env.HOME, ".config", "opencode") : fail2("E_ROOT");
+  const json = join4(root, "opencode.json"), jsonc = join4(root, "opencode.jsonc");
   const exists = async (path) => {
     try {
-      await lstat3(path);
+      await lstat4(path);
       return true;
     } catch (error) {
-      if (missing2(error))
+      if (missing4(error))
         return false;
       throw error;
     }
@@ -247,40 +332,40 @@ async function selectOpenCodeConfig(env, deps) {
   if (!hasJson && hasJsonc)
     return jsonc;
   const [left, right] = await Promise.all([resolveConfigPath(json, deps), resolveConfigPath(jsonc, deps)]);
-  const [leftInfo, rightInfo] = await Promise.all([lstat3(left.resolvedPath), lstat3(right.resolvedPath)]);
+  const [leftInfo, rightInfo] = await Promise.all([lstat4(left.resolvedPath), lstat4(right.resolvedPath)]);
   if (!leftInfo.isFile() || !rightInfo.isFile() || leftInfo.dev !== rightInfo.dev || leftInfo.ino !== rightInfo.ino)
-    fail("E_CONFIG_AMBIGUOUS");
+    fail2("E_CONFIG_AMBIGUOUS");
   return json;
 }
 async function planOpenCodeMigration(input) {
   const names = new Set(["pane-dash.ts", "pane-dash.js", "pane_dash.ts", "pane_dash.js"]), candidates = [];
-  for (const directory of [join2(input.configDirectory, "plugin"), join2(input.configDirectory, "plugins")]) {
+  for (const directory of [join4(input.configDirectory, "plugin"), join4(input.configDirectory, "plugins")]) {
     let entries;
     try {
-      entries = await readdir3(directory);
+      entries = await readdir4(directory);
     } catch (error) {
-      if (missing2(error))
+      if (missing4(error))
         continue;
       throw error;
     }
     for (const name of entries)
       if (names.has(name))
-        candidates.push(join2(directory, name));
+        candidates.push(join4(directory, name));
   }
   if (!candidates.length)
     return [];
   if (!input.migrate || candidates.length !== 1)
-    fail("E_CONFIG_CONFLICT");
-  const logicalPath = candidates[0], entry = await lstat3(logicalPath);
+    fail2("E_CONFIG_CONFLICT");
+  const logicalPath = candidates[0], entry = await lstat4(logicalPath);
   if (!entry.isSymbolicLink())
-    fail("E_CONFIG_CONFLICT");
+    fail2("E_CONFIG_CONFLICT");
   let resolvedPath;
   try {
     resolvedPath = await realpath(logicalPath);
     if (!resolvedPath.endsWith("/tmux-pane-dash/opencode-plugin/pane-dash.ts") || !(await stat(resolvedPath)).isFile())
-      fail("E_CONFIG_CONFLICT");
+      fail2("E_CONFIG_CONFLICT");
   } catch {
-    fail("E_CONFIG_CONFLICT");
+    fail2("E_CONFIG_CONFLICT");
   }
   return [{ logicalPath, resolvedPath, action: "unlink" }];
 }
@@ -297,7 +382,7 @@ function space(text, index) {
     if (text.startsWith("/*", index)) {
       const end = text.indexOf("*/", index + 2);
       if (end < 0)
-        fail();
+        fail2();
       index = end + 2;
       continue;
     }
@@ -306,7 +391,7 @@ function space(text, index) {
 }
 function stringAt(text, index) {
   if (text[index] !== '"')
-    fail();
+    fail2();
   const start = index;
   let end = index + 1, escaped = false;
   while (end < text.length) {
@@ -323,11 +408,11 @@ function stringAt(text, index) {
       try {
         return { value: JSON.parse(text.slice(index, end)), start, end };
       } catch {
-        fail();
+        fail2();
       }
     }
   }
-  fail();
+  fail2();
 }
 function close(text, index, open2, endChar) {
   let depth = 0;
@@ -342,7 +427,7 @@ function close(text, index, open2, endChar) {
     if (text[index] === endChar && --depth === 0)
       return index;
   }
-  fail();
+  fail2();
 }
 function jsoncValue(text, at) {
   let index = space(text, at), char = text[index];
@@ -357,13 +442,13 @@ function jsoncValue(text, at) {
       const key = stringAt(text, index);
       index = space(text, key.end);
       if (text[index++] !== ":")
-        fail();
+        fail2();
       const entry = jsoncValue(text, index);
       object[key.value] = entry.value;
       index = space(text, entry.end);
       if (text[index] !== ",") {
         if (text[index] !== "}")
-          fail();
+          fail2();
         break;
       }
       index = space(text, index + 1);
@@ -379,7 +464,7 @@ function jsoncValue(text, at) {
       index = space(text, entry.end);
       if (text[index] !== ",") {
         if (text[index] !== "]")
-          fail();
+          fail2();
         break;
       }
       index = space(text, index + 1);
@@ -388,35 +473,35 @@ function jsoncValue(text, at) {
   }
   const literal = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text.slice(index));
   if (!literal)
-    fail();
+    fail2();
   return { value: JSON.parse(literal[0]), end: index + literal[0].length };
 }
 function parseJsonc(text) {
   const parsed = jsoncValue(text, 0);
   if (space(text, parsed.end) !== text.length)
-    fail();
+    fail2();
   return parsed.value;
 }
 function rootPlugin(text) {
   let index = space(text, 0);
   if (text[index++] !== "{")
-    fail();
+    fail2();
   let plugin = null;
   for (;; ) {
     index = space(text, index);
     if (text[index] === "}") {
       if (space(text, index + 1) !== text.length)
-        fail();
+        fail2();
       return plugin;
     }
     const key = stringAt(text, index);
     index = space(text, key.end);
     if (text[index++] !== ":")
-      fail();
+      fail2();
     index = space(text, index);
     if (key.value === "plugin") {
       if (plugin || text[index] !== "[")
-        fail();
+        fail2();
       const start = index, end = close(text, index, "[", "]"), entries = [];
       let item = start + 1;
       for (;; ) {
@@ -429,7 +514,7 @@ function rootPlugin(text) {
         if (comma !== undefined)
           item += 1;
         else if (text[item] !== "]")
-          fail();
+          fail2();
         entries.push({ ...value, comma });
       }
       plugin = { start, end: end + 1, entries };
@@ -444,7 +529,7 @@ function rootPlugin(text) {
       else {
         const match = /^(?:true|false|null|-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text.slice(index));
         if (!match)
-          fail();
+          fail2();
         index += match[0].length;
       }
     }
@@ -454,7 +539,7 @@ function rootPlugin(text) {
       continue;
     }
     if (text[index] !== "}")
-      fail();
+      fail2();
   }
 }
 function validPaneDash(value) {
@@ -474,7 +559,7 @@ function insertPlugin(text, plugin, desired) {
     return `${text.slice(0, plugin.end - 1)}${JSON.stringify(desired)}${text.slice(plugin.end - 1)}`;
   const entry = plugin.entries[plugin.entries.length - 1];
   if (!entry)
-    fail();
+    fail2();
   const insertion = `,${insertionTrivia(text, plugin)}${JSON.stringify(desired)}`;
   return `${text.slice(0, entry.end)}${insertion}${text.slice(entry.end)}`;
 }
@@ -486,19 +571,19 @@ function planOpenCodeEdit(input) {
     if (desiredEntries.length === 1 && managed.length === 1)
       return { ...input, bytes: input.bytes };
     if (desiredEntries.length || managed.length > 1)
-      fail("E_CONFIG_CONFLICT");
+      fail2("E_CONFIG_CONFLICT");
     if (managed.length === 1) {
       const owned = input.ownedEntries;
       const entry = managed[0];
       if (owned?.length !== 1 || !entry || owned[0] !== entry.value)
-        fail("E_CONFIG_CONFLICT");
+        fail2("E_CONFIG_CONFLICT");
       return { ...input, bytes: encoder.encode(`${text.slice(0, entry.start)}${JSON.stringify(desired)}${text.slice(entry.end)}`) };
     }
     return { ...input, bytes: encoder.encode(insertPlugin(text, plugin, desired)) };
   }
   const closeIndex = text.lastIndexOf("}");
   if (closeIndex < 0)
-    fail();
+    fail2();
   const newline = text.includes(`\r
 `) ? `\r
 ` : `
@@ -508,10 +593,10 @@ function planOpenCodeEdit(input) {
 function planOpenCodeRemoval(input) {
   const text = decoder.decode(input.bytes), plugin = rootPlugin(text), owned = input.ownedEntries;
   if (!plugin || owned?.length !== 1)
-    fail("E_CONFIG_CONFLICT");
+    fail2("E_CONFIG_CONFLICT");
   const matches = plugin.entries.filter((entry2) => entry2.value === owned[0]);
   if (matches.length !== 1)
-    fail("E_CONFIG_CONFLICT");
+    fail2("E_CONFIG_CONFLICT");
   const entry = matches[0], index = plugin.entries.indexOf(entry);
   let { start, end } = entry;
   if (entry.comma !== undefined)
@@ -522,9 +607,9 @@ function planOpenCodeRemoval(input) {
   }
   return { ...input, bytes: encoder.encode(`${text.slice(0, start)}${text.slice(end)}`) };
 }
-var encoder, decoder, fail = (code = "E_CONFIG") => {
+var encoder, decoder, fail2 = (code = "E_CONFIG") => {
   throw new CliError(code);
-}, missing2 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT";
+}, missing4 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT";
 var init_config_opencode = __esm(() => {
   init_errors();
   init_fs();
@@ -609,91 +694,6 @@ var init_config_tmux = __esm(() => {
   decoder2 = new TextDecoder;
 });
 
-// packages/tmux-pane-dash/src/ownership.ts
-import { lstat as lstat4, mkdir as mkdir2, readFile as readFile3, readlink as readlink3, readdir as readdir4 } from "node:fs/promises";
-import { join as join3, resolve as resolve3 } from "node:path";
-async function managedRoot(env) {
-  const xdg = env?.XDG_DATA_HOME;
-  if (xdg)
-    return join3(xdg, "tmux-pane-dash");
-  if (!env?.HOME)
-    fail2("E_ROOT");
-  return join3(env.HOME, ".local", "share", "tmux-pane-dash");
-}
-function inside(root, path) {
-  return path === root || path.startsWith(`${root}/`);
-}
-async function safeDirectory(path, uid) {
-  const entry = await lstat4(path);
-  if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== uid || (entry.mode & 18) !== 0)
-    fail2("E_CONFLICT");
-}
-async function validateManagedRoot(root, deps) {
-  const canonical = resolve3(root), uid = deps.uid?.() ?? process.getuid?.() ?? 0;
-  await safeDirectory(canonical, uid);
-  const allowed = new Set(["versions", "state", "transactions", "current"]);
-  for (const name of await readdir4(canonical))
-    if (!allowed.has(name))
-      fail2("E_CONFLICT");
-  for (const name of ["versions", "state", "transactions"]) {
-    try {
-      await safeDirectory(join3(canonical, name), uid);
-    } catch (error) {
-      if (!missing3(error))
-        throw error;
-    }
-  }
-  try {
-    const current = join3(canonical, "current"), target = await readlink3(current);
-    if (target.startsWith("/") || !target.startsWith("versions/") || target.split("/").some((part) => !part || part === "." || part === "..") || !inside(canonical, resolve3(canonical, target)))
-      fail2("E_CONFLICT");
-  } catch (error) {
-    if (!missing3(error))
-      throw error;
-  }
-  try {
-    for (const version of await readdir4(join3(canonical, "versions")))
-      await safeDirectory(join3(canonical, "versions", version), uid);
-  } catch (error) {
-    if (!missing3(error))
-      throw error;
-  }
-}
-function validOwnership(value) {
-  return value && typeof value === "object" && value.schemaVersion === 1 && typeof value.packageVersion === "string" && typeof value.releaseVersion === "string" && value.archive && typeof value.archive.target === "string" && typeof value.archive.sha256 === "string" && Array.isArray(value.files) && typeof value.currentTarget === "string" && value.components && Array.isArray(value.migrations);
-}
-async function readOwnership(root, _deps) {
-  let bytes;
-  try {
-    bytes = await readFile3(join3(root, "state", "ownership.json"));
-  } catch (error) {
-    if (missing3(error))
-      return null;
-    fail2("E_OWNERSHIP");
-  }
-  let value;
-  try {
-    value = JSON.parse(new TextDecoder().decode(bytes));
-  } catch {
-    fail2("E_OWNERSHIP");
-  }
-  if (!validOwnership(value))
-    fail2("E_OWNERSHIP");
-  return value;
-}
-async function ensureManagedRoot(root) {
-  await mkdir2(root, { recursive: true, mode: 448 });
-  await mkdir2(join3(root, "versions"), { recursive: true, mode: 448 });
-  await mkdir2(join3(root, "state"), { recursive: true, mode: 448 });
-  await mkdir2(join3(root, "transactions"), { recursive: true, mode: 448 });
-}
-var missing3 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", fail2 = (code) => {
-  throw new CliError(code);
-};
-var init_ownership = __esm(() => {
-  init_errors();
-});
-
 // packages/tmux-pane-dash/src/commands/doctor.ts
 var exports_doctor = {};
 __export(exports_doctor, {
@@ -703,7 +703,7 @@ __export(exports_doctor, {
   DOCTOR_CHECK_IDS: () => DOCTOR_CHECK_IDS
 });
 import { createHash as createHash2 } from "node:crypto";
-import { join as join4, relative, resolve as resolve4 } from "node:path";
+import { join as join5, relative, resolve as resolve4 } from "node:path";
 function selectedTarget(deps) {
   const assets = deps.manifest?.assets;
   const key = `${deps.platform}-${deps.arch === "arm64" ? "arm64" : deps.arch === "x64" ? "x64" : deps.arch}`;
@@ -717,16 +717,16 @@ async function exists(fs, path) {
     await fs.stat(path);
     return true;
   } catch (error) {
-    if (missing4(error))
+    if (missing5(error))
       return false;
     throw error;
   }
 }
 async function selectDoctorOpenCodeConfig(fs, env) {
-  const directory = env?.XDG_CONFIG_HOME ? join4(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join4(env.HOME, ".config", "opencode") : (() => {
+  const directory = env?.XDG_CONFIG_HOME ? join5(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join5(env.HOME, ".config", "opencode") : (() => {
     throw new Error("OpenCode root is unavailable");
   })();
-  const json = join4(directory, "opencode.json"), jsonc = join4(directory, "opencode.jsonc"), [hasJson, hasJsonc] = await Promise.all([exists(fs, json), exists(fs, jsonc)]);
+  const json = join5(directory, "opencode.json"), jsonc = join5(directory, "opencode.jsonc"), [hasJson, hasJsonc] = await Promise.all([exists(fs, json), exists(fs, jsonc)]);
   if (!hasJson && !hasJsonc)
     return json;
   if (hasJson && !hasJsonc)
@@ -751,7 +751,7 @@ function ownershipValid(value) {
   return record.schemaVersion === 1 && typeof record.packageVersion === "string" && typeof record.releaseVersion === "string" && exactKeys(record.archive, ["target", "sha256"]) && typeof record.archive.target === "string" && /^[a-f0-9]{64}$/.test(record.archive.sha256) && Array.isArray(record.files) && exactKeys(record.components, ["tmux", "opencode"]) && Array.isArray(record.migrations);
 }
 async function loadOwnership(fs, installRoot) {
-  const value = JSON.parse(text.decode(await read(fs, join4(installRoot, "state", "ownership.json"))));
+  const value = JSON.parse(text.decode(await read(fs, join5(installRoot, "state", "ownership.json"))));
   if (!ownershipValid(value))
     throw new Error("ownership schema is invalid");
   return value;
@@ -786,7 +786,7 @@ async function doctor(deps) {
   if (!fs)
     return fallback();
   try {
-    const installRoot = await root(deps), checks = [], ownershipPath = join4(installRoot, "state", "ownership.json");
+    const installRoot = await root(deps), checks = [], ownershipPath = join5(installRoot, "state", "ownership.json");
     let ownership = null;
     try {
       ownership = await loadOwnership(fs, installRoot);
@@ -794,7 +794,7 @@ async function doctor(deps) {
     } catch (error) {
       checks.push(check("ownership.schema", "error", "E_OWNERSHIP", `ownership unavailable: ${clean(error)}`));
     }
-    const version = ownership?.releaseVersion ?? null, versionRoot = version ? join4(installRoot, "versions", version) : null;
+    const version = ownership?.releaseVersion ?? null, versionRoot = version ? join5(installRoot, "versions", version) : null;
     try {
       const components = ownership?.components;
       const validComponent = (value) => value === null || exactKeys(value, ["logicalPath", "resolvedPath", "marker", "packageEntries", "baselineBackup"]) && typeof value.logicalPath === "string" && typeof value.resolvedPath === "string" && typeof value.marker === "string" && Array.isArray(value.packageEntries) && exactKeys(value.baselineBackup, ["logicalPath", "sha256"]) && typeof value.baselineBackup.logicalPath === "string" && /^[a-f0-9]{64}$/.test(value.baselineBackup.sha256);
@@ -805,7 +805,7 @@ async function doctor(deps) {
       checks.push(check("ownership.paths", "error", "E_OWNERSHIP_PATH", clean(error)));
     }
     try {
-      const entries = await fs.readdir(join4(installRoot, "transactions"));
+      const entries = await fs.readdir(join5(installRoot, "transactions"));
       if (entries.some((entry) => entry !== "lock"))
         throw new Error("incomplete transaction exists");
       checks.push(check("transaction.complete", "ok", null, "no incomplete transaction"));
@@ -813,7 +813,7 @@ async function doctor(deps) {
       checks.push(check("transaction.complete", "error", "E_TRANSACTION", clean(error)));
     }
     try {
-      const current = join4(installRoot, "current"), info = await fs.stat(current), target = await fs.readlink(current);
+      const current = join5(installRoot, "current"), info = await fs.stat(current), target = await fs.readlink(current);
       if (info.kind !== "symlink" || target.startsWith("/") || target !== ownership?.currentTarget)
         throw new Error("current link is not the owned relative target");
       checks.push(check("current.link", "ok", null, "current link is relative"));
@@ -821,7 +821,7 @@ async function doctor(deps) {
       checks.push(check("current.link", "error", "E_CURRENT_LINK", clean(error)));
     }
     try {
-      if (!ownership || !versionRoot || ownership.currentTarget !== `versions/${ownership.releaseVersion}` || await fs.readlink(join4(installRoot, "current")) !== ownership.currentTarget)
+      if (!ownership || !versionRoot || ownership.currentTarget !== `versions/${ownership.releaseVersion}` || await fs.readlink(join5(installRoot, "current")) !== ownership.currentTarget)
         throw new Error("current target does not name installed version");
       const info = await fs.stat(versionRoot);
       if (info.kind !== "directory")
@@ -837,7 +837,7 @@ async function doctor(deps) {
       const actual = [];
       const walk = async (directory, prefix = "") => {
         for (const name of await fs.readdir(directory)) {
-          const path = join4(directory, name), item = await fs.stat(path), logical = prefix ? `${prefix}/${name}` : name;
+          const path = join5(directory, name), item = await fs.stat(path), logical = prefix ? `${prefix}/${name}` : name;
           if (item.kind === "directory")
             await walk(path, logical);
           else
@@ -854,7 +854,7 @@ async function doctor(deps) {
     try {
       if (!ownership || !versionRoot)
         throw new Error("no installed manifest");
-      const manifest = JSON.parse(text.decode(await read(fs, join4(versionRoot, "manifest.json"))));
+      const manifest = JSON.parse(text.decode(await read(fs, join5(versionRoot, "manifest.json"))));
       if (!exactKeys(manifest, ["schemaVersion", "product", "version", "target", "asset", "files"]) || manifest.version !== ownership.releaseVersion || manifest.target !== ownership.archive.target || !Array.isArray(manifest.files))
         throw new Error("internal manifest is invalid");
       for (const file of ownership.files) {
@@ -869,7 +869,7 @@ async function doctor(deps) {
     try {
       if (!versionRoot || !version)
         throw new Error("binary is unavailable");
-      const result = await run(deps, join4(versionRoot, "bin", "pane-dash"), ["--version"]);
+      const result = await run(deps, join5(versionRoot, "bin", "pane-dash"), ["--version"]);
       if (result.code !== 0 || result.stdout !== `pane-dash ${version}
 ` || result.stderr !== "")
         throw new Error("binary version output differs");
@@ -887,7 +887,7 @@ async function doctor(deps) {
     }
     try {
       const owned = ownership?.components.tmux;
-      if (!owned || !deps.env?.HOME || owned.logicalPath !== join4(deps.env.HOME, ".tmux.conf") || owned.marker !== managedTmuxBlock(installRoot))
+      if (!owned || !deps.env?.HOME || owned.logicalPath !== join5(deps.env.HOME, ".tmux.conf") || owned.marker !== managedTmuxBlock(installRoot))
         throw new Error("owned tmux route is invalid");
       const config = text.decode(await read(fs, owned.resolvedPath)), marker = owned.marker;
       if (config.split(marker).length !== 2)
@@ -901,7 +901,7 @@ async function doctor(deps) {
       if (result.code !== 0)
         checks.push(check("tmux.server", "warning", "W_TMUX_SERVER", "tmux server is not running"));
       else {
-        const current = join4(installRoot, "current"), bindings = tmuxBindings(result.stdout);
+        const current = join5(installRoot, "current"), bindings = tmuxBindings(result.stdout);
         const valid = hasDistinctBindings(bindings, [
           (action) => action.includes("run-shell") && action.includes(`${current}/scripts/open.sh`),
           (action) => action.includes("run-shell") && action.includes(`${current}/scripts/tag.sh`) && /\btoggle\b/.test(action),
@@ -957,7 +957,7 @@ function renderDoctorHuman(report) {
 ${report.healthy ? "healthy" : "unhealthy"}
 `;
 }
-var DOCTOR_CHECK_IDS, text, control, maxMessage = 160, clean = (value) => String(value instanceof Error ? value.message : value).replace(control, " ").replace(/(?:authorization|cookie|token)\s*[:=]\s*\S+/gi, "$1=<redacted>").replace(/\/[A-Za-z0-9_.~%+@=,:;-]+(?:\/[A-Za-z0-9_.~%+@=,:;-]+)*/g, "<path>").replace(/\s+/g, " ").trim().slice(0, maxMessage) || "operation failed", missing4 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", exactKeys = (value, keys2) => !!value && typeof value === "object" && Object.keys(value).sort().join("\x00") === [...keys2].sort().join("\x00"), hash = (bytes) => createHash2("sha256").update(bytes).digest("hex"), childEnv = (tmuxTmpdir) => ({ PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C", ...tmuxTmpdir?.startsWith("/") ? { TMUX_TMPDIR: tmuxTmpdir } : {} });
+var DOCTOR_CHECK_IDS, text, control, maxMessage = 160, clean = (value) => String(value instanceof Error ? value.message : value).replace(control, " ").replace(/(?:authorization|cookie|token)\s*[:=]\s*\S+/gi, "$1=<redacted>").replace(/\/[A-Za-z0-9_.~%+@=,:;-]+(?:\/[A-Za-z0-9_.~%+@=,:;-]+)*/g, "<path>").replace(/\s+/g, " ").trim().slice(0, maxMessage) || "operation failed", missing5 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", exactKeys = (value, keys2) => !!value && typeof value === "object" && Object.keys(value).sort().join("\x00") === [...keys2].sort().join("\x00"), hash = (bytes) => createHash2("sha256").update(bytes).digest("hex"), childEnv = (tmuxTmpdir) => ({ PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C", ...tmuxTmpdir?.startsWith("/") ? { TMUX_TMPDIR: tmuxTmpdir } : {} });
 var init_doctor = __esm(() => {
   init_config_opencode();
   init_config_tmux();
@@ -983,7 +983,7 @@ var init_doctor = __esm(() => {
 
 // packages/tmux-pane-dash/src/archive.ts
 import { createHash as createHash3 } from "node:crypto";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 import { createInflateRaw } from "node:zlib";
 function gzipHeaderLength(bytes) {
   if (bytes.length < 10)
@@ -1286,17 +1286,17 @@ async function inspectPayload(root2, manifest, deps) {
   const found = [];
   const walk = async (base, relative2 = "") => {
     for (const name of await deps.fs.readdir(base)) {
-      const child = relative2 ? `${relative2}/${name}` : name, info = await deps.fs.stat(join5(base, name));
+      const child = relative2 ? `${relative2}/${name}` : name, info = await deps.fs.stat(join6(base, name));
       found.push([child, info.kind, info.mode]);
       if (info.kind === "directory")
-        await walk(join5(base, name), child);
+        await walk(join6(base, name), child);
     }
   };
   await walk(root2);
   if (found.length !== inventory.size + directories.size || found.some(([path, kind, mode]) => inventory.has(path) ? kind !== "file" || mode !== inventory.get(path) : directories.has(path) ? kind !== "directory" || mode !== directories.get(path) : true))
     fail3("filesystem inventory");
   for (const [path, mode] of inventory) {
-    const info = await deps.fs.stat(join5(root2, path)), content = await deps.fs.readFile(join5(root2, path));
+    const info = await deps.fs.stat(join6(root2, path)), content = await deps.fs.readFile(join6(root2, path));
     if (info.kind !== "file" || info.mode !== mode || info.size !== content.length)
       fail3("filesystem metadata");
     if (path !== "manifest.json") {
@@ -1352,7 +1352,7 @@ var init_archive = __esm(() => {
 
 // packages/tmux-pane-dash/src/acquire.ts
 import { createHash as createHash4 } from "node:crypto";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 function fail4(code) {
   throw new CliError(code);
 }
@@ -1521,11 +1521,11 @@ function validateRecord(record, version, selected) {
     fail4("E_PLATFORM");
 }
 async function validatePayload(root2, record, version, deps, fs) {
-  const manifest = JSON.parse(new TextDecoder().decode(await fs.readFile(join6(root2, "manifest.json"))));
+  const manifest = JSON.parse(new TextDecoder().decode(await fs.readFile(join7(root2, "manifest.json"))));
   await inspectPayload(root2, manifest, { ...deps, fs });
   if (manifest.version !== version || manifest.target !== record.target || manifest.asset !== record.asset)
     fail4("E_VERSION");
-  await verifyBinary(join6(root2, "bin/pane-dash"), manifest.version, deps);
+  await verifyBinary(join7(root2, "bin/pane-dash"), manifest.version, deps);
 }
 async function acquireRelease(context) {
   const fs = context.fs ?? context.deps.fs;
@@ -1574,9 +1574,9 @@ var init_acquire = __esm(() => {
 });
 
 // packages/tmux-pane-dash/src/journal.ts
-import { mkdir as mkdir3, open as open2, readFile as readFile4, rename as rename2 } from "node:fs/promises";
-import { dirname as dirname3, join as join7 } from "node:path";
-import { randomBytes as randomBytes2 } from "node:crypto";
+import { mkdir as mkdir4, open as open2, readFile as readFile5, rename as rename3 } from "node:fs/promises";
+import { dirname as dirname3, join as join8 } from "node:path";
+import { randomBytes as randomBytes3 } from "node:crypto";
 function validState(value) {
   return value && ["absent", "file", "directory", "symlink"].includes(value.type) && (value.sha256 === null || typeof value.sha256 === "string") && (value.mode === null || Number.isInteger(value.mode));
 }
@@ -1587,8 +1587,8 @@ function createJournal(input) {
   return { ...input, schemaVersion: 1, phase: "prepared", mutations: [] };
 }
 async function durableWrite(path, bytes, deps) {
-  await mkdir3(dirname3(path), { recursive: true, mode: 448 });
-  const temp = join7(dirname3(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes2(8)).toString("hex")}`);
+  await mkdir4(dirname3(path), { recursive: true, mode: 448 });
+  const temp = join8(dirname3(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes3(8)).toString("hex")}`);
   const file = await open2(temp, "wx", 384);
   try {
     await file.writeFile(bytes);
@@ -1597,7 +1597,7 @@ async function durableWrite(path, bytes, deps) {
   } finally {
     await file.close();
   }
-  await rename2(temp, path);
+  await rename3(temp, path);
   const parent = await open2(dirname3(path), "r");
   try {
     await parent.sync();
@@ -1610,17 +1610,17 @@ async function persistJournal(journal, deps) {
   if (!valid(journal))
     fail5();
   const root2 = await managedRoot(deps.env);
-  await durableWrite(join7(root2, "transactions", journal.id, "journal.json"), new TextEncoder().encode(JSON.stringify(journal)), deps);
+  await durableWrite(join8(root2, "transactions", journal.id, "journal.json"), new TextEncoder().encode(JSON.stringify(journal)), deps);
 }
 async function persistPreimage(root2, id, path, bytes, deps) {
-  await durableWrite(join7(root2, "transactions", id, path), bytes, deps);
+  await durableWrite(join8(root2, "transactions", id, path), bytes, deps);
 }
 async function readJournal(root2, id, _deps) {
   let text3;
   try {
-    text3 = await readFile4(join7(root2, "transactions", id, "journal.json"), "utf8");
+    text3 = await readFile5(join8(root2, "transactions", id, "journal.json"), "utf8");
   } catch (error) {
-    if (missing5(error))
+    if (missing6(error))
       return null;
     fail5();
   }
@@ -1641,7 +1641,7 @@ async function transitionJournal(journal, phase, deps) {
   journal.phase = phase;
   await persistJournal(journal, deps);
 }
-var journalPhases, missing5 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", fail5 = () => {
+var journalPhases, missing6 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", fail5 = () => {
   throw new CliError("E_JOURNAL");
 };
 var init_journal = __esm(() => {
@@ -1651,9 +1651,9 @@ var init_journal = __esm(() => {
 });
 
 // packages/tmux-pane-dash/src/transaction.ts
-import { createHash as createHash5, randomBytes as randomBytes3 } from "node:crypto";
-import { chmod as chmod2, lstat as lstat5, mkdir as mkdir4, open as open3, readFile as readFile5, readlink as readlink4, readdir as readdir5, rename as rename3, rm as rm2, symlink } from "node:fs/promises";
-import { dirname as dirname4, join as join8 } from "node:path";
+import { createHash as createHash5, randomBytes as randomBytes4 } from "node:crypto";
+import { chmod as chmod2, lstat as lstat5, mkdir as mkdir5, open as open3, readFile as readFile6, readlink as readlink4, readdir as readdir5, rename as rename4, rm as rm3, symlink } from "node:fs/promises";
+import { dirname as dirname4, join as join9 } from "node:path";
 async function state(path) {
   try {
     const entry = await lstat5(path);
@@ -1665,9 +1665,9 @@ async function state(path) {
       return { type: "directory", sha256: null, mode: entry.mode & 511 };
     if (!entry.isFile())
       throw new CliError("E_RECOVERY");
-    return { type: "file", sha256: hash2(await readFile5(path)), mode: entry.mode & 511 };
+    return { type: "file", sha256: hash2(await readFile6(path)), mode: entry.mode & 511 };
   } catch (error) {
-    if (missing6(error))
+    if (missing7(error))
       return absent;
     throw error;
   }
@@ -1676,7 +1676,7 @@ function same(left, right) {
   return left.type === right.type && left.sha256 === right.sha256 && left.mode === right.mode && left.target === right.target;
 }
 function temporary(path, deps, attempt) {
-  return join8(dirname4(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes3(8)).toString("hex")}.${attempt}`);
+  return join9(dirname4(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes4(8)).toString("hex")}.${attempt}`);
 }
 async function syncParent(path) {
   const parent = await open3(dirname4(path), "r");
@@ -1687,7 +1687,7 @@ async function syncParent(path) {
   }
 }
 async function stageBytes(path, bytes, mode, deps) {
-  await mkdir4(dirname4(path), { recursive: true, mode: 448 });
+  await mkdir5(dirname4(path), { recursive: true, mode: 448 });
   for (let attempt = 0;; attempt += 1) {
     const temp = temporary(path, deps, attempt);
     try {
@@ -1707,7 +1707,7 @@ async function stageBytes(path, bytes, mode, deps) {
   }
 }
 async function stageSymlink(path, target, deps) {
-  await mkdir4(dirname4(path), { recursive: true, mode: 448 });
+  await mkdir5(dirname4(path), { recursive: true, mode: 448 });
   for (let attempt = 0;; attempt += 1) {
     const temp = temporary(path, deps, attempt);
     try {
@@ -1722,7 +1722,7 @@ async function stageSymlink(path, target, deps) {
 async function publish(path, temp, expected) {
   if (!same(await state(path), expected))
     throw new CliError("E_RECOVERY");
-  await rename3(temp, path);
+  await rename4(temp, path);
   await syncParent(path);
 }
 function fault(deps, phase, boundary) {
@@ -1765,7 +1765,7 @@ async function capture(mutation, root2, id, deps) {
   const pre = mutation.expectedPreimage?.state ?? await state(mutation.resolvedPath);
   if (pre.type !== "file")
     return { pre, preimage: null };
-  const bytes = mutation.expectedPreimage?.bytes ?? await readFile5(mutation.resolvedPath), preimage = join8("preimages", `${hash2(new TextEncoder().encode(mutation.resolvedPath))}.bin`);
+  const bytes = mutation.expectedPreimage?.bytes ?? await readFile6(mutation.resolvedPath), preimage = join9("preimages", `${hash2(new TextEncoder().encode(mutation.resolvedPath))}.bin`);
   await persistPreimage(root2, id, preimage, bytes, deps);
   return { pre, preimage };
 }
@@ -1786,25 +1786,25 @@ async function reverse(mutation, root2, journalId, deps) {
   if (!same(current, mutation.post))
     throw new CliError("E_RECOVERY");
   if (mutation.pre.type === "absent") {
-    await rm2(mutation.resolvedPath, { recursive: true, force: true });
+    await rm3(mutation.resolvedPath, { recursive: true, force: true });
     await syncParent(mutation.resolvedPath);
     return;
   }
   if (mutation.pre.type === "directory" && mutation.backupPath) {
     if (!same(await state(mutation.backupPath), mutation.pre))
       throw new CliError("E_RECOVERY");
-    await rename3(mutation.backupPath, mutation.resolvedPath);
+    await rename4(mutation.backupPath, mutation.resolvedPath);
     await syncParent(mutation.resolvedPath);
     return;
   }
   if (mutation.pre.type === "symlink") {
-    await rm2(mutation.resolvedPath, { force: true });
+    await rm3(mutation.resolvedPath, { force: true });
     await symlink(mutation.pre.target, mutation.resolvedPath);
     await syncParent(mutation.resolvedPath);
     return;
   }
   if (mutation.pre.type === "file" && mutation.preimage) {
-    const staged = await stageBytes(mutation.resolvedPath, await readFile5(join8(root2, "transactions", journalId, mutation.preimage)), mutation.pre.mode, deps);
+    const staged = await stageBytes(mutation.resolvedPath, await readFile6(join9(root2, "transactions", journalId, mutation.preimage)), mutation.pre.mode, deps);
     await publish(mutation.resolvedPath, staged.temp, mutation.post);
     return;
   }
@@ -1818,9 +1818,9 @@ async function rollback(journal, deps) {
 async function recoverIncomplete(root2, deps) {
   let ids;
   try {
-    ids = await readdir5(join8(root2, "transactions"));
+    ids = await readdir5(join9(root2, "transactions"));
   } catch (error) {
-    if (missing6(error))
+    if (missing7(error))
       return;
     throw error;
   }
@@ -1830,7 +1830,7 @@ async function recoverIncomplete(root2, deps) {
     const journal = await readJournal(root2, id, deps);
     if (journal && journal.phase !== "complete") {
       await rollback(journal, deps);
-      await rm2(join8(root2, "transactions", id), { recursive: true, force: true });
+      await rm3(join9(root2, "transactions", id), { recursive: true, force: true });
     }
   }
 }
@@ -1849,7 +1849,7 @@ async function removeMutation(journal, mutation, occurrence, deps) {
   crashMutation(deps, mutation.operation, occurrence, "intent");
   if (!same(await state(mutation.resolvedPath), mutation.pre))
     throw new CliError("E_RECOVERY");
-  await rm2(mutation.resolvedPath, { recursive: false, force: true });
+  await rm3(mutation.resolvedPath, { recursive: false, force: true });
   await syncParent(mutation.resolvedPath);
   crashMutation(deps, mutation.operation, occurrence, "published");
   await markApplied(journal, recorded, deps);
@@ -1860,7 +1860,7 @@ async function moveMutation(journal, mutation, from, occurrence, deps) {
   crashMutation(deps, mutation.operation, occurrence, "intent");
   if (!same(await state(mutation.resolvedPath), mutation.pre))
     throw new CliError("E_RECOVERY");
-  await rename3(from, mutation.resolvedPath);
+  await rename4(from, mutation.resolvedPath);
   await syncParent(mutation.resolvedPath);
   crashMutation(deps, mutation.operation, occurrence, "published");
   await markApplied(journal, recorded, deps);
@@ -1871,7 +1871,7 @@ async function tombstoneMutation(journal, mutation, occurrence, deps) {
   crashMutation(deps, "current", occurrence, "intent");
   if (!same(await state(mutation.resolvedPath), mutation.pre) || !mutation.backupPath)
     throw new CliError("E_RECOVERY");
-  await rename3(mutation.resolvedPath, mutation.backupPath);
+  await rename4(mutation.resolvedPath, mutation.backupPath);
   await syncParent(mutation.resolvedPath);
   crashMutation(deps, "current", occurrence, "published");
   await markApplied(journal, recorded, deps);
@@ -1882,7 +1882,7 @@ async function executeTransaction(plan, deps) {
   await ensureManagedRoot(root2);
   await recoverIncomplete(root2, deps);
   signal(deps);
-  const id = Buffer.from(deps.randomBytes?.(16) ?? randomBytes3(16)).toString("hex"), journal = createJournal({ id, command: plan.command, packageVersion: deps.executingVersion, previousCurrent: plan.previousCurrent, components: plan.components });
+  const id = Buffer.from(deps.randomBytes?.(16) ?? randomBytes4(16)).toString("hex"), journal = createJournal({ id, command: plan.command, packageVersion: deps.executingVersion, previousCurrent: plan.previousCurrent, components: plan.components });
   await persistJournal(journal, deps);
   try {
     fault(deps, "prepared", "before");
@@ -1890,12 +1890,12 @@ async function executeTransaction(plan, deps) {
       throw new Error("E_CRASH");
     fault(deps, "prepared", "after");
     const staged = await Promise.all(plan.configMutations.map(async (mutation) => ({ mutation, ...await capture(mutation, root2, id, deps) })));
-    const version = join8(root2, "versions", plan.desiredVersion);
+    const version = join9(root2, "versions", plan.desiredVersion);
     if (plan.uninstall?.tombstoneVersions) {
-      const tombstone = join8(root2, "transactions", id, "tombstone", "versions"), source = join8(root2, "versions"), pre = await state(source);
+      const tombstone = join9(root2, "transactions", id, "tombstone", "versions"), source = join9(root2, "versions"), pre = await state(source);
       if (pre.type !== "directory")
         throw new CliError("E_OWNERSHIP");
-      await mkdir4(dirname4(tombstone), { recursive: true, mode: 448 });
+      await mkdir5(dirname4(tombstone), { recursive: true, mode: 448 });
       await tombstoneMutation(journal, { operation: "tombstone", logicalPath: source, resolvedPath: source, pre, post: absent, preimage: null, backupPath: tombstone }, 1, deps);
     } else if (plan.versionActivation) {
       const pre = await state(version);
@@ -1903,11 +1903,11 @@ async function executeTransaction(plan, deps) {
         throw new CliError("E_RECOVERY");
       await moveMutation(journal, { operation: "version", logicalPath: version, resolvedPath: version, pre, post: await state(plan.versionActivation.stagingPath), preimage: null }, plan.versionActivation.stagingPath, 1, deps);
     } else if (plan.command !== "uninstall")
-      await mkdir4(version, { recursive: true, mode: 448 });
+      await mkdir5(version, { recursive: true, mode: 448 });
     await phase(journal, "version_staged", deps);
     signal(deps);
     await phase(journal, "configs_staged", deps);
-    const current = join8(root2, "current"), currentPre = await state(current), target = `versions/${plan.desiredVersion}`;
+    const current = join9(root2, "current"), currentPre = await state(current), target = `versions/${plan.desiredVersion}`;
     if (plan.uninstall?.removeCurrent)
       await removeMutation(journal, { operation: "current", logicalPath: current, resolvedPath: current, pre: currentPre, post: absent, preimage: null }, 1, deps);
     else {
@@ -1926,12 +1926,12 @@ async function executeTransaction(plan, deps) {
       await removeMutation(journal, { operation: "config", logicalPath: item.logicalPath, resolvedPath: item.logicalPath, pre, post: absent, preimage: null }, staged.length + index + 1, deps);
     }
     if (deps.collisionAfterMutation && journal.mutations.length) {
-      await rm2(journal.mutations.at(-1).resolvedPath, { force: true });
+      await rm3(journal.mutations.at(-1).resolvedPath, { force: true });
       throw new CliError("E_RECOVERY");
     }
     await phase(journal, "configs_committed", deps);
     signal(deps);
-    const ownershipPath = join8(root2, "state", "ownership.json"), ownershipCapture = await capture({ logicalPath: ownershipPath, resolvedPath: ownershipPath, bytes: new Uint8Array }, root2, id, deps);
+    const ownershipPath = join9(root2, "state", "ownership.json"), ownershipCapture = await capture({ logicalPath: ownershipPath, resolvedPath: ownershipPath, bytes: new Uint8Array }, root2, id, deps);
     if (plan.uninstall?.removeOwnership)
       await removeMutation(journal, { operation: "ownership", logicalPath: ownershipPath, resolvedPath: ownershipPath, pre: ownershipCapture.pre, post: absent, preimage: ownershipCapture.preimage }, 1, deps);
     else {
@@ -1940,20 +1940,20 @@ async function executeTransaction(plan, deps) {
     }
     await phase(journal, "ownership_committed", deps);
     await phase(journal, "complete", deps);
-    await rm2(join8(root2, "transactions", id), { recursive: true, force: true });
+    await rm3(join9(root2, "transactions", id), { recursive: true, force: true });
   } catch (error) {
     if (error instanceof Error && error.message === "E_CRASH")
       throw error;
     try {
       await rollback(journal, deps);
-      await rm2(join8(root2, "transactions", id), { recursive: true, force: true });
+      await rm3(join9(root2, "transactions", id), { recursive: true, force: true });
     } catch (rollbackError) {
       throw rollbackError;
     }
     throw error;
   }
 }
-var missing6 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", hash2 = (bytes) => createHash5("sha256").update(bytes).digest("hex"), absent;
+var missing7 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", hash2 = (bytes) => createHash5("sha256").update(bytes).digest("hex"), absent;
 var init_transaction = __esm(() => {
   init_errors();
   init_fs();
@@ -1968,14 +1968,14 @@ __export(exports_setup, {
   setup: () => setup,
   inventoryConflicts: () => inventoryConflicts
 });
-import { createHash as createHash6, randomBytes as randomBytes4 } from "node:crypto";
-import { lstat as lstat6, readFile as readFile6 } from "node:fs/promises";
-import { dirname as dirname5, join as join9 } from "node:path";
+import { createHash as createHash6, randomBytes as randomBytes5 } from "node:crypto";
+import { lstat as lstat6, readFile as readFile7 } from "node:fs/promises";
+import { dirname as dirname5, join as join10 } from "node:path";
 async function readOr(path, fallback) {
   try {
-    return new Uint8Array(await readFile6(path));
+    return new Uint8Array(await readFile7(path));
   } catch (error) {
-    if (missing7(error))
+    if (missing8(error))
       return encoder3.encode(fallback);
     throw error;
   }
@@ -1985,7 +1985,7 @@ async function exists2(path) {
     await lstat6(path);
     return true;
   } catch (error) {
-    if (missing7(error))
+    if (missing8(error))
       return false;
     throw error;
   }
@@ -1999,7 +1999,7 @@ async function inventoryConflicts(input, deps) {
     if (!deps.env?.HOME)
       throw new CliError("E_ROOT");
     const root2 = await managedRoot(deps.env);
-    const resolved = await resolveConfigPath(join9(deps.env.HOME, ".tmux.conf"), deps);
+    const resolved = await resolveConfigPath(join10(deps.env.HOME, ".tmux.conf"), deps);
     const bytes = await readOr(resolved.resolvedPath, "");
     tmux = planned(planTmuxEdit({ ...resolved, bytes, mode: resolved.mode ?? 384, installRoot: root2, migrate: input.migrate }), resolved, bytes);
   }
@@ -2016,8 +2016,8 @@ function owned(path, marker, packageEntries = []) {
   return { logicalPath: path.logicalPath, resolvedPath: path.resolvedPath, marker, packageEntries, baselineBackup: { logicalPath: path.logicalPath, sha256: digest2(path.bytes) } };
 }
 async function files(directory, destination = directory) {
-  const raw = JSON.parse(await readFile6(join9(directory, "manifest.json"), "utf8"));
-  return raw.files.map((file) => ({ logicalPath: join9(destination, file.path), resolvedPath: join9(destination, file.path), sha256: file.sha256, mode: Number.parseInt(file.mode, 8), type: "file" }));
+  const raw = JSON.parse(await readFile7(join10(directory, "manifest.json"), "utf8"));
+  return raw.files.map((file) => ({ logicalPath: join10(destination, file.path), resolvedPath: join10(destination, file.path), sha256: file.sha256, mode: Number.parseInt(file.mode, 8), type: "file" }));
 }
 async function setup(command, deps) {
   const root2 = await managedRoot(deps.env);
@@ -2029,16 +2029,16 @@ async function setup(command, deps) {
   const record2 = selectRelease(parseReleaseManifest(deps.manifest), deps.platform, deps.arch);
   const packageEntry = `@xiopt/pane-dash-opencode@${deps.executingVersion}`, inventory2 = await inventoryConflicts({ ...command, packageEntry, ownedOpenCodeEntries: prior?.components.opencode?.packageEntries }, deps);
   await ensureManagedRoot(root2);
-  const staging = join9(root2, "transactions", `payload-${Buffer.from(deps.randomBytes?.(8) ?? randomBytes4(8)).toString("hex")}`);
-  const acquired = await acquireRelease({ versionDirectory: join9(root2, "versions", deps.executingVersion), stagingRoot: staging, record: record2, deps });
-  const payload = await files(acquired.versionDirectory, join9(root2, "versions", deps.executingVersion)), currentTarget = `versions/${deps.executingVersion}`;
+  const staging = join10(root2, "transactions", `payload-${Buffer.from(deps.randomBytes?.(8) ?? randomBytes5(8)).toString("hex")}`);
+  const acquired = await acquireRelease({ versionDirectory: join10(root2, "versions", deps.executingVersion), stagingRoot: staging, record: record2, deps });
+  const payload = await files(acquired.versionDirectory, join10(root2, "versions", deps.executingVersion)), currentTarget = `versions/${deps.executingVersion}`;
   const ownership = { schemaVersion: 1, packageVersion: deps.executingVersion, releaseVersion: deps.executingVersion, archive: { target: record2.target, sha256: record2.sha256 }, files: payload, currentTarget, components: {
     tmux: inventory2.tmux ? owned(inventory2.tmux, managedTmuxBlock(root2)) : prior?.components.tmux ?? null,
     opencode: inventory2.opencode ? owned(inventory2.opencode, packageEntry, [packageEntry]) : prior?.components.opencode ?? null
   }, migrations: inventory2.migrations.map((item) => ({ from: item.logicalPath, to: item.resolvedPath, sha256: "" })) };
   await executeTransaction({ command: "setup", components: { tmux: command.tmux, opencode: command.opencode }, desiredVersion: deps.executingVersion, previousCurrent: prior?.currentTarget ?? null, configMutations: [inventory2.tmux, inventory2.opencode].filter((item) => item !== null), migrationUnlinks: inventory2.migrations, ownership, ...acquired.kind === "staged" ? { versionActivation: { stagingPath: acquired.versionDirectory } } : {} }, deps);
 }
-var encoder3, digest2 = (value) => createHash6("sha256").update(value).digest("hex"), missing7 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT";
+var encoder3, digest2 = (value) => createHash6("sha256").update(value).digest("hex"), missing8 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT";
 var init_setup = __esm(() => {
   init_acquire();
   init_config_opencode();
@@ -2058,7 +2058,7 @@ __export(exports_update, {
   update: () => update
 });
 import { readlink as readlink5 } from "node:fs/promises";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 async function update(deps) {
   const root2 = await managedRoot(deps.env);
   try {
@@ -2072,7 +2072,7 @@ async function update(deps) {
   if (!ownership)
     throw new CliError("E_USAGE", "no installation; run setup");
   try {
-    if (await readlink5(join10(root2, "current")) !== ownership.currentTarget)
+    if (await readlink5(join11(root2, "current")) !== ownership.currentTarget)
       throw new CliError("E_OWNERSHIP", "owned current target changed");
   } catch (error) {
     if (error instanceof CliError)
@@ -2095,10 +2095,10 @@ __export(exports_uninstall, {
   uninstall: () => uninstall
 });
 import { createHash as createHash7 } from "node:crypto";
-import { readFile as readFile7, readlink as readlink6 } from "node:fs/promises";
-import { join as join11 } from "node:path";
+import { readFile as readFile8, readlink as readlink6 } from "node:fs/promises";
+import { join as join12 } from "node:path";
 async function bytes(path) {
-  return new Uint8Array(await readFile7(path));
+  return new Uint8Array(await readFile8(path));
 }
 function planned2(mutation, resolved, content) {
   return { ...mutation, expectedPreimage: { state: { type: "file", sha256: digest3(content), mode: resolved.mode ?? 384 }, bytes: content, symlinkChain: resolved.symlinkChain } };
@@ -2108,7 +2108,7 @@ async function uninstall(deps) {
   try {
     await validateManagedRoot(root2, deps);
   } catch (error) {
-    if (missing8(error))
+    if (missing9(error))
       return;
     throw error;
   }
@@ -2116,16 +2116,16 @@ async function uninstall(deps) {
   if (!ownership) {
     if (deps.env?.HOME)
       try {
-        if ((await readFile7(join11(deps.env.HOME, ".tmux.conf"), "utf8")).includes("# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>"))
+        if ((await readFile8(join12(deps.env.HOME, ".tmux.conf"), "utf8")).includes("# >>> tmux-pane-dash (@xiopt/tmux-pane-dash) schema=1 >>>"))
           throw new CliError("E_OWNERSHIP", "managed marker requires manual review");
       } catch (error) {
-        if (!missing8(error))
+        if (!missing9(error))
           throw error;
       }
     return;
   }
   try {
-    if (await readlink6(join11(root2, "current")) !== ownership.currentTarget)
+    if (await readlink6(join12(root2, "current")) !== ownership.currentTarget)
       throw new CliError("E_OWNERSHIP", "owned current target changed");
   } catch (error) {
     if (error instanceof CliError)
@@ -2148,7 +2148,7 @@ async function uninstall(deps) {
   }
   await executeTransaction({ command: "uninstall", components: { tmux: ownership.components.tmux !== null, opencode: ownership.components.opencode !== null }, desiredVersion: ownership.releaseVersion, previousCurrent: ownership.currentTarget, configMutations: edits, uninstall: { tombstoneVersions: true, removeCurrent: true, removeOwnership: true } }, deps);
 }
-var missing8 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", digest3 = (value) => createHash7("sha256").update(value).digest("hex");
+var missing9 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", digest3 = (value) => createHash7("sha256").update(value).digest("hex");
 var init_uninstall = __esm(() => {
   init_config_opencode();
   init_config_tmux();
@@ -2197,14 +2197,19 @@ async function runCli(argv, deps) {
     if (command.name === "setup")
       selectRelease(manifest, deps.platform, deps.arch);
   }
-  await deps.lock?.();
-  if (command.name === "setup")
-    await (await Promise.resolve().then(() => (init_setup(), exports_setup))).setup(command, deps);
-  else if (command.name === "update")
-    await (await Promise.resolve().then(() => (init_update(), exports_update))).update(deps);
-  else
-    await (await Promise.resolve().then(() => (init_uninstall(), exports_uninstall))).uninstall(deps);
-  return 0;
+  let lock;
+  try {
+    lock = deps.lock ? await deps.lock(command.name) : undefined;
+    if (command.name === "setup")
+      await (await Promise.resolve().then(() => (init_setup(), exports_setup))).setup(command, deps);
+    else if (command.name === "update")
+      await (await Promise.resolve().then(() => (init_update(), exports_update))).update(deps);
+    else
+      await (await Promise.resolve().then(() => (init_uninstall(), exports_uninstall))).uninstall(deps);
+    return 0;
+  } finally {
+    await lock?.release();
+  }
 }
 var init_runtime = __esm(() => {
   init_args();
@@ -2224,12 +2229,77 @@ var release_manifest_default = {
 };
 
 // packages/tmux-pane-dash/src/dependencies.ts
-init_fs();
 import { spawn } from "node:child_process";
-import { lstat as lstat2, readFile as readFile2, readdir as readdir2, readlink as readlink2 } from "node:fs/promises";
+import { lstat as lstat3, readFile as readFile4, readdir as readdir3, readlink as readlink3 } from "node:fs/promises";
 import process2 from "node:process";
+
+// packages/tmux-pane-dash/src/lock.ts
+init_errors();
+init_ownership();
+import { mkdir as mkdir2, readFile as readFile2, rename, rm, writeFile } from "node:fs/promises";
+import { join as join2 } from "node:path";
+import { randomBytes } from "node:crypto";
+var missing2 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT";
+function owner(value) {
+  if (typeof value !== "object" || value === null)
+    return false;
+  const candidate = value;
+  return candidate.schemaVersion === 1 && typeof candidate.token === "string" && /^[a-f0-9]{32,}$/.test(candidate.token) && Number.isInteger(candidate.pid) && (candidate.command === "setup" || candidate.command === "update" || candidate.command === "uninstall") && typeof candidate.packageVersion === "string" && typeof candidate.startedAt === "number";
+}
+async function acquireLock(command, deps) {
+  const root = await managedRoot(deps.env), path = join2(root, "transactions", "lock");
+  await ensureManagedRoot(root);
+  let recovered = false;
+  try {
+    await mkdir2(path, { mode: 448 });
+  } catch (error) {
+    if (!(typeof error === "object" && error !== null && ("code" in error) && error.code === "EEXIST"))
+      throw error;
+    let prior;
+    try {
+      prior = JSON.parse(await readFile2(join2(path, "owner.json"), "utf8"));
+    } catch {
+      throw new CliError("E_LOCK");
+    }
+    if (!owner(prior))
+      throw new CliError("E_LOCK");
+    if ((deps.isPidAlive ?? ((pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    }))(prior.pid))
+      throw Object.assign(new CliError("E_LOCKED"), { exitStatus: 73 });
+    const tombstone = `${path}.recovering-${(deps.randomBytes?.(8) ?? randomBytes(8)).toString()}`;
+    try {
+      await rename(path, tombstone);
+      await rm(tombstone, { recursive: true, force: true });
+      await mkdir2(path, { mode: 448 });
+      recovered = true;
+    } catch {
+      throw new CliError("E_LOCK");
+    }
+  }
+  const token = Buffer.from(deps.randomBytes?.(16) ?? randomBytes(16)).toString("hex"), value = { schemaVersion: 1, token, pid: deps.pid?.() ?? process.pid, command, packageVersion: deps.executingVersion, startedAt: deps.nowMs?.() ?? Date.now() };
+  await writeFile(join2(path, "owner.json"), JSON.stringify(value), { mode: 384 });
+  return { token, recovered, async release() {
+    try {
+      const current = JSON.parse(await readFile2(join2(path, "owner.json"), "utf8"));
+      if (owner(current) && current.token === token)
+        await rm(path, { recursive: true, force: true });
+    } catch (error) {
+      if (!missing2(error))
+        throw error;
+    }
+  } };
+}
+
+// packages/tmux-pane-dash/src/dependencies.ts
+init_fs();
 function nodeDependencies() {
-  const child = (path, args, options) => new Promise((resolve2, reject) => {
+  const child = (path, args, options) => new Promise((resolve3, reject) => {
     const process3 = spawn(path, args, { env: options.env, stdio: ["ignore", "pipe", "pipe"] });
     const stdout = [], stderr = [];
     let size = 0, overflow = false, timedOut = false;
@@ -2256,29 +2326,34 @@ function nodeDependencies() {
       else if (timedOut)
         reject(new Error("E_BINARY_TIMEOUT"));
       else
-        resolve2({ code: code ?? 1, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() });
+        resolve3({ code: code ?? 1, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() });
     });
   });
   const env = Object.getOwnPropertyDescriptor(process2, "env").value;
   const doctorFs = {
     async readFile(path) {
-      return new Uint8Array(await readFile2(path));
+      return new Uint8Array(await readFile4(path));
     },
     async stat(path) {
-      const entry = await lstat2(path);
+      const entry = await lstat3(path);
       return { kind: entry.isFile() ? "file" : entry.isDirectory() ? "directory" : entry.isSymbolicLink() ? "symlink" : "other", mode: entry.mode & 4095, size: entry.size, dev: entry.dev, ino: entry.ino };
     },
-    readdir: readdir2,
-    readlink: readlink2
+    readdir: readdir3,
+    readlink: readlink3
   };
-  return { manifest: release_manifest_default, platform: process2.platform, arch: process2.arch, executingVersion: release_manifest_default.version, ...{ fs: nodeFsOps(), doctorFs, doctorOutput: (text) => process2.stdout.write(text), nowMs: Date.now, fetch: globalThis.fetch.bind(globalThis), spawn: child, env, pid: () => process2.pid, uid: () => process2.getuid?.() ?? 0, isPidAlive: (pid) => {
+  const deps = { manifest: release_manifest_default, platform: process2.platform, arch: process2.arch, executingVersion: release_manifest_default.version, fs: nodeFsOps(), doctorFs, doctorOutput: (text) => process2.stdout.write(text), nowMs: Date.now, fetch: async (url, init) => {
+    const response = await globalThis.fetch(url, init);
+    return { status: response.status, headers: response.headers, body: response.body ?? undefined };
+  }, spawn: child, env, pid: () => process2.pid, uid: () => process2.getuid?.() ?? 0, isPidAlive: (pid) => {
     try {
       process2.kill(pid, 0);
       return true;
     } catch {
       return false;
     }
-  } } };
+  } };
+  deps.lock = (command) => acquireLock(command, deps);
+  return deps;
 }
 
 // packages/tmux-pane-dash/src/cli.ts

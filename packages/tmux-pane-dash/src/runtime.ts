@@ -1,5 +1,5 @@
 import { parseArgs } from "./args"
-import type { Command, ReleaseManifest } from "./contracts"
+import type { Command, LockHandle, MutationCommand, ReleaseManifest } from "./contracts"
 import { CliError } from "./errors"
 import { parseReleaseManifest, selectRelease } from "./manifest"
 import type { FsOps } from "./fs"
@@ -20,7 +20,7 @@ export type Dependencies = {
   arch: NodeJS.Architecture
   executingVersion: string
   ownedVersion?: string
-  lock?: () => void | Promise<void>
+  lock?: (command: MutationCommand) => Promise<LockHandle>
   fetch?: (url: string, init: { redirect: "manual"; signal: AbortSignal; headers: Record<string, never> }) => Promise<FetchResponse>
   fs?: FsOps
   nowMs?: () => number
@@ -74,9 +74,14 @@ export async function runCli(argv: readonly string[], deps: Dependencies): Promi
     return report.healthy ? 0 : 1
   }
   if (command.name === "setup" || command.name === "update") { const manifest: ReleaseManifest = parseReleaseManifest(deps.manifest); if (manifest.version !== deps.executingVersion) throw new CliError("E_VERSION", "release manifest version does not match executing version"); if (command.name === "setup") selectRelease(manifest, deps.platform, deps.arch) }
-  await deps.lock?.()
-  if (command.name === "setup") await (await import("./commands/setup")).setup(command, deps)
-  else if (command.name === "update") await (await import("./commands/update")).update(deps)
-  else await (await import("./commands/uninstall")).uninstall(deps)
-  return 0
+  let lock: LockHandle | undefined
+  try {
+    lock = deps.lock ? await deps.lock(command.name) : undefined
+    if (command.name === "setup") await (await import("./commands/setup")).setup(command, deps)
+    else if (command.name === "update") await (await import("./commands/update")).update(deps)
+    else await (await import("./commands/uninstall")).uninstall(deps)
+    return 0
+  } finally {
+    await lock?.release()
+  }
 }

@@ -2136,14 +2136,19 @@ async function runCli(argv, deps) {
     if (command.name === "setup")
       selectRelease(manifest, deps.platform, deps.arch);
   }
-  await deps.lock?.();
-  if (command.name === "setup")
-    await (await Promise.resolve().then(() => (init_setup(), exports_setup))).setup(command, deps);
-  else if (command.name === "update")
-    await (await Promise.resolve().then(() => (init_update(), exports_update))).update(deps);
-  else
-    await (await Promise.resolve().then(() => (init_uninstall(), exports_uninstall))).uninstall(deps);
-  return 0;
+  let lock;
+  try {
+    lock = deps.lock ? await deps.lock(command.name) : undefined;
+    if (command.name === "setup")
+      await (await Promise.resolve().then(() => (init_setup(), exports_setup))).setup(command, deps);
+    else if (command.name === "update")
+      await (await Promise.resolve().then(() => (init_update(), exports_update))).update(deps);
+    else
+      await (await Promise.resolve().then(() => (init_uninstall(), exports_uninstall))).uninstall(deps);
+    return 0;
+  } finally {
+    await lock?.release();
+  }
 }
 var init_runtime = __esm(() => {
   init_args();

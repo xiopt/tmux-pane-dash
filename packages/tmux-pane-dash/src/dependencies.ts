@@ -2,6 +2,7 @@ import releaseManifest from "../generated/release-manifest.json"
 import { spawn } from "node:child_process"
 import { lstat, readFile, readdir, readlink } from "node:fs/promises"
 import process from "node:process"
+import { acquireLock } from "./lock"
 import type { Dependencies } from "./runtime"
 import { nodeFsOps } from "./fs"
 
@@ -19,5 +20,10 @@ export function nodeDependencies(): Dependencies {
     readdir,
     readlink,
   }
-  return { manifest: releaseManifest, platform: process.platform, arch: process.arch, executingVersion: releaseManifest.version, ...( { fs: nodeFsOps(), doctorFs, doctorOutput: (text: string) => process.stdout.write(text), nowMs: Date.now, fetch: globalThis.fetch.bind(globalThis), spawn: child, env, pid: () => process.pid, uid: () => process.getuid?.() ?? 0, isPidAlive: (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } } } as any) }
+  const deps: Dependencies = { manifest: releaseManifest, platform: process.platform, arch: process.arch, executingVersion: releaseManifest.version, fs: nodeFsOps(), doctorFs, doctorOutput: (text: string) => process.stdout.write(text), nowMs: Date.now, fetch: async (url, init) => {
+    const response = await globalThis.fetch(url, init)
+    return { status: response.status, headers: response.headers, body: response.body ?? undefined }
+  }, spawn: child, env, pid: () => process.pid, uid: () => process.getuid?.() ?? 0, isPidAlive: (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } } }
+  deps.lock = command => acquireLock(command, deps)
+  return deps
 }
