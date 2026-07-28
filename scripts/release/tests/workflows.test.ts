@@ -116,7 +116,7 @@ test("release graph has exact least-privilege jobs, environments, handoff, and t
     expect(body).toContain('j.verifier.sha256!==c.createHash("sha256")')
     expect(body).not.toMatch(/npm install.*sigstore|bun build/)
   }
-  expect(text).toContain("npm publish <tarball> --access public --provenance")
+  expect(text).toContain('npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.0.tgz" --access public --provenance')
   expect(text).toContain("npm publish")
   expect(text).toContain("vars.NPM_TRUSTED_PUBLISHER_BINDING")
   expect(text).toContain("trustedPublishers")
@@ -133,10 +133,24 @@ test("release validation derives identity from the checked-in version and protec
   expect(validation).toContain('git rev-parse "$GITHUB_SHA^{commit}"')
   expect(validation).toContain('git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}"')
   expect(validation).toContain('refs/remotes/origin/master')
-  expect(validation).toContain('git merge-base --is-ancestor "$GITHUB_SHA"')
+  expect(validation).toContain('git merge-base --is-ancestor "$github_commit"')
   expect(validation).not.toContain("ci(release): add gated v0.1 delivery pipeline")
   expect(validation).not.toMatch(/git show -s --format=%s/)
   expect(validation).not.toMatch(/test "\$GITHUB_REF_NAME" = "v0\.1\.0"/)
+})
+
+test("tag validation compares resolved tag and GitHub commits without requiring the current master tip", async () => {
+  const text = await workflow("release.yml")
+  const validation = job(text, "validate-tag")
+  expect(validation).toContain('github_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"')
+  expect(validation).toContain('tag_commit="$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")"')
+  expect(validation).toContain('test "$tag_commit" = "$github_commit"')
+  expect(validation).toContain('git merge-base --is-ancestor "$github_commit" refs/remotes/origin/master')
+  expect(validation).not.toContain("master_sha")
+  expect(validation).not.toContain('test "$sha" = "$GITHUB_SHA"')
+  expect(validation).not.toMatch(/test .*refs\/remotes\/origin\/master\^\{commit\}.*=/)
+  expect(validation).toContain('origin_url="$(git remote get-url origin)"')
+  expect(validation).toContain('https://github.com/xiopt/tmux-pane-dash')
 })
 
 test("release target executions use matching hosted runners and never local fixtures", async () => {
@@ -196,6 +210,52 @@ test("npm production audits signatures without fallback bindings and verifies pu
   expect(plugin).toBeGreaterThanOrEqual(0)
   expect(cli).toBeGreaterThan(plugin)
   expect(npm.indexOf("--package @xiopt/pane-dash-opencode")).toBeLessThan(npm.indexOf("--package @xiopt/tmux-pane-dash"))
+})
+
+test("npm production audits only the exact published versions in an isolated no-auth project", async () => {
+  const text = await workflow("release.yml")
+  const npm = job(text, "npm-production")
+  const install = 'npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm install --prefix "$audit_dir" --ignore-scripts --no-audit --no-fund --package-lock=false @xiopt/pane-dash-opencode@0.1.0 @xiopt/tmux-pane-dash@0.1.0'
+  const signatures = 'npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm audit signatures --prefix "$audit_dir"'
+  expect(npm).toContain('audit_dir="$RUNNER_TEMP/npm-audit"')
+  expect(npm).toContain('registry=https://registry.npmjs.org/')
+  expect(npm).toContain(install)
+  expect(npm).toContain(signatures)
+  expect(npm).not.toContain("--package-lock=true")
+  expect(npm).not.toContain('"dependencies"')
+  expect(npm).not.toContain("# npm publish <tarball>")
+  const pluginPublish = npm.indexOf('npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.0.tgz"')
+  const cliPublish = npm.indexOf('npm publish "$RUNNER_TEMP/npm/xiopt-tmux-pane-dash-0.1.0.tgz"')
+  const installIndex = npm.indexOf(install)
+  const auditIndex = npm.indexOf(signatures)
+  const provenanceIndex = npm.indexOf('"$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/pane-dash-opencode')
+  expect(pluginPublish).toBeGreaterThanOrEqual(0)
+  expect(cliPublish).toBeGreaterThan(pluginPublish)
+  expect(installIndex).toBeGreaterThan(cliPublish)
+  expect(auditIndex).toBeGreaterThan(installIndex)
+  expect(provenanceIndex).toBeGreaterThan(auditIndex)
+  expect(npm).not.toContain("npm install --global")
+})
+
+test("draft validation verifies each exact release asset with the tagged workflow identity", async () => {
+  const text = await workflow("release.yml")
+  const validation = job(text, "validate-draft")
+  for (const asset of [
+    "tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz",
+    "tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz",
+    "tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz",
+    "tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz",
+    "release-manifest.json",
+    "SHA256SUMS",
+  ]) expect(validation).toContain(`$RUNNER_TEMP/draft/${asset}`)
+  expect(validation).toContain("attestation_assets=(")
+  expect(validation).toContain("--repo \"$GITHUB_REPOSITORY\"")
+  expect(validation).toContain("--signer-workflow xiopt/tmux-pane-dash/.github/workflows/release.yml")
+  expect(validation).toContain("--source-ref refs/tags/v0.1.0")
+  expect(validation).toContain("--source-digest \"$GITHUB_SHA\"")
+  expect(validation).toContain("--signer-digest \"$GITHUB_SHA\"")
+  expect(validation).not.toContain('"$RUNNER_TEMP/draft"/*.tar.gz')
+  expect(validation).not.toContain('gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY"; done')
 })
 
 test("promotion consumes sanitized approval and environment proof before draft=false", async () => {

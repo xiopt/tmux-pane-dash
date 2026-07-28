@@ -25,15 +25,12 @@ jobs:
           expected_tag="v$version"
           test "$GITHUB_REF" = "refs/tags/$expected_tag"
           test "$GITHUB_REF_NAME" = "$expected_tag"
-          sha="$(git rev-parse "$GITHUB_SHA^{commit}")"
-          tag_sha="$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")"
-          master_sha="$(git rev-parse 'refs/remotes/origin/master^{commit}')"
-          test "$sha" = "$GITHUB_SHA"
-          test "$tag_sha" = "$sha"
-          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/master
-          test "$(git rev-parse refs/remotes/origin/master^{commit})" = "$master_sha"
-           origin_url="$(git remote get-url origin)"
-           [[ "$origin_url" == "https://github.com/xiopt/tmux-pane-dash" || "$origin_url" == "https://github.com/xiopt/tmux-pane-dash.git" ]]
+          github_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          tag_commit="$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")"
+          test "$tag_commit" = "$github_commit"
+          git merge-base --is-ancestor "$github_commit" refs/remotes/origin/master
+          origin_url="$(git remote get-url origin)"
+          [[ "$origin_url" == "https://github.com/xiopt/tmux-pane-dash" || "$origin_url" == "https://github.com/xiopt/tmux-pane-dash.git" ]]
 
   build-test:
     needs: validate-tag
@@ -309,7 +306,23 @@ jobs:
           if (manifest.version !== "0.1.0" || manifest.tag !== "v0.1.0" || Object.keys(manifest.assets).sort().join(",") !== "darwin-arm64,darwin-x64,linux-arm64,linux-x64") throw new Error("version/architecture inventory mismatch");
           NODE
           bun scripts/release/verify-artifacts.ts "$RUNNER_TEMP/draft" --tag-commit "$GITHUB_SHA"
-          for asset in "$RUNNER_TEMP/draft"/*.tar.gz "$RUNNER_TEMP/draft/release-manifest.json" "$RUNNER_TEMP/draft/SHA256SUMS"; do gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY"; done
+           attestation_assets=(
+             "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz"
+             "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz"
+             "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz"
+             "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz"
+             "$RUNNER_TEMP/draft/release-manifest.json"
+             "$RUNNER_TEMP/draft/SHA256SUMS"
+           )
+           test "${#attestation_assets[@]}" -eq 6
+           for asset in "${attestation_assets[@]}"; do
+             gh attestation verify "$asset" \
+               --repo "$GITHUB_REPOSITORY" \
+               --signer-workflow xiopt/tmux-pane-dash/.github/workflows/release.yml \
+               --source-ref refs/tags/v0.1.0 \
+               --source-digest "$GITHUB_SHA" \
+               --signer-digest "$GITHUB_SHA"
+           done
           echo "attestation-subjects=6"
           bun test packages/tmux-pane-dash/tests/packed-e2e.test.ts
 
@@ -361,12 +374,11 @@ jobs:
            npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.0.tgz" --access public --provenance
            npm publish "$RUNNER_TEMP/npm/xiopt-tmux-pane-dash-0.1.0.tgz" --access public --provenance
            audit_dir="$RUNNER_TEMP/npm-audit"
-           mkdir -p "$audit_dir"
+           mkdir -p "$audit_dir" "$RUNNER_TEMP/npm-audit-cache"
            printf '%s\n' 'registry=https://registry.npmjs.org/' 'audit=false' 'fund=false' > "$audit_dir/.npmrc"
-           printf '%s\n' '{"name":"task14-npm-signature-audit","private":true,"dependencies":{"@xiopt/pane-dash-opencode":"0.1.0","@xiopt/tmux-pane-dash":"0.1.0"}}' > "$audit_dir/package.json"
-           npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm install --prefix "$audit_dir" --ignore-scripts --no-audit --no-fund --package-lock=true
+           printf '%s\n' '{"name":"task14-npm-signature-audit","private":true}' > "$audit_dir/package.json"
+           npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm install --prefix "$audit_dir" --ignore-scripts --no-audit --no-fund --package-lock=false @xiopt/pane-dash-opencode@0.1.0 @xiopt/tmux-pane-dash@0.1.0
            npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm audit signatures --prefix "$audit_dir"
-           # npm publish <tarball> --access public --provenance
           "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/pane-dash-opencode --version 0.1.0 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.0
           "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/tmux-pane-dash --version 0.1.0 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.0
 
