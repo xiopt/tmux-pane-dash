@@ -59,6 +59,7 @@ jobs:
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- shellcheck pane_dash.tmux scripts/*.sh tests/*.sh spike/*.sh spike/probes/*.sh spike/perf/*.sh
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/integration.sh
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/pane_dash_integration.sh
+          tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/pane_dash_pty_helper_test.sh
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/rust_engine_integration.sh
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/rust_engine_quoting_integration.sh
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/rust_live_integration.sh

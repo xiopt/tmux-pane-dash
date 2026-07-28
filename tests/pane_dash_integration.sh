@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091 # Local helper contains definitions only.
+source "$ROOT/tests/pane_dash_pty.sh"
 SOCK="pd-label-$$"
 MARKER="/tmp/pd-$$"
 tmux_bin_candidate="${TMUX_BIN:-tmux}"
@@ -26,7 +28,7 @@ assert_label() {
   TMUX='' "$tmux_bin" -L "$SOCK" run-shell "$ROOT/pane_dash.tmux"
 
   { printf '\002'; sleep 0.2; printf 'M'; sleep 0.3; printf '%s\r' "$label"; sleep 2; } |
-    TMUX='' script -q /dev/null "$tmux_bin" -L "$SOCK" attach-session -t t >/dev/null 2>&1 &
+    TMUX='' pane_dash_run_in_pty "$tmux_bin" -L "$SOCK" attach-session -t t >/dev/null 2>&1 &
   client_pid=$!
   sleep 1
 
