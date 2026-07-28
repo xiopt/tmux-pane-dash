@@ -92,7 +92,10 @@ fi
 tar -xzf "$archive" -C "$build_root/src" >&2
 source_dir="$build_root/src/tmux-3.6a"
 [ -d "$source_dir" ] || fail 'tmux source archive has an unexpected root'
-env HOME="$build_root/home" TMPDIR="$build_root/tmp" "$source_dir/configure" --prefix="$install_root" >&2
+(
+  cd -- "$source_dir"
+  env HOME="$build_root/home" TMPDIR="$build_root/tmp" ./configure --prefix="$install_root" >&2
+)
 jobs=2
 if command -v getconf >/dev/null 2>&1; then
   jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '2')
