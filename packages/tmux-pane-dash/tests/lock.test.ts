@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { acquireLock } from "../src/lock"
 import { transactionFixture } from "./helpers/fixture"
@@ -37,4 +37,57 @@ test("lock exhaustive concurrency and dead-owner rows fail closed", async () => 
       }
     } finally { await h.cleanup() }
   }
+})
+
+test("a managed-root symlink is rejected without touching its target", async () => {
+  const h = await transactionFixture()
+  const sentinel = join(h.outside, "sentinel")
+  try {
+    await writeFile(sentinel, "keep")
+    await symlink(h.outside, h.root)
+
+    await expect(acquireLock("setup", h.deps)).rejects.toMatchObject({ code: "E_CONFLICT" })
+    expect(await readFile(sentinel, "utf8")).toBe("keep")
+    expect(await readdir(h.outside)).toEqual(["sentinel"])
+    expect((await lstat(h.root)).isSymbolicLink()).toBeTrue()
+  } finally { await h.cleanup() }
+})
+
+test("a transactions symlink is rejected without touching its target or creating a lock", async () => {
+  const h = await transactionFixture()
+  const sentinel = join(h.outside, "sentinel")
+  try {
+    await mkdir(h.root, { mode: 0o700 })
+    await writeFile(sentinel, "keep")
+    await symlink(h.outside, join(h.root, "transactions"))
+
+    await expect(acquireLock("setup", h.deps)).rejects.toMatchObject({ code: "E_CONFLICT" })
+    expect(await readFile(sentinel, "utf8")).toBe("keep")
+    expect(await readdir(h.outside)).toEqual(["sentinel"])
+    expect(await readdir(h.root)).toEqual(["transactions"])
+  } finally { await h.cleanup() }
+})
+
+test("an existing valid root may initialize missing transactions before locking", async () => {
+  const h = await transactionFixture()
+  try {
+    await mkdir(join(h.root, "versions"), { recursive: true, mode: 0o700 })
+    await mkdir(join(h.root, "state"), { mode: 0o700 })
+
+    const lock = await acquireLock("setup", h.deps)
+    expect((await lstat(join(h.root, "transactions"))).isDirectory()).toBeTrue()
+    await lock.release()
+    await expect(lstat(join(h.root, "transactions", "lock"))).rejects.toMatchObject({ code: "ENOENT" })
+  } finally { await h.cleanup() }
+})
+
+test("an existing unknown root state is rejected as a conflict before locking", async () => {
+  const h = await transactionFixture()
+  try {
+    await mkdir(h.root, { mode: 0o700 })
+    await writeFile(join(h.root, "current"), "not a managed link")
+
+    await expect(acquireLock("setup", h.deps)).rejects.toMatchObject({ code: "E_CONFLICT" })
+    expect(await readdir(h.root)).toEqual(["current"])
+  } finally { await h.cleanup() }
 })

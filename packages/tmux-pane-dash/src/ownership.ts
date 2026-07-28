@@ -1,5 +1,5 @@
 import { lstat, mkdir, readFile, readlink, readdir } from "node:fs/promises"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { CliError } from "./errors"
 import type { Dependencies } from "./runtime"
 
@@ -31,7 +31,7 @@ export async function validateManagedRoot(root: string, deps: Dependencies): Pro
   try {
     const current = join(canonical, "current"), target = await readlink(current)
     if (target.startsWith("/") || !target.startsWith("versions/") || target.split("/").some(part => !part || part === "." || part === "..") || !inside(canonical, resolve(canonical, target))) fail("E_CONFLICT")
-  } catch (error) { if (!missing(error)) throw error }
+  } catch (error) { if (missing(error)) {} else if (error instanceof CliError) throw error; else fail("E_CONFLICT") }
   try { for (const version of await readdir(join(canonical, "versions"))) await safeDirectory(join(canonical, "versions", version), uid) } catch (error) { if (!missing(error)) throw error }
 }
 function validOwnership(value: any): value is OwnershipRecord {
@@ -45,4 +45,16 @@ export async function readOwnership(root: string, _deps: Dependencies): Promise<
   if (!validOwnership(value)) fail("E_OWNERSHIP")
   return value
 }
-export async function ensureManagedRoot(root: string): Promise<void> { await mkdir(root, { recursive: true, mode: 0o700 }); await mkdir(join(root, "versions"), { recursive: true, mode: 0o700 }); await mkdir(join(root, "state"), { recursive: true, mode: 0o700 }); await mkdir(join(root, "transactions"), { recursive: true, mode: 0o700 }) }
+const exists = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "EEXIST"
+async function ensureDirectory(path: string): Promise<void> {
+  try { await mkdir(path, { mode: 0o700 }) } catch (error) {
+    if (!exists(error)) throw error
+    await safeDirectory(path, process.getuid?.() ?? 0)
+  }
+}
+export async function ensureManagedRoot(root: string): Promise<void> {
+  const canonical = resolve(root)
+  await mkdir(dirname(canonical), { recursive: true, mode: 0o700 })
+  await ensureDirectory(canonical)
+  for (const name of ["versions", "state", "transactions"]) await ensureDirectory(join(canonical, name))
+}

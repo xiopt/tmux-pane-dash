@@ -96,7 +96,7 @@ test("production dependencies and packed CLI construct and execute a command pat
     expect(await Bun.file(join(home, "tmux-pane-dash", "transactions", "lock")).exists()).toBeFalse()
     await writeFile(join(home, "tmux-pane-dash", "unexpected"), "unsafe")
     await expect(runCli(["uninstall"], deps)).rejects.toThrow("E_CONFLICT")
-    expect(releases).toEqual(["uninstall", "uninstall"])
+    expect(releases).toEqual(["uninstall"])
     expect(await Bun.file(join(home, "tmux-pane-dash", "transactions", "lock")).exists()).toBeFalse()
     const child = Bun.spawn([process.execPath, resolve(import.meta.dir, "..", "dist", "cli.js"), "doctor", "--json"], { stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH!, HOME: home } })
     expect(await child.exited).toBe(1)

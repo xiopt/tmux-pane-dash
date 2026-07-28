@@ -550,7 +550,7 @@ var init_config_tmux = __esm(() => {
 
 // packages/tmux-pane-dash/src/ownership.ts
 import { lstat as lstat3, mkdir as mkdir2, readFile as readFile2, readlink as readlink2, readdir as readdir3 } from "node:fs/promises";
-import { join as join3, resolve as resolve3 } from "node:path";
+import { dirname as dirname2, join as join3, resolve as resolve3 } from "node:path";
 async function managedRoot(env) {
   const xdg = env?.XDG_DATA_HOME;
   if (xdg)
@@ -587,8 +587,10 @@ async function validateManagedRoot(root, deps) {
     if (target.startsWith("/") || !target.startsWith("versions/") || target.split("/").some((part) => !part || part === "." || part === "..") || !inside(canonical, resolve3(canonical, target)))
       fail2("E_CONFLICT");
   } catch (error) {
-    if (!missing3(error))
+    if (missing3(error)) {} else if (error instanceof CliError)
       throw error;
+    else
+      fail2("E_CONFLICT");
   }
   try {
     for (const version of await readdir3(join3(canonical, "versions")))
@@ -620,15 +622,25 @@ async function readOwnership(root, _deps) {
     fail2("E_OWNERSHIP");
   return value;
 }
+async function ensureDirectory(path) {
+  try {
+    await mkdir2(path, { mode: 448 });
+  } catch (error) {
+    if (!exists(error))
+      throw error;
+    await safeDirectory(path, process.getuid?.() ?? 0);
+  }
+}
 async function ensureManagedRoot(root) {
-  await mkdir2(root, { recursive: true, mode: 448 });
-  await mkdir2(join3(root, "versions"), { recursive: true, mode: 448 });
-  await mkdir2(join3(root, "state"), { recursive: true, mode: 448 });
-  await mkdir2(join3(root, "transactions"), { recursive: true, mode: 448 });
+  const canonical = resolve3(root);
+  await mkdir2(dirname2(canonical), { recursive: true, mode: 448 });
+  await ensureDirectory(canonical);
+  for (const name of ["versions", "state", "transactions"])
+    await ensureDirectory(join3(canonical, name));
 }
 var missing3 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", fail2 = (code) => {
   throw new CliError(code);
-};
+}, exists = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "EEXIST";
 var init_ownership = __esm(() => {
   init_errors();
 });
@@ -651,7 +663,7 @@ function selectedTarget(deps) {
 async function root(deps) {
   return managedRoot(deps.env);
 }
-async function exists(fs, path) {
+async function exists2(fs, path) {
   try {
     await fs.stat(path);
     return true;
@@ -665,7 +677,7 @@ async function selectDoctorOpenCodeConfig(fs, env) {
   const directory = env?.XDG_CONFIG_HOME ? join4(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join4(env.HOME, ".config", "opencode") : (() => {
     throw new Error("OpenCode root is unavailable");
   })();
-  const json = join4(directory, "opencode.json"), jsonc = join4(directory, "opencode.jsonc"), [hasJson, hasJsonc] = await Promise.all([exists(fs, json), exists(fs, jsonc)]);
+  const json = join4(directory, "opencode.json"), jsonc = join4(directory, "opencode.jsonc"), [hasJson, hasJsonc] = await Promise.all([exists2(fs, json), exists2(fs, jsonc)]);
   if (!hasJson && !hasJsonc)
     return json;
   if (hasJson && !hasJsonc)
@@ -875,7 +887,7 @@ async function doctor(deps) {
         if (!inRoot(installRoot, file.logicalPath) || !inRoot(installRoot, file.resolvedPath))
           throw new Error("managed path escapes root");
       }
-      if (await exists(fs, ownershipPath) === false)
+      if (await exists2(fs, ownershipPath) === false)
         throw new Error("ownership file is missing");
       checks.push(check("ownership.managed-paths", "ok", null, "all managed paths are owned"));
     } catch (error) {
@@ -1514,7 +1526,7 @@ var init_acquire = __esm(() => {
 
 // packages/tmux-pane-dash/src/journal.ts
 import { mkdir as mkdir3, open as open2, readFile as readFile3, rename as rename2 } from "node:fs/promises";
-import { dirname as dirname3, join as join7 } from "node:path";
+import { dirname as dirname4, join as join7 } from "node:path";
 import { randomBytes as randomBytes2 } from "node:crypto";
 function validState(value) {
   return value && ["absent", "file", "directory", "symlink"].includes(value.type) && (value.sha256 === null || typeof value.sha256 === "string") && (value.mode === null || Number.isInteger(value.mode));
@@ -1526,8 +1538,8 @@ function createJournal(input) {
   return { ...input, schemaVersion: 1, phase: "prepared", mutations: [] };
 }
 async function durableWrite(path, bytes, deps) {
-  await mkdir3(dirname3(path), { recursive: true, mode: 448 });
-  const temp = join7(dirname3(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes2(8)).toString("hex")}`);
+  await mkdir3(dirname4(path), { recursive: true, mode: 448 });
+  const temp = join7(dirname4(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes2(8)).toString("hex")}`);
   const file = await open2(temp, "wx", 384);
   try {
     await file.writeFile(bytes);
@@ -1537,7 +1549,7 @@ async function durableWrite(path, bytes, deps) {
     await file.close();
   }
   await rename2(temp, path);
-  const parent = await open2(dirname3(path), "r");
+  const parent = await open2(dirname4(path), "r");
   try {
     await parent.sync();
     deps.journalEvent?.("fsync.parent");
@@ -1592,7 +1604,7 @@ var init_journal = __esm(() => {
 // packages/tmux-pane-dash/src/transaction.ts
 import { createHash as createHash5, randomBytes as randomBytes3 } from "node:crypto";
 import { chmod as chmod2, lstat as lstat4, mkdir as mkdir4, open as open3, readFile as readFile4, readlink as readlink3, readdir as readdir4, rename as rename3, rm as rm2, symlink } from "node:fs/promises";
-import { dirname as dirname4, join as join8 } from "node:path";
+import { dirname as dirname5, join as join8 } from "node:path";
 async function state(path) {
   try {
     const entry = await lstat4(path);
@@ -1615,10 +1627,10 @@ function same(left, right) {
   return left.type === right.type && left.sha256 === right.sha256 && left.mode === right.mode && left.target === right.target;
 }
 function temporary(path, deps, attempt) {
-  return join8(dirname4(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes3(8)).toString("hex")}.${attempt}`);
+  return join8(dirname5(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes3(8)).toString("hex")}.${attempt}`);
 }
 async function syncParent(path) {
-  const parent = await open3(dirname4(path), "r");
+  const parent = await open3(dirname5(path), "r");
   try {
     await parent.sync();
   } finally {
@@ -1626,7 +1638,7 @@ async function syncParent(path) {
   }
 }
 async function stageBytes(path, bytes, mode, deps) {
-  await mkdir4(dirname4(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname5(path), { recursive: true, mode: 448 });
   for (let attempt = 0;; attempt += 1) {
     const temp = temporary(path, deps, attempt);
     try {
@@ -1646,7 +1658,7 @@ async function stageBytes(path, bytes, mode, deps) {
   }
 }
 async function stageSymlink(path, target, deps) {
-  await mkdir4(dirname4(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname5(path), { recursive: true, mode: 448 });
   for (let attempt = 0;; attempt += 1) {
     const temp = temporary(path, deps, attempt);
     try {
@@ -1834,7 +1846,7 @@ async function executeTransaction(plan, deps) {
       const tombstone = join8(root2, "transactions", id, "tombstone", "versions"), source = join8(root2, "versions"), pre = await state(source);
       if (pre.type !== "directory")
         throw new CliError("E_OWNERSHIP");
-      await mkdir4(dirname4(tombstone), { recursive: true, mode: 448 });
+      await mkdir4(dirname5(tombstone), { recursive: true, mode: 448 });
       await tombstoneMutation(journal, { operation: "tombstone", logicalPath: source, resolvedPath: source, pre, post: absent, preimage: null, backupPath: tombstone }, 1, deps);
     } else if (plan.versionActivation) {
       const pre = await state(version);
@@ -1909,7 +1921,7 @@ __export(exports_setup, {
 });
 import { createHash as createHash6, randomBytes as randomBytes4 } from "node:crypto";
 import { lstat as lstat5, readFile as readFile5 } from "node:fs/promises";
-import { dirname as dirname5, join as join9 } from "node:path";
+import { dirname as dirname6, join as join9 } from "node:path";
 async function readOr(path, fallback) {
   try {
     return new Uint8Array(await readFile5(path));
@@ -1919,7 +1931,7 @@ async function readOr(path, fallback) {
     throw error;
   }
 }
-async function exists2(path) {
+async function exists3(path) {
   try {
     await lstat5(path);
     return true;
@@ -1947,7 +1959,7 @@ async function inventoryConflicts(input, deps) {
     const bytes = await readOr(resolved.resolvedPath, `{}
 `);
     opencode = planned(planOpenCodeEdit({ ...resolved, bytes, mode: resolved.mode ?? 384, migrate: input.migrate, packageEntry: input.packageEntry, ownedEntries: input.ownedOpenCodeEntries }), resolved, bytes);
-    migrations = await planOpenCodeMigration({ configDirectory: dirname5(logicalPath), migrate: input.migrate });
+    migrations = await planOpenCodeMigration({ configDirectory: dirname6(logicalPath), migrate: input.migrate });
   }
   return { tmux, opencode, migrations };
 }
@@ -1960,7 +1972,7 @@ async function files(directory, destination = directory) {
 }
 async function setup(command, deps) {
   const root2 = await managedRoot(deps.env);
-  if (await exists2(root2))
+  if (await exists3(root2))
     await validateManagedRoot(root2, deps);
   const prior = await readOwnership(root2, deps);
   if (prior)

@@ -1,21 +1,46 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { randomBytes } from "node:crypto"
 import type { LockHandle, MutationCommand } from "./contracts"
 import { CliError } from "./errors"
-import { ensureManagedRoot, managedRoot } from "./ownership"
+import { ensureManagedRoot, managedRoot, validateManagedRoot } from "./ownership"
 import type { Dependencies } from "./runtime"
 
 export type { LockHandle }
 type Owner = { schemaVersion: 1; token: string; pid: number; command: MutationCommand; packageVersion: string; startedAt: number }
 const missing = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT"
+const exists = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "EEXIST"
 function owner(value: unknown): value is Owner {
   if (typeof value !== "object" || value === null) return false
   const candidate = value as Record<string, unknown>
   return candidate.schemaVersion === 1 && typeof candidate.token === "string" && /^[a-f0-9]{32,}$/.test(candidate.token) && Number.isInteger(candidate.pid) && (candidate.command === "setup" || candidate.command === "update" || candidate.command === "uninstall") && typeof candidate.packageVersion === "string" && typeof candidate.startedAt === "number"
 }
+async function validateExistingRoot(root: string, deps: Dependencies): Promise<void> {
+  try { await validateManagedRoot(root, deps) } catch (error) {
+    if (missing(error)) throw new CliError("E_CONFLICT")
+    throw error
+  }
+}
+async function prepareManagedRoot(root: string, deps: Dependencies): Promise<void> {
+  let fresh = false
+  try { await lstat(root) } catch (error) {
+    if (!missing(error)) throw error
+    fresh = true
+  }
+  if (fresh) await ensureManagedRoot(root)
+  else {
+    await validateExistingRoot(root, deps)
+    try { await mkdir(join(root, "transactions"), { mode: 0o700 }) } catch (error) {
+      if (!exists(error)) {
+        if (missing(error)) throw new CliError("E_CONFLICT")
+        throw error
+      }
+    }
+  }
+  await validateExistingRoot(root, deps)
+}
 export async function acquireLock(command: MutationCommand, deps: Dependencies): Promise<LockHandle> {
-  const root = await managedRoot(deps.env), path = join(root, "transactions", "lock"); await ensureManagedRoot(root)
+  const root = await managedRoot(deps.env); await prepareManagedRoot(root, deps); const path = join(root, "transactions", "lock")
   let recovered = false
   try { await mkdir(path, { mode: 0o700 }) } catch (error) {
     if (!(typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "EEXIST")) throw error

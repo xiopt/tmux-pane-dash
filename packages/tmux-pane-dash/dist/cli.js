@@ -40,7 +40,7 @@ var init_errors = __esm(() => {
 
 // packages/tmux-pane-dash/src/ownership.ts
 import { lstat, mkdir, readFile, readlink, readdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 async function managedRoot(env) {
   const xdg = env?.XDG_DATA_HOME;
   if (xdg)
@@ -77,8 +77,10 @@ async function validateManagedRoot(root, deps) {
     if (target.startsWith("/") || !target.startsWith("versions/") || target.split("/").some((part) => !part || part === "." || part === "..") || !inside(canonical, resolve(canonical, target)))
       fail("E_CONFLICT");
   } catch (error) {
-    if (!missing(error))
+    if (missing(error)) {} else if (error instanceof CliError)
       throw error;
+    else
+      fail("E_CONFLICT");
   }
   try {
     for (const version of await readdir(join(canonical, "versions")))
@@ -110,23 +112,33 @@ async function readOwnership(root, _deps) {
     fail("E_OWNERSHIP");
   return value;
 }
+async function ensureDirectory(path) {
+  try {
+    await mkdir(path, { mode: 448 });
+  } catch (error) {
+    if (!exists(error))
+      throw error;
+    await safeDirectory(path, process.getuid?.() ?? 0);
+  }
+}
 async function ensureManagedRoot(root) {
-  await mkdir(root, { recursive: true, mode: 448 });
-  await mkdir(join(root, "versions"), { recursive: true, mode: 448 });
-  await mkdir(join(root, "state"), { recursive: true, mode: 448 });
-  await mkdir(join(root, "transactions"), { recursive: true, mode: 448 });
+  const canonical = resolve(root);
+  await mkdir(dirname(canonical), { recursive: true, mode: 448 });
+  await ensureDirectory(canonical);
+  for (const name of ["versions", "state", "transactions"])
+    await ensureDirectory(join(canonical, name));
 }
 var missing = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT", fail = (code) => {
   throw new CliError(code);
-};
+}, exists = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "EEXIST";
 var init_ownership = __esm(() => {
   init_errors();
 });
 
 // packages/tmux-pane-dash/src/fs.ts
-import { chmod, lstat as lstat2, mkdir as mkdir3, open, readdir as readdir2, readFile as readFile3, readlink as readlink2, rename as rename2, rm as rm2 } from "node:fs/promises";
+import { chmod, lstat as lstat3, mkdir as mkdir3, open, readdir as readdir2, readFile as readFile3, readlink as readlink2, rename as rename2, rm as rm2 } from "node:fs/promises";
 import { createHash, randomBytes as randomBytes2 } from "node:crypto";
-import { dirname, isAbsolute, join as join3, resolve as resolve2, sep } from "node:path";
+import { dirname as dirname2, isAbsolute, join as join3, resolve as resolve2, sep } from "node:path";
 function canonicalPayloadPath(path) {
   if (!path || path.includes("\x00") || path.includes("\\") || path.startsWith("/") || path.endsWith("/") || path.includes("//"))
     throw new Error("invalid payload path");
@@ -155,7 +167,7 @@ function nodeFsOps() {
     },
     async writeFileExclusive(root, relative, bytes, mode) {
       const path = within(root, relative);
-      await mkdir3(dirname(path), { recursive: true, mode: 448 });
+      await mkdir3(dirname2(path), { recursive: true, mode: 448 });
       const file = await open(path, "wx", mode & 511);
       try {
         await file.writeFile(bytes);
@@ -173,7 +185,7 @@ function nodeFsOps() {
       await file.close();
     },
     async stat(path) {
-      const entry = await lstat2(path);
+      const entry = await lstat3(path);
       return { kind: entry.isFile() ? "file" : entry.isDirectory() ? "directory" : entry.isSymbolicLink() ? "symlink" : "other", mode: entry.mode & 4095, size: entry.size, dev: entry.dev, ino: entry.ino };
     },
     async readdir(path) {
@@ -189,7 +201,7 @@ async function resolveConfigPath(logicalPath, _deps) {
   for (let count = 0;count <= 16; count += 1) {
     let entry;
     try {
-      entry = await lstat2(path);
+      entry = await lstat3(path);
     } catch (error) {
       if (missing3(error) && count === 0)
         return { logicalPath, resolvedPath: logicalPath, symlinkChain: [] };
@@ -205,7 +217,7 @@ async function resolveConfigPath(logicalPath, _deps) {
         configError();
       }
       links.push({ path, target, dev: entry.dev, ino: entry.ino });
-      path = isAbsolute(target) ? target : resolve2(dirname(path), target);
+      path = isAbsolute(target) ? target : resolve2(dirname2(path), target);
       continue;
     }
     if (!entry.isFile())
@@ -309,14 +321,14 @@ var init_manifest = __esm(() => {
 });
 
 // packages/tmux-pane-dash/src/config-opencode.ts
-import { lstat as lstat4, readdir as readdir4, realpath, stat } from "node:fs/promises";
+import { lstat as lstat5, readdir as readdir4, realpath, stat } from "node:fs/promises";
 import { join as join4 } from "node:path";
 async function selectOpenCodeConfig(env, deps) {
   const root = env?.XDG_CONFIG_HOME ? join4(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join4(env.HOME, ".config", "opencode") : fail2("E_ROOT");
   const json = join4(root, "opencode.json"), jsonc = join4(root, "opencode.jsonc");
-  const exists = async (path) => {
+  const exists3 = async (path) => {
     try {
-      await lstat4(path);
+      await lstat5(path);
       return true;
     } catch (error) {
       if (missing4(error))
@@ -324,7 +336,7 @@ async function selectOpenCodeConfig(env, deps) {
       throw error;
     }
   };
-  const [hasJson, hasJsonc] = await Promise.all([exists(json), exists(jsonc)]);
+  const [hasJson, hasJsonc] = await Promise.all([exists3(json), exists3(jsonc)]);
   if (!hasJson && !hasJsonc)
     return json;
   if (hasJson && !hasJsonc)
@@ -332,7 +344,7 @@ async function selectOpenCodeConfig(env, deps) {
   if (!hasJson && hasJsonc)
     return jsonc;
   const [left, right] = await Promise.all([resolveConfigPath(json, deps), resolveConfigPath(jsonc, deps)]);
-  const [leftInfo, rightInfo] = await Promise.all([lstat4(left.resolvedPath), lstat4(right.resolvedPath)]);
+  const [leftInfo, rightInfo] = await Promise.all([lstat5(left.resolvedPath), lstat5(right.resolvedPath)]);
   if (!leftInfo.isFile() || !rightInfo.isFile() || leftInfo.dev !== rightInfo.dev || leftInfo.ino !== rightInfo.ino)
     fail2("E_CONFIG_AMBIGUOUS");
   return json;
@@ -356,7 +368,7 @@ async function planOpenCodeMigration(input) {
     return [];
   if (!input.migrate || candidates.length !== 1)
     fail2("E_CONFIG_CONFLICT");
-  const logicalPath = candidates[0], entry = await lstat4(logicalPath);
+  const logicalPath = candidates[0], entry = await lstat5(logicalPath);
   if (!entry.isSymbolicLink())
     fail2("E_CONFIG_CONFLICT");
   let resolvedPath;
@@ -712,7 +724,7 @@ function selectedTarget(deps) {
 async function root(deps) {
   return managedRoot(deps.env);
 }
-async function exists(fs, path) {
+async function exists3(fs, path) {
   try {
     await fs.stat(path);
     return true;
@@ -726,7 +738,7 @@ async function selectDoctorOpenCodeConfig(fs, env) {
   const directory = env?.XDG_CONFIG_HOME ? join5(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join5(env.HOME, ".config", "opencode") : (() => {
     throw new Error("OpenCode root is unavailable");
   })();
-  const json = join5(directory, "opencode.json"), jsonc = join5(directory, "opencode.jsonc"), [hasJson, hasJsonc] = await Promise.all([exists(fs, json), exists(fs, jsonc)]);
+  const json = join5(directory, "opencode.json"), jsonc = join5(directory, "opencode.jsonc"), [hasJson, hasJsonc] = await Promise.all([exists3(fs, json), exists3(fs, jsonc)]);
   if (!hasJson && !hasJsonc)
     return json;
   if (hasJson && !hasJsonc)
@@ -936,7 +948,7 @@ async function doctor(deps) {
         if (!inRoot(installRoot, file.logicalPath) || !inRoot(installRoot, file.resolvedPath))
           throw new Error("managed path escapes root");
       }
-      if (await exists(fs, ownershipPath) === false)
+      if (await exists3(fs, ownershipPath) === false)
         throw new Error("ownership file is missing");
       checks.push(check("ownership.managed-paths", "ok", null, "all managed paths are owned"));
     } catch (error) {
@@ -1575,7 +1587,7 @@ var init_acquire = __esm(() => {
 
 // packages/tmux-pane-dash/src/journal.ts
 import { mkdir as mkdir4, open as open2, readFile as readFile5, rename as rename3 } from "node:fs/promises";
-import { dirname as dirname3, join as join8 } from "node:path";
+import { dirname as dirname4, join as join8 } from "node:path";
 import { randomBytes as randomBytes3 } from "node:crypto";
 function validState(value) {
   return value && ["absent", "file", "directory", "symlink"].includes(value.type) && (value.sha256 === null || typeof value.sha256 === "string") && (value.mode === null || Number.isInteger(value.mode));
@@ -1587,8 +1599,8 @@ function createJournal(input) {
   return { ...input, schemaVersion: 1, phase: "prepared", mutations: [] };
 }
 async function durableWrite(path, bytes, deps) {
-  await mkdir4(dirname3(path), { recursive: true, mode: 448 });
-  const temp = join8(dirname3(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes3(8)).toString("hex")}`);
+  await mkdir4(dirname4(path), { recursive: true, mode: 448 });
+  const temp = join8(dirname4(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes3(8)).toString("hex")}`);
   const file = await open2(temp, "wx", 384);
   try {
     await file.writeFile(bytes);
@@ -1598,7 +1610,7 @@ async function durableWrite(path, bytes, deps) {
     await file.close();
   }
   await rename3(temp, path);
-  const parent = await open2(dirname3(path), "r");
+  const parent = await open2(dirname4(path), "r");
   try {
     await parent.sync();
     deps.journalEvent?.("fsync.parent");
@@ -1652,11 +1664,11 @@ var init_journal = __esm(() => {
 
 // packages/tmux-pane-dash/src/transaction.ts
 import { createHash as createHash5, randomBytes as randomBytes4 } from "node:crypto";
-import { chmod as chmod2, lstat as lstat5, mkdir as mkdir5, open as open3, readFile as readFile6, readlink as readlink4, readdir as readdir5, rename as rename4, rm as rm3, symlink } from "node:fs/promises";
-import { dirname as dirname4, join as join9 } from "node:path";
+import { chmod as chmod2, lstat as lstat6, mkdir as mkdir5, open as open3, readFile as readFile6, readlink as readlink4, readdir as readdir5, rename as rename4, rm as rm3, symlink } from "node:fs/promises";
+import { dirname as dirname5, join as join9 } from "node:path";
 async function state(path) {
   try {
-    const entry = await lstat5(path);
+    const entry = await lstat6(path);
     if (entry.isSymbolicLink()) {
       const target = await readlink4(path);
       return { type: "symlink", sha256: hash2(new TextEncoder().encode(target)), mode: entry.mode & 511, target };
@@ -1676,10 +1688,10 @@ function same(left, right) {
   return left.type === right.type && left.sha256 === right.sha256 && left.mode === right.mode && left.target === right.target;
 }
 function temporary(path, deps, attempt) {
-  return join9(dirname4(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes4(8)).toString("hex")}.${attempt}`);
+  return join9(dirname5(path), `.${path.split("/").pop()}.${Buffer.from(deps.randomBytes?.(8) ?? randomBytes4(8)).toString("hex")}.${attempt}`);
 }
 async function syncParent(path) {
-  const parent = await open3(dirname4(path), "r");
+  const parent = await open3(dirname5(path), "r");
   try {
     await parent.sync();
   } finally {
@@ -1687,7 +1699,7 @@ async function syncParent(path) {
   }
 }
 async function stageBytes(path, bytes, mode, deps) {
-  await mkdir5(dirname4(path), { recursive: true, mode: 448 });
+  await mkdir5(dirname5(path), { recursive: true, mode: 448 });
   for (let attempt = 0;; attempt += 1) {
     const temp = temporary(path, deps, attempt);
     try {
@@ -1707,7 +1719,7 @@ async function stageBytes(path, bytes, mode, deps) {
   }
 }
 async function stageSymlink(path, target, deps) {
-  await mkdir5(dirname4(path), { recursive: true, mode: 448 });
+  await mkdir5(dirname5(path), { recursive: true, mode: 448 });
   for (let attempt = 0;; attempt += 1) {
     const temp = temporary(path, deps, attempt);
     try {
@@ -1895,7 +1907,7 @@ async function executeTransaction(plan, deps) {
       const tombstone = join9(root2, "transactions", id, "tombstone", "versions"), source = join9(root2, "versions"), pre = await state(source);
       if (pre.type !== "directory")
         throw new CliError("E_OWNERSHIP");
-      await mkdir5(dirname4(tombstone), { recursive: true, mode: 448 });
+      await mkdir5(dirname5(tombstone), { recursive: true, mode: 448 });
       await tombstoneMutation(journal, { operation: "tombstone", logicalPath: source, resolvedPath: source, pre, post: absent, preimage: null, backupPath: tombstone }, 1, deps);
     } else if (plan.versionActivation) {
       const pre = await state(version);
@@ -1969,8 +1981,8 @@ __export(exports_setup, {
   inventoryConflicts: () => inventoryConflicts
 });
 import { createHash as createHash6, randomBytes as randomBytes5 } from "node:crypto";
-import { lstat as lstat6, readFile as readFile7 } from "node:fs/promises";
-import { dirname as dirname5, join as join10 } from "node:path";
+import { lstat as lstat7, readFile as readFile7 } from "node:fs/promises";
+import { dirname as dirname6, join as join10 } from "node:path";
 async function readOr(path, fallback) {
   try {
     return new Uint8Array(await readFile7(path));
@@ -1980,9 +1992,9 @@ async function readOr(path, fallback) {
     throw error;
   }
 }
-async function exists2(path) {
+async function exists4(path) {
   try {
-    await lstat6(path);
+    await lstat7(path);
     return true;
   } catch (error) {
     if (missing8(error))
@@ -2008,7 +2020,7 @@ async function inventoryConflicts(input, deps) {
     const bytes = await readOr(resolved.resolvedPath, `{}
 `);
     opencode = planned(planOpenCodeEdit({ ...resolved, bytes, mode: resolved.mode ?? 384, migrate: input.migrate, packageEntry: input.packageEntry, ownedEntries: input.ownedOpenCodeEntries }), resolved, bytes);
-    migrations = await planOpenCodeMigration({ configDirectory: dirname5(logicalPath), migrate: input.migrate });
+    migrations = await planOpenCodeMigration({ configDirectory: dirname6(logicalPath), migrate: input.migrate });
   }
   return { tmux, opencode, migrations };
 }
@@ -2021,7 +2033,7 @@ async function files(directory, destination = directory) {
 }
 async function setup(command, deps) {
   const root2 = await managedRoot(deps.env);
-  if (await exists2(root2))
+  if (await exists4(root2))
     await validateManagedRoot(root2, deps);
   const prior = await readOwnership(root2, deps);
   if (prior)
@@ -2230,25 +2242,61 @@ var release_manifest_default = {
 
 // packages/tmux-pane-dash/src/dependencies.ts
 import { spawn } from "node:child_process";
-import { lstat as lstat3, readFile as readFile4, readdir as readdir3, readlink as readlink3 } from "node:fs/promises";
+import { lstat as lstat4, readFile as readFile4, readdir as readdir3, readlink as readlink3 } from "node:fs/promises";
 import process2 from "node:process";
 
 // packages/tmux-pane-dash/src/lock.ts
 init_errors();
 init_ownership();
-import { mkdir as mkdir2, readFile as readFile2, rename, rm, writeFile } from "node:fs/promises";
+import { lstat as lstat2, mkdir as mkdir2, readFile as readFile2, rename, rm, writeFile } from "node:fs/promises";
 import { join as join2 } from "node:path";
 import { randomBytes } from "node:crypto";
 var missing2 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "ENOENT";
+var exists2 = (error) => typeof error === "object" && error !== null && ("code" in error) && error.code === "EEXIST";
 function owner(value) {
   if (typeof value !== "object" || value === null)
     return false;
   const candidate = value;
   return candidate.schemaVersion === 1 && typeof candidate.token === "string" && /^[a-f0-9]{32,}$/.test(candidate.token) && Number.isInteger(candidate.pid) && (candidate.command === "setup" || candidate.command === "update" || candidate.command === "uninstall") && typeof candidate.packageVersion === "string" && typeof candidate.startedAt === "number";
 }
+async function validateExistingRoot(root, deps) {
+  try {
+    await validateManagedRoot(root, deps);
+  } catch (error) {
+    if (missing2(error))
+      throw new CliError("E_CONFLICT");
+    throw error;
+  }
+}
+async function prepareManagedRoot(root, deps) {
+  let fresh = false;
+  try {
+    await lstat2(root);
+  } catch (error) {
+    if (!missing2(error))
+      throw error;
+    fresh = true;
+  }
+  if (fresh)
+    await ensureManagedRoot(root);
+  else {
+    await validateExistingRoot(root, deps);
+    try {
+      await mkdir2(join2(root, "transactions"), { mode: 448 });
+    } catch (error) {
+      if (!exists2(error)) {
+        if (missing2(error))
+          throw new CliError("E_CONFLICT");
+        throw error;
+      }
+    }
+  }
+  await validateExistingRoot(root, deps);
+}
 async function acquireLock(command, deps) {
-  const root = await managedRoot(deps.env), path = join2(root, "transactions", "lock");
-  await ensureManagedRoot(root);
+  const root = await managedRoot(deps.env);
+  await prepareManagedRoot(root, deps);
+  const path = join2(root, "transactions", "lock");
   let recovered = false;
   try {
     await mkdir2(path, { mode: 448 });
@@ -2335,7 +2383,7 @@ function nodeDependencies() {
       return new Uint8Array(await readFile4(path));
     },
     async stat(path) {
-      const entry = await lstat3(path);
+      const entry = await lstat4(path);
       return { kind: entry.isFile() ? "file" : entry.isDirectory() ? "directory" : entry.isSymbolicLink() ? "symlink" : "other", mode: entry.mode & 4095, size: entry.size, dev: entry.dev, ino: entry.ino };
     },
     readdir: readdir3,
