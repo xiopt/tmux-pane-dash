@@ -39,7 +39,16 @@ sha256_file() {
 }
 
 mode_of() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  local value
+  if value=$(stat -c '%a' "$1" 2>/dev/null) && [[ "$value" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  if value=$(stat -f '%Lp' "$1" 2>/dev/null) && [[ "$value" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  return 1
 }
 
 shell_quote() {

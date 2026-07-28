@@ -5,8 +5,20 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 fail() { printf 'with-rust: %s\n' "$*" >&2; exit 64; }
 canonical_dir() { (cd "$1" && pwd -P); }
-stat_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
-stat_uid() { stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1"; }
+stat_numeric() {
+  local gnu_format=$1 bsd_format=$2 pattern=$3 path=$4 value
+  if value=$(stat -c "$gnu_format" "$path" 2>/dev/null) && [[ "$value" =~ $pattern ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  if value=$(stat -f "$bsd_format" "$path" 2>/dev/null) && [[ "$value" =~ $pattern ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  return 1
+}
+stat_mode() { stat_numeric '%a' '%Lp' '^[0-7]{3,4}$' "$1"; }
+stat_uid() { stat_numeric '%u' '%u' '^[0-9]+$' "$1"; }
 tmp_prefix=$(canonical_dir "${TMPDIR:-/tmp}") || fail 'TMPDIR must exist'
 for forbidden in "$repo_root" "${HOME:-}" "${XDG_DATA_HOME:-}" "${XDG_CONFIG_HOME:-}" "${XDG_CACHE_HOME:-}"; do
   [ -n "$forbidden" ] && [ -e "$forbidden" ] || continue
