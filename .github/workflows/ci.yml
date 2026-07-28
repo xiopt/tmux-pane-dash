@@ -57,18 +57,33 @@ jobs:
           bun-version: 1.3.14
       - run: node -e 'if (process.version !== "v20.0.0") process.exit(1)'
       - run: |
+          echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"
+          echo "NPM_20_CLI=$(command -v npm)" >> "$GITHUB_ENV"
+      - run: |
           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun install --frozen-lockfile
           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- npm pack --dry-run --workspace packages/tmux-pane-dash
-          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test scripts/release/tests
-          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test opencode-plugin/tests packages/tmux-pane-dash/tests
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test scripts/release/tests release/tests
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test opencode-plugin/tests/normalize.test.ts opencode-plugin/tests/pane-dash.test.ts opencode-plugin/tests/real-opencode-rows.test.ts opencode-plugin/tests/state.test.ts opencode-plugin/tests/writer.test.ts
 
   four-targets:
     needs: ci-cli
-    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        target: [darwin-arm64, darwin-x64, linux-arm64, linux-x64]
+        include:
+          - target: darwin-arm64
+            runner: macos-14
+            rust_target: aarch64-apple-darwin
+          - target: darwin-x64
+            runner: macos-13
+            rust_target: x86_64-apple-darwin
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-musl
+          - target: linux-x64
+            runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -79,20 +94,19 @@ jobs:
           bun-version: 1.3.14
       - run: node -e 'if (process.version !== "v20.0.0") process.exit(1)'
       - run: |
-          case "${{ matrix.target }}" in
-            darwin-arm64) rust_target=aarch64-apple-darwin ;;
-            darwin-x64) rust_target=x86_64-apple-darwin ;;
-            linux-arm64) rust_target=aarch64-unknown-linux-musl ;;
-            linux-x64) rust_target=x86_64-unknown-linux-musl ;;
-          esac
-          printf 'target=%s rust-target=%s\n' "${{ matrix.target }}" "$rust_target"
-          TARGET_KEY="${{ matrix.target }}" tests/release/with-rust.sh -- tests/release/with-npa.sh -- tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun scripts/release/spikes.ts --musl "${{ matrix.target }}" --network=none
-          TARGET_KEY="${{ matrix.target }}" tests/release/with-rust.sh -- tests/release/with-npa.sh -- tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test packages/tmux-pane-dash/tests/packed-e2e.test.ts
+          set -euo pipefail
+          export RUSTUP_TOOLCHAIN=1.96.1
+          rustup toolchain install 1.96.1 --profile minimal --no-self-update
+          rustup target add "${{ matrix.rust_target }}"
+          if [[ "${{ matrix.rust_target }}" == *unknown-linux-musl ]]; then sudo apt-get update; sudo apt-get install -y musl-tools; fi
+          cargo build --release --locked --target "${{ matrix.rust_target }}"
+          cargo test --workspace --locked --target "${{ matrix.rust_target }}"
+          test -x "pane-dash/target/${{ matrix.rust_target }}/release/pane-dash"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ci-target-${{ matrix.target }}
-          path: spike/results
-          if-no-files-found: ignore
+          path: pane-dash/target/${{ matrix.rust_target }}/release/pane-dash
+          if-no-files-found: error
 
   cli-tests:
     needs: four-targets
@@ -108,8 +122,11 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: node -e 'if (process.version !== "v20.0.0") process.exit(1)'
+      - run: |
+          echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"
+          echo "NPM_20_CLI=$(command -v npm)" >> "$GITHUB_ENV"
       - run: PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun run pack:check
-      - run: PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test packages/tmux-pane-dash/tests
+      - run: PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test packages/tmux-pane-dash/tests/acquire.test.ts packages/tmux-pane-dash/tests/archive.test.ts packages/tmux-pane-dash/tests/args.test.ts packages/tmux-pane-dash/tests/config-files.test.ts packages/tmux-pane-dash/tests/config-opencode-migration.test.ts packages/tmux-pane-dash/tests/config-opencode.test.ts packages/tmux-pane-dash/tests/config-tmux.test.ts packages/tmux-pane-dash/tests/doctor.test.ts packages/tmux-pane-dash/tests/errors.test.ts packages/tmux-pane-dash/tests/fs.test.ts packages/tmux-pane-dash/tests/journal.test.ts packages/tmux-pane-dash/tests/lock.test.ts packages/tmux-pane-dash/tests/manifest.test.ts packages/tmux-pane-dash/tests/migration.test.ts packages/tmux-pane-dash/tests/ownership.test.ts packages/tmux-pane-dash/tests/platform.test.ts packages/tmux-pane-dash/tests/runtime.test.ts packages/tmux-pane-dash/tests/setup.test.ts packages/tmux-pane-dash/tests/tmux-quote-e2e.test.ts packages/tmux-pane-dash/tests/transaction.test.ts packages/tmux-pane-dash/tests/uninstall.test.ts packages/tmux-pane-dash/tests/update.test.ts
 
   installer-faults:
     needs: cli-tests
@@ -125,6 +142,9 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: node -e 'if (process.version !== "v20.0.0") process.exit(1)'
+      - run: |
+          echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"
+          echo "NPM_20_CLI=$(command -v npm)" >> "$GITHUB_ENV"
       - run: PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test packages/tmux-pane-dash/tests --test-name-pattern 'fault|rollback|concurr|archive|config'
 
   packed-e2e:
@@ -141,12 +161,18 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: node -e 'if (process.version !== "v20.0.0") process.exit(1)'
+      - run: |
+          echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"
+          echo "NPM_20_CLI=$(command -v npm)" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: ci-target-*
           path: ${{ runner.temp }}/ci-targets
           merge-multiple: true
-      - run: PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test packages/tmux-pane-dash/tests/packed-e2e.test.ts
+      - run: |
+          set -euo pipefail
+          BUN_BOOTSTRAP="$(command -v bun)"
+          tests/release/with-rust.sh -- tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$BUN_BOOTSTRAP" test packages/tmux-pane-dash/tests/packed-e2e.test.ts
 
   opencode-compatibility:
     needs: cli-tests
@@ -163,12 +189,26 @@ jobs:
           bun-version: 1.3.14
       - run: node -e 'if (process.version !== "v20.0.0") process.exit(1)'
       - run: |
+          echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"
+          echo "NPM_20_CLI=$(command -v npm)" >> "$GITHUB_ENV"
+      - run: |
           export npm_config_cache="$RUNNER_TEMP/opencode-npm-cache"
           export npm_config_userconfig="$RUNNER_TEMP/opencode.npmrc"
           printf '%s\n' 'registry=https://registry.npmjs.org/' 'audit=false' 'fund=false' > "$npm_config_userconfig"
-          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-min" --ignore-scripts --no-audit --no-fund --package-lock=false opencode-ai@1.17.20
-          export OPENCODE_LATEST_VERSION="$(PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view opencode-ai dist-tags.latest)"
-          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test opencode-plugin/tests/real-opencode.test.ts
+           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-min" --ignore-scripts --no-audit --no-fund --package-lock=false opencode-ai@1.17.20
+           export OPENCODE_LATEST_VERSION="$(PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view opencode-ai dist-tags.latest)"
+           [[ "$OPENCODE_LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-latest" --ignore-scripts --no-audit --no-fund --package-lock=false "opencode-ai@$OPENCODE_LATEST_VERSION"
+           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view opencode-ai@1.17.20 version dist.integrity --json
+           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view "opencode-ai@$OPENCODE_LATEST_VERSION" version dist.integrity --json
+           export OPENCODE_1_17_20_BIN="$RUNNER_TEMP/opencode-min/node_modules/.bin/opencode"
+           export OPENCODE_LATEST_BIN="$RUNNER_TEMP/opencode-latest/node_modules/.bin/opencode"
+           test -x "$OPENCODE_1_17_20_BIN" && test -x "$OPENCODE_LATEST_BIN"
+           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$OPENCODE_1_17_20_BIN" --version
+           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$OPENCODE_LATEST_BIN" --version
+           export BUN_BOOTSTRAP="$(command -v bun)"
+           run_isolated() { tests/release/with-npa.sh -- env PANE_DASH_NODE20_PREPROVIDED=1 NODE_20_BIN="$NODE_20_BIN" NPM_20_CLI="$NPM_20_CLI" tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$@"; }
+           run_isolated bun test opencode-plugin/tests/real-opencode.test.ts
 
   archive-dry-run:
     needs: packed-e2e
@@ -184,4 +224,7 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: node -e 'if (process.version !== "v20.0.0") process.exit(1)'
+      - run: |
+          echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"
+          echo "NPM_20_CLI=$(command -v npm)" >> "$GITHUB_ENV"
       - run: PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun scripts/release/dry-run.ts

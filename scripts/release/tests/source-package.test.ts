@@ -25,10 +25,12 @@ const benignNearMisses = ["tokenizer.ts", "authentication.ts", "author.ts", "sec
 
 async function writeFixture(root: string): Promise<void> {
   for (const path of allDirectories) await mkdir(join(root, path), { recursive: true })
+  await mkdir(join(root, ".github", "workflows"), { recursive: true })
   for (const path of SOURCE_ROOTS.filter((entry) => fileRoots.has(entry))) {
     await mkdir(dirname(join(root, path)), { recursive: true })
     await writeFile(join(root, path), `${path}\n`)
   }
+  for (const workflow of ["ci.yml", "opencode-weekly.yml", "release.yml"]) await writeFile(join(root, ".github", "workflows", workflow), `${workflow}\n`)
   await mkdir(join(root, "docs", "committed"), { recursive: true })
   await writeFile(join(root, "docs", "committed", "guide.md"), "committed documentation\n")
   await writeFile(join(root, "scripts", "open.sh"), "#!/bin/sh\n")
@@ -87,6 +89,32 @@ test("the checked-in tree includes committed source roots and docs but no genera
   expect(paths).toContain("opencode-plugin/src/state.ts")
   expect(paths.some((path) => path.includes("/dist/") || path.endsWith("/target") || path.includes("/target/"))).toBe(false)
   expect(paths.some((path) => path.startsWith("release/dist/") || path.startsWith("release\\dist\\"))).toBe(false)
+})
+
+test("Task14 source packaging requires the three workflows and warms one disposable cache", async () => {
+  const script = await readFile(join(process.cwd(), "tests/source_package.sh"), "utf8")
+  expect(script).toContain("MANIFEST=(.github .gitignore LICENSE Makefile README.md VERSION bun.lock package.json docs opencode-plugin packages pane-dash pane_dash.tmux release scripts spike tests tools)")
+  expect(script).toContain("ci.yml opencode-weekly.yml release.yml")
+  expect(script).toContain("release/verify-npm-provenance.ts")
+  expect(script).toContain("release/tests/verify-npm-provenance.test.ts")
+  expect(script).toContain("BUN_INSTALL_CACHE_DIR=\"$warm_cache\"")
+  expect(script).toContain("npm_config_cache=\"$warm_cache\"")
+  expect(script).toContain("--offline")
+  expect(script).not.toContain(".github is intentionally rejected")
+  expect(script).not.toMatch(/fail ['\"]source archive contains generated release\/dist/)
+})
+
+test("source manifest excludes present generated release/dist instead of rejecting its presence", async () => {
+  const root = await temporaryFixture()
+  try {
+    await mkdir(join(root, "release", "dist"), { recursive: true })
+    await writeFile(join(root, "release", "dist", "generated.mjs"), "generated\n")
+    const paths = (await collectSourceManifest(root)).map((entry) => entry.path)
+    expect(paths).not.toContain("release/dist")
+    expect(paths.some((path) => path.startsWith("release/dist/"))).toBe(false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test("source archives are byte-identical across roots, with canonical root, paths, modes, order, and mtime", async () => {

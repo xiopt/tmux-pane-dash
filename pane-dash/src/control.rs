@@ -79,6 +79,7 @@ pub async fn connect_control(
     }
 
     let mut child = Command::new(tmux_bin.into())
+        .env("LC_ALL", "C.UTF-8")
         .args([
             "-C",
             "attach-session",

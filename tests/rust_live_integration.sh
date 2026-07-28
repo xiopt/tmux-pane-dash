@@ -10,7 +10,7 @@ BIN="$ROOT/bin/pane-dash"
 TMP='' SOCKET='' WRAP='' LOG='' OWNER_LOG='' REJECT='' TASK9_MARKER='' TASK9_DEGRADED_INDEX='' TASK9_HOOK_INDEX=''
 PHASE6_XDG_WAS_SET=0 PHASE6_XDG_VALUE='' PHASE6_RGB_SET=0 PHASE6_TERMINAL_FEATURES_BEFORE=''
 CREATION_GATE='' CREATION_TOKEN='' CREATION_FAIL_STAGE='' CREATION_GONE='' CREATION_NEW_COMMAND='' CREATION_POPUP_WORK_OFFSET=0 FAILED=0
-declare -a CLIENT_PIDS=() CLIENT_TTYS=() PRODUCER_PIDS=() WRITER_FDS=()
+declare -a CLIENT_PIDS=() CLIENT_TTYS=() PRODUCER_PIDS=() WRITER_FDS=() WRITER_SLOTS=() OPEN_WRITER_SLOTS=()
 declare -a TRANSCRIPTS=() SESSIONS=() LABELS=() POPUP_CONTROLS=() POPUP_PIDS=()
 declare -a TASK9_SOURCE_SESSIONS=() TASK9_TARGET_SESSIONS=() TASK9_SOURCE_PANES=() CREATION_GATES=()
 declare -a TASK9_TARGET_PANES=() TASK9_TAGS=() TASK9_CLIENT_INDEXES=()
@@ -93,6 +93,19 @@ ansi_tail_has_rgb() { # index offset r g b; accepts standard semicolon/colon SGR
   tail -c "+$offset" "${TRANSCRIPTS[index]}" | perl -0777 -e '$_=<STDIN>;my($r,$g,$b)=@ARGV;exit !/\e\[[^m]*?(?:38;2;$r;$g;${b}|38:2::?$r:$g:${b})(?:;[0-9:]+)*m/' "$red" "$green" "$blue"
 }
 write_bytes() { local fd="${WRITER_FDS[$1]}"; printf '%b' "$2" >&"$fd"; }
+open_writer() {
+  local fifo="$2" slot
+  for slot in {0..31}; do
+    [[ -z "${OPEN_WRITER_SLOTS[slot]:-}" ]] || continue
+    WRITER_FD=$((9 + slot))
+    printf -v writer_command 'exec %s>%q' "$WRITER_FD" "$fifo"
+    eval "$writer_command"
+    OPEN_WRITER_SLOTS[slot]=1
+    WRITER_FD_SLOT="$slot"
+    return 0
+  done
+  die "too many live clients for the portable writer descriptor table"
+}
 popup_tail_has() { # popup offset text
   popup_open "$1" && ansi_tail_has "$1" "$2" "$3"
 }
@@ -228,7 +241,7 @@ start_client() { # session label
   mkfifo "$fifo"
   # cat turns the FIFO producer into the regular stdin pipeline supported by macOS script.
   cat "$fifo" | PD_REAL_TMUX="$REAL_TMUX" PD_SOCKET="$SOCKET" PD_LOG="$LOG" PD_OWNER_LOG="$OWNER_LOG" PD_REJECT="$REJECT" PD_CREATION_GATE="$CREATION_GATE" PD_CREATION_TOKEN="$CREATION_TOKEN" PD_CREATION_FAIL_STAGE="$CREATION_FAIL_STAGE" PD_CREATION_GONE="$CREATION_GONE" PATH="$WRAP:$PATH" TERM=xterm-256color COLORTERM=truecolor TMUX='' pd_run_in_pty "$WRAP/tmux" attach-session -t "$session" >"$transcript" 2>&1 &
-  pid=$!; exec {fd}>"$fifo"
+  pid=$!; open_writer "$index" "$fifo"; fd="$WRITER_FD"; WRITER_SLOTS[index]="$WRITER_FD_SLOT"
   wait_for "client $label attach" 3 new_normal_client "$before"
   CLIENT_PIDS[index]="$NEW_CLIENT_PID"
   CLIENT_TTYS[index]="$NEW_CLIENT_TTY"
@@ -242,13 +255,15 @@ start_client() { # session label
 client_stopped() { ! pid_is_alive "$1"; }
 stop_client() { # index; close FIFO, reap producer, and detach tmux client
   local index="$1"
-  local fd="${WRITER_FDS[index]:-}" producer="${PRODUCER_PIDS[index]:-}" client="${CLIENT_PIDS[index]:-}"
+  local fd="${WRITER_FDS[index]:-}" slot="${WRITER_SLOTS[index]:-}" producer="${PRODUCER_PIDS[index]:-}" client="${CLIENT_PIDS[index]:-}"
   [[ -z "$fd" ]] || eval "exec ${fd}>&-"
   [[ -z "$producer" ]] || kill -TERM "$producer" 2>/dev/null || true
   [[ -z "$client" ]] || kill -TERM "$client" 2>/dev/null || true
   [[ -z "$producer" ]] || wait_for "client ${LABELS[index]:-unknown} producer teardown" 2 client_stopped "$producer"
   [[ -z "$client" ]] || wait_for "client ${LABELS[index]:-unknown} teardown" 2 client_stopped "$client"
+  [[ -z "$slot" ]] || OPEN_WRITER_SLOTS[slot]=''
   CLIENT_PIDS[index]=''; CLIENT_TTYS[index]=''; PRODUCER_PIDS[index]=''; WRITER_FDS[index]=''
+  WRITER_SLOTS[index]=''
   TRANSCRIPTS[index]=''; SESSIONS[index]=''; LABELS[index]=''; POPUP_CONTROLS[index]=''; POPUP_PIDS[index]=''
 }
 send_bytes() { write_bytes "$@"; sleep .1; }

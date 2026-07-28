@@ -96,6 +96,15 @@ export interface EnvironmentProof {
 
 export interface ProvenanceDependencies {
   fetchJson(url: string): Promise<unknown>
+  /** Test-only trust configuration; production callers leave this undefined. */
+  sigstoreOptions?: {
+    tufMirrorURL?: string
+    tufRootPath?: string
+    tufCachePath?: string
+    tufForceCache?: boolean
+    ctLogThreshold?: number
+    tlogThreshold?: number
+  }
 }
 
 type JsonRecord = Record<string, unknown>
@@ -227,7 +236,12 @@ function statementPredicate(statement: JsonRecord, expected: ExpectedNpmProvenan
   if (digest.sha512 !== sha512HexFromIntegrity(expected.integrity)) fail("provenance subject digest does not match")
 
   const predicate = record(statement.predicate, "predicate")
-  if ("environment" in predicate) fail("provenance predicate cannot claim a protected environment")
+  const containsEnvironmentClaim = (value: unknown): boolean => {
+    if (Array.isArray(value)) return value.some(containsEnvironmentClaim)
+    if (typeof value !== "object" || value === null) return false
+    return Object.entries(value).some(([key, child]) => key === "environment" || containsEnvironmentClaim(child))
+  }
+  if (containsEnvironmentClaim(predicate)) fail("provenance predicate cannot claim a protected environment")
   const buildDefinition = predicate.buildDefinition
   if (buildDefinition !== undefined) {
     for (const key of Object.keys(predicate)) if (!["buildDefinition", "runDetails"].includes(key)) fail(`predicate has undocumented field ${key}`)
@@ -275,7 +289,13 @@ export async function verifyNpmProvenance(expected: ExpectedNpmProvenance, deps:
       ["1.3.6.1.4.1.57264.1.5"]: expected.repository,
       ["1.3.6.1.4.1.57264.1.6"]: expected.ref,
     },
-  })
+    ...(deps.sigstoreOptions?.tufMirrorURL ? { tufMirrorURL: deps.sigstoreOptions.tufMirrorURL } : {}),
+    ...(deps.sigstoreOptions?.tufRootPath ? { tufRootPath: deps.sigstoreOptions.tufRootPath } : {}),
+    ...(deps.sigstoreOptions?.tufCachePath ? { tufCachePath: deps.sigstoreOptions.tufCachePath } : {}),
+    ...(deps.sigstoreOptions?.tufForceCache !== undefined ? { tufForceCache: deps.sigstoreOptions.tufForceCache } : {}),
+    ...(deps.sigstoreOptions?.ctLogThreshold !== undefined ? { ctLogThreshold: deps.sigstoreOptions.ctLogThreshold } : {}),
+    ...(deps.sigstoreOptions?.tlogThreshold !== undefined ? { tlogThreshold: deps.sigstoreOptions.tlogThreshold } : {}),
+  } as never)
   const statement = statementAfterVerification(bundle)
   statementPredicate(statement, expected)
 }
@@ -455,15 +475,14 @@ function validateApproval(approval: ApprovalEvidence, expectedCommit: string, en
 
 function deploymentRecord(value: unknown, expected: EnvironmentProofInput): JsonRecord {
   const deployments = Array.isArray(value) ? value : fail("deployments must be an array")
+  if (deployments.length !== 1) fail("deployments must contain exactly one POST response")
   const approval = expected.approvalEvidence.response
-  const matches = deployments.filter((item) => typeof item === "object" && item !== null && (item as JsonRecord).id === approval.deploymentId)
-  if (matches.length !== 1) fail("deployment id is not unique")
-  const deployment = record(matches[0], "deployment")
+  const deployment = record(deployments[0], "deployment")
   for (const key of Object.keys(deployment)) if (!DEPLOYMENT_KEYS.has(key)) fail(`deployment has undocumented field ${key}`)
   for (const key of DEPLOYMENT_KEYS) if (!(key in deployment)) fail(`deployment is missing ${key}`)
-  if (deployment.id !== approval.deploymentId || deployment.sha !== expected.expectedCommit || deployment.environment !== expected.expectedEnvironment || deployment.ref !== REF) fail("deployment does not match approval")
+  if (deployment.id !== approval.deploymentId || deployment.sha !== expected.expectedCommit || deployment.original_environment !== expected.expectedEnvironment || deployment.environment !== expected.expectedEnvironment || deployment.ref !== REF) fail("deployment does not match approval")
   if (deployment.repository_url !== "https://api.github.com/repos/xiopt/tmux-pane-dash" || deployment.statuses_url !== `https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/${approval.deploymentId}/statuses`) fail("deployment URLs do not match repository")
-  if (deployment.url !== `https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/${approval.deploymentId}` || typeof deployment.task !== "string" || typeof deployment.payload !== "object" || deployment.payload === null || typeof deployment.creator !== "object" || deployment.creator === null) fail("deployment shape is invalid")
+  if (deployment.url !== `https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/${approval.deploymentId}` || deployment.task !== "deploy" || typeof deployment.payload !== "object" || deployment.payload === null || Array.isArray(deployment.payload) || typeof deployment.creator !== "object" || deployment.creator === null || Array.isArray(deployment.creator) || typeof deployment.node_id !== "string" || typeof deployment.description !== "string" || typeof deployment.created_at !== "string" || typeof deployment.updated_at !== "string" || Number.isNaN(Date.parse(deployment.created_at)) || Number.isNaN(Date.parse(deployment.updated_at)) || deployment.transient_environment !== false || deployment.production_environment !== (expected.expectedEnvironment === "npm-production") || (deployment.performed_via_github_app !== null && (typeof deployment.performed_via_github_app !== "object" || Array.isArray(deployment.performed_via_github_app)))) fail("deployment shape is invalid")
   return deployment
 }
 
@@ -497,7 +516,15 @@ function successfulJob(value: unknown, expected: EnvironmentProofInput): { id: n
 export function verifyEnvironmentProof(input: EnvironmentProofInput): EnvironmentProof {
   validateHandoff(input.handoff)
   if (!/^[0-9a-f]{40}$/.test(input.expectedCommit) || !ENVIRONMENTS.has(input.expectedEnvironment) || !JOBS.has(input.expectedJob)) fail("environment proof input is invalid")
-  if (extractJobEnvironment(input.taggedWorkflow, input.expectedJob) !== input.expectedEnvironment) fail("workflow environment binding does not match")
+  const expectedEnvironments: Record<EnvironmentProofInput["expectedJob"], ProtectedEnvironment> = {
+    "draft-release": "github-draft",
+    "npm-production": "npm-production",
+    "promote-release": "release-promotion",
+  }
+  for (const [job, environment] of Object.entries(expectedEnvironments) as [EnvironmentProofInput["expectedJob"], ProtectedEnvironment][]) {
+    if (extractJobEnvironment(input.taggedWorkflow, job) !== environment) fail("workflow environment binding does not match")
+  }
+  if (expectedEnvironments[input.expectedJob] !== input.expectedEnvironment) fail("selected job environment does not match")
   validateApproval(input.approvalEvidence, input.expectedCommit, input.expectedEnvironment)
   const deployment = deploymentRecord(input.deployments, input)
   const deploymentStatus = successfulStatus(input.deploymentStatuses, deployment.id as number)

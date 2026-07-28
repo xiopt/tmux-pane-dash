@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto"
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { RELEASE_ASSETS, TARGETS, VERSION } from "./contracts"
 
 export interface DryRunInput {
@@ -21,16 +21,11 @@ function fail(message: string): never {
   throw new Error(`release-dry-run: ${message}`)
 }
 
-function isEmptyAuthConfig(path: string): Promise<boolean> {
-  return readFile(path, "utf8").then((value) => !/(?:_auth|token|password|username|registry=)/i.test(value)).catch(() => false)
-}
-
 async function assertCleanEnvironment(input: DryRunInput): Promise<void> {
   const environment = input.environment ?? process.env
   for (const [key, value] of Object.entries(environment)) {
     if (!value || !forbiddenEnvironment.test(key)) continue
-    if (key === "npm_config_userconfig" && !(await stat(value).catch(() => null)) && environment.npm_config_cache && await stat(environment.npm_config_cache).catch(() => null)) continue
-    if ((key === "NPM_CONFIG_USERCONFIG" || key === "npm_config_userconfig") && await isEmptyAuthConfig(value)) continue
+    if ((key === "NPM_CONFIG_USERCONFIG" || key === "npm_config_userconfig") && environment.HOME && environment.npm_config_cache && value === join(dirname(environment.HOME), "npmrc") && environment.npm_config_cache === join(dirname(environment.HOME), "npm-cache") && !(await stat(value).catch(() => null))) continue
     fail(`credential/auth configuration is present: ${key}`)
   }
   if (input.remotes?.some((remote) => remote.trim() !== "")) fail("Git remotes are forbidden in local dry-run")

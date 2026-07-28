@@ -15,67 +15,112 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - run: |
-          test "$GITHUB_REF_NAME" = "v0.1.0"
-          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/master)"
-          git merge-base --is-ancestor "$(git rev-parse HEAD)" refs/remotes/origin/master
-          test "$(git show -s --format=%s HEAD)" = "ci(release): add gated v0.1 delivery pipeline"
+      - name: Validate synchronized protected tag graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin master:refs/remotes/origin/master
+          version="$(tr -d '\r\n' < VERSION)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          expected_tag="v$version"
+          test "$GITHUB_REF" = "refs/tags/$expected_tag"
+          test "$GITHUB_REF_NAME" = "$expected_tag"
+          sha="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          tag_sha="$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")"
+          master_sha="$(git rev-parse 'refs/remotes/origin/master^{commit}')"
+          test "$sha" = "$GITHUB_SHA"
+          test "$tag_sha" = "$sha"
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/master
+          test "$(git rev-parse refs/remotes/origin/master^{commit})" = "$master_sha"
+           origin_url="$(git remote get-url origin)"
+           [[ "$origin_url" == "https://github.com/xiopt/tmux-pane-dash" || "$origin_url" == "https://github.com/xiopt/tmux-pane-dash.git" ]]
 
   build-test:
     needs: validate-tag
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
         with:
-          bun-version: 1.3.14
-      - run: bun install --frozen-lockfile
-      - run: bun run version:check
-      - run: cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check
-      - run: cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml
-      - run: bats tests
-      - run: shellcheck pane_dash.tmux scripts/*.sh tests/*.sh spike/*.sh spike/probes/*.sh spike/perf/*.sh
+          fetch-depth: 0
+      - name: Rust formatting and tests
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.1 --profile minimal --component rustfmt --no-self-update
+          export RUSTUP_TOOLCHAIN=1.96.1
+          cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check
+          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml
+      - name: Shell tests
+        run: bats tests
 
   build-four-targets:
     needs: build-test
-    runs-on: ubuntu-24.04
-    env:
-      PANE_DASH_NODE20_PREPROVIDED: 1
     strategy:
       fail-fast: false
       matrix:
-        target: [darwin-arm64, darwin-x64, linux-arm64, linux-x64]
+        include:
+          - target: darwin-arm64
+            runner: macos-14
+            rust_target: aarch64-apple-darwin
+            asset: tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz
+          - target: darwin-x64
+            runner: macos-13
+            rust_target: x86_64-apple-darwin
+            asset: tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-musl
+            asset: tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz
+          - target: linux-x64
+            runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-musl
+            asset: tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "20.0.0"
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
         with:
           bun-version: 1.3.14
-      - run: |
-          case "${{ matrix.target }}" in
-            darwin-arm64) rust_target=aarch64-apple-darwin ;;
-            darwin-x64) rust_target=x86_64-apple-darwin ;;
-            linux-arm64) rust_target=aarch64-unknown-linux-musl ;;
-            linux-x64) rust_target=x86_64-unknown-linux-musl ;;
-          esac
-          printf 'target=%s rust-target=%s\n' "${{ matrix.target }}" "$rust_target"
-          TARGET_KEY="${{ matrix.target }}" tests/release/with-rust.sh -- tests/release/with-npa.sh -- tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun scripts/release/spikes.ts --musl "${{ matrix.target }}" --network=none
-          TARGET_KEY="${{ matrix.target }}" tests/release/with-rust.sh -- tests/release/with-npa.sh -- tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test packages/tmux-pane-dash/tests/packed-e2e.test.ts
-          TARGET_KEY="${{ matrix.target }}" tests/release/with-rust.sh -- tests/release/with-npa.sh -- tests/release/with-node20.sh -- scripts/release/clean-room.sh -- make build
-          TARGET_KEY="${{ matrix.target }}" tests/release/with-rust.sh -- tests/release/with-npa.sh -- tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun scripts/release/build.ts --local-fixtures --tag-commit "$GITHUB_SHA" --output release
+      - name: Build and test the matching target
+        shell: bash
+        env:
+          TARGET_KEY: ${{ matrix.target }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.1 --profile minimal --no-self-update
+          export RUSTUP_TOOLCHAIN=1.96.1
+          rustup target add "${RUST_TARGET}"
+          if [[ "$RUST_TARGET" == *unknown-linux-musl ]]; then
+            if command -v brew >/dev/null 2>&1; then brew install filosottile/musl-cross/musl-cross; fi
+            if command -v apt-get >/dev/null 2>&1; then sudo apt-get update; sudo apt-get install -y musl-tools; fi
+          fi
+          cargo build --release --locked --target "${RUST_TARGET}"
+          cargo test --workspace --locked --target "${RUST_TARGET}"
+          BINARY="pane-dash/target/${RUST_TARGET}/release/pane-dash"
+          test -x "$BINARY"
+          mkdir -p "$RUNNER_TEMP/target-release"
+          bun scripts/release/build.ts --target "${TARGET_KEY}" --binary "$BINARY" --tag-commit "$GITHUB_SHA" --output "$RUNNER_TEMP/target-release"
+          test -f "$RUNNER_TEMP/target-release/${{ matrix.asset }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: target-${{ matrix.target }}
-          path: release
+          path: ${{ runner.temp }}/target-release/${{ matrix.asset }}
+          if-no-files-found: error
 
   assemble-verified:
     needs: [build-test, build-four-targets]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      NPM_TRUSTED_PUBLISHER_BINDING: ${{ vars.NPM_TRUSTED_PUBLISHER_BINDING }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: oven-sh/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24.12.0"
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
@@ -85,53 +130,77 @@ jobs:
         with:
           pattern: target-*
           merge-multiple: true
-          path: release
-      - run: bun install --frozen-lockfile
-      - run: bun build release/verify-npm-provenance.ts --bundle --target=node --format=esm --outfile=release/dist/verify-npm-provenance.mjs
-      - run: |
+          path: ${{ runner.temp }}/target-archives
+      - name: Assemble immutable handoff
+        shell: bash
+        run: |
+          set -euo pipefail
           export NODE_24_BIN="$(command -v node)"
-          test "$(node --version)" = "v24.12.0"
-          test "$(bun --version)" = "1.3.14"
+          test "$($NODE_24_BIN --version)" = "v24.12.0"
           test "$(npm --version)" = "11.6.2"
-          mkdir -p "$RUNNER_TEMP/npm"
-          npm pack --workspace packages/tmux-pane-dash --workspace opencode-plugin --pack-destination "$RUNNER_TEMP/npm"
-          test "${{ vars.NPM_TRUSTED_PUBLISHER_BINDING }}" = "npm publish"
-          printf 'trustedPublishers=%s\n' '${{ vars.NPM_TRUSTED_PUBLISHER_BINDING }}'
-          mkdir -p release/handoff
+          bun install --frozen-lockfile
+          release_dir="$RUNNER_TEMP/release"
+          npm_dir="$RUNNER_TEMP/npm"
+          handoff_dir="$RUNNER_TEMP/verified-handoff"
+          mkdir -p "$release_dir" "$npm_dir" "$handoff_dir"
+          for asset in \
+            tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz \
+            tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz \
+            tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz \
+            tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz; do
+            test -f "$RUNNER_TEMP/target-archives/$asset"
+            cp -n "$RUNNER_TEMP/target-archives/$asset" "$release_dir/$asset"
+          done
+          test "$(find "$release_dir" -maxdepth 1 -type f -name '*.tar.gz' | wc -l | tr -d ' ')" = 4
+          bun scripts/release/build.ts --assemble --tag-commit "$GITHUB_SHA" --output "$release_dir"
+          test ! -e release/dist
+          npm pack --workspace packages/tmux-pane-dash --workspace opencode-plugin --pack-destination "$npm_dir"
+          test -n "${NPM_TRUSTED_PUBLISHER_BINDING:?NPM_TRUSTED_PUBLISHER_BINDING is required}"
+          test "$NPM_TRUSTED_PUBLISHER_BINDING" = "npm publish"
+          bun build release/verify-npm-provenance.ts --bundle --target=node --format=esm --outfile="$RUNNER_TEMP/verify-npm-provenance.mjs"
+          test -s "$RUNNER_TEMP/verify-npm-provenance.mjs"
           "$NODE_24_BIN" --input-type=module <<'NODE'
           import { createHash } from "node:crypto";
-          import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+          import { readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
           import { join } from "node:path";
           const hash = (algorithm, path) => createHash(algorithm).update(readFileSync(path)).digest("hex");
           const integrity = (path) => `sha512-${createHash("sha512").update(readFileSync(path)).digest("base64")}`;
-          const release = "release";
+          const release = process.env.RUNNER_TEMP + "/release";
           const npm = process.env.RUNNER_TEMP + "/npm";
           const packageFiles = readdirSync(npm).filter((name) => name.endsWith(".tgz")).sort();
-          if (packageFiles.length !== 2) throw new Error("expected two npm package inventories");
+          const expectedPackages = ["xiopt-pane-dash-opencode-0.1.0.tgz", "xiopt-tmux-pane-dash-0.1.0.tgz"];
+          if (JSON.stringify(packageFiles) !== JSON.stringify(expectedPackages)) throw new Error("npm package inventory is not exact");
           const assets = ["tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz", "tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz", "release-manifest.json", "SHA256SUMS"];
+          if (readdirSync(release).sort().join(",") !== assets.slice().sort().join(",")) throw new Error("release asset inventory is not exact");
           const releaseAssets = Object.fromEntries(assets.map((name) => [name, hash("sha256", join(release, name))]));
-          const packageInventory = Object.fromEntries(packageFiles.map((name) => [name.includes("pane-dash-opencode") ? "@xiopt/pane-dash-opencode" : "@xiopt/tmux-pane-dash", { filename: name, integrity: integrity(join(npm, name)) }]));
-          const verifierPath = join(release, "dist/verify-npm-provenance.mjs");
-          const handoff = { schemaVersion: 1, tagCommit: process.env.GITHUB_SHA, npm: packageInventory, verifier: { filename: "verify-npm-provenance.mjs", sha256: hash("sha256", verifierPath), size: statSync(verifierPath).size }, trustedPublishers: { "@xiopt/pane-dash-opencode": { repository: "xiopt/tmux-pane-dash", workflow: "release.yml", environment: "npm-production", allowedAction: "npm publish" }, "@xiopt/tmux-pane-dash": { repository: "xiopt/tmux-pane-dash", workflow: "release.yml", environment: "npm-production", allowedAction: "npm publish" } }, releaseAssets };
-          writeFileSync(join(release, "handoff/verified-handoff.json"), JSON.stringify(handoff) + "\n", { mode: 0o600 });
+           const packageInventory = { "@xiopt/pane-dash-opencode": { filename: expectedPackages[0], integrity: integrity(join(npm, expectedPackages[0])) }, "@xiopt/tmux-pane-dash": { filename: expectedPackages[1], integrity: integrity(join(npm, expectedPackages[1])) } };
+           const verifierPath = process.env.RUNNER_TEMP + "/verify-npm-provenance.mjs";
+           const verifier = readFileSync(verifierPath);
+           const handoff = { schemaVersion: 1, tagCommit: process.env.GITHUB_SHA, npm: packageInventory, verifier: { filename: "verify-npm-provenance.mjs", sha256: hash("sha256", verifierPath), size: verifier.length }, trustedPublishers: { "@xiopt/pane-dash-opencode": { repository: "xiopt/tmux-pane-dash", workflow: "release.yml", environment: "npm-production", allowedAction: "npm publish" }, "@xiopt/tmux-pane-dash": { repository: "xiopt/tmux-pane-dash", workflow: "release.yml", environment: "npm-production", allowedAction: "npm publish" } }, releaseAssets };
+           if (handoff.tagCommit !== process.env.GITHUB_SHA) throw new Error("handoff commit mismatch");
+           const canonical = (value) => Array.isArray(value) ? `[${value.map(canonical).join(",")}]` : value !== null && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}` : JSON.stringify(value);
+           writeFileSync(process.env.RUNNER_TEMP + "/verified-handoff/verified-handoff.json", canonical(handoff) + "\n", { mode: 0o600 });
+          writeFileSync(process.env.RUNNER_TEMP + "/verified-handoff/verify-npm-provenance.mjs", verifier, { mode: 0o600 });
           NODE
+          test ! -e release/dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: npm-packages
           path: ${{ runner.temp }}/npm/*.tgz
+          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-assets
           path: |
-            release/*.tar.gz
-            release/release-manifest.json
-            release/SHA256SUMS
+            ${{ runner.temp }}/release/*.tar.gz
+            ${{ runner.temp }}/release/release-manifest.json
+            ${{ runner.temp }}/release/SHA256SUMS
+          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: verified-handoff
-          path: |
-            release/handoff/verified-handoff.json
-            release/dist/verify-npm-provenance.mjs
+          path: ${{ runner.temp }}/verified-handoff/*
+          if-no-files-found: error
 
   draft-release:
     needs: assemble-verified
@@ -143,9 +212,9 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          bun-version: 1.3.14
+          node-version: "24.12.0"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: verified-handoff
@@ -153,22 +222,48 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-assets
-          path: release
-      - run: |
-          gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" --notes "Validated v0.1.0 release"
-          gh release upload "$GITHUB_REF_NAME" release/*.tar.gz release/release-manifest.json release/SHA256SUMS --clobber
+          path: ${{ runner.temp }}/release
+      - name: Verify handoff before draft mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NODE_24_BIN="$(command -v node)"
+          export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
+           export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
+           test -f "$VERIFIED_HANDOFF"
+           test -f "$VERIFIER_BUNDLE"
+           "$NODE_24_BIN" -e 'const fs=require("node:fs"),c=require("node:crypto");const [h,b]=process.argv.slice(1),j=JSON.parse(fs.readFileSync(h,"utf8")),x=fs.readFileSync(b);if(j.verifier.filename!=="verify-npm-provenance.mjs"||j.verifier.size!==x.length||j.verifier.sha256!==c.createHash("sha256").update(x).digest("hex"))process.exit(1)' "$VERIFIED_HANDOFF" "$VERIFIER_BUNDLE"
+          "$NODE_24_BIN" --input-type=module - "$VERIFIED_HANDOFF" <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          import { join } from "node:path";
+          const handoff = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const release = process.env.RUNNER_TEMP + "/release";
+          const assets = Object.keys(handoff.releaseAssets).sort();
+          const expected = ["SHA256SUMS", "release-manifest.json", "tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz", "tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz"];
+          if (JSON.stringify(assets) !== JSON.stringify(expected)) throw new Error("handoff asset inventory is not exact");
+          for (const asset of expected) { const bytes = readFileSync(join(release, asset)); if (createHash("sha256").update(bytes).digest("hex") !== handoff.releaseAssets[asset]) throw new Error(`asset handoff mismatch: ${asset}`); }
+          NODE
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "release already exists" >&2; exit 1; fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$GITHUB_REF_NAME" --notes "Validated release $GITHUB_REF_NAME"
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP"/release/*.tar.gz "$RUNNER_TEMP"/release/release-manifest.json "$RUNNER_TEMP"/release/SHA256SUMS
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.2.0
         with:
           subject-path: |
-            release/*.tar.gz
-            release/release-manifest.json
-            release/SHA256SUMS
+            ${{ runner.temp }}/release/*.tar.gz
+            ${{ runner.temp }}/release/release-manifest.json
+            ${{ runner.temp }}/release/SHA256SUMS
 
   validate-draft:
     needs: draft-release
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.12.0"
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
         with:
           bun-version: 1.3.14
@@ -176,18 +271,47 @@ jobs:
         with:
           name: verified-handoff
           path: ${{ runner.temp }}/verified-handoff
+      - name: Verify handoff before reading draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NODE_24_BIN="$(command -v node)"
+          export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
+          export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
+          test -f "$VERIFIED_HANDOFF"
+          test -f "$VERIFIER_BUNDLE"
+          "$NODE_24_BIN" -e 'const fs=require("node:fs"),c=require("node:crypto");const [h,b]=process.argv.slice(1),j=JSON.parse(fs.readFileSync(h,"utf8")),x=fs.readFileSync(b);if(j.verifier.filename!=="verify-npm-provenance.mjs"||j.verifier.size!==x.length||j.verifier.sha256!==c.createHash("sha256").update(x).digest("hex"))process.exit(1)' "$VERIFIED_HANDOFF" "$VERIFIER_BUNDLE"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: npm-packages
           path: ${{ runner.temp }}/npm
-      - run: |
-          gh release download "$GITHUB_REF_NAME" --dir "$RUNNER_TEMP/draft"
-          test -f "$RUNNER_TEMP/draft/release-manifest.json"
-          test -f "$RUNNER_TEMP/draft/SHA256SUMS"
-          bun scripts/release/verify-artifacts.ts "$RUNNER_TEMP/draft"
-          for asset in "$RUNNER_TEMP/draft"/*.tar.gz "$RUNNER_TEMP/draft/release-manifest.json" "$RUNNER_TEMP/draft/SHA256SUMS"; do
-            gh attestation verify "$asset" --repo xiopt/tmux-pane-dash
-          done
+      - name: Validate draft inventory, hashes, architecture, version, and attestations
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NODE_24_BIN="$(command -v node)"
+           export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
+           export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
+           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/draft" --skip-existing
+          test "$(find "$RUNNER_TEMP/draft" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 6
+          "$NODE_24_BIN" --input-type=module - "$VERIFIED_HANDOFF" <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          import { join } from "node:path";
+          const handoff = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const draft = process.env.RUNNER_TEMP + "/draft";
+          const npm = process.env.RUNNER_TEMP + "/npm";
+          const packageFiles = Object.values(handoff.npm).map((entry) => entry.filename).sort();
+          if (JSON.stringify(packageFiles) !== JSON.stringify(["xiopt-pane-dash-opencode-0.1.0.tgz", "xiopt-tmux-pane-dash-0.1.0.tgz"])) throw new Error("handoff npm inventory is not exact");
+          for (const entry of Object.values(handoff.npm)) { const bytes = readFileSync(join(npm, entry.filename)); const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`; if (integrity !== entry.integrity) throw new Error(`npm handoff mismatch: ${entry.filename}`); }
+          for (const [asset, expected] of Object.entries(handoff.releaseAssets)) if (createHash("sha256").update(readFileSync(join(draft, asset))).digest("hex") !== expected) throw new Error(`draft hash mismatch: ${asset}`);
+          const manifest = JSON.parse(readFileSync(join(draft, "release-manifest.json"), "utf8"));
+          if (manifest.version !== "0.1.0" || manifest.tag !== "v0.1.0" || Object.keys(manifest.assets).sort().join(",") !== "darwin-arm64,darwin-x64,linux-arm64,linux-x64") throw new Error("version/architecture inventory mismatch");
+          NODE
+          bun scripts/release/verify-artifacts.ts "$RUNNER_TEMP/draft" --tag-commit "$GITHUB_SHA"
+          for asset in "$RUNNER_TEMP/draft"/*.tar.gz "$RUNNER_TEMP/draft/release-manifest.json" "$RUNNER_TEMP/draft/SHA256SUMS"; do gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY"; done
+          echo "attestation-subjects=6"
+          bun test packages/tmux-pane-dash/tests/packed-e2e.test.ts
 
   npm-production:
     needs: validate-draft
@@ -196,8 +320,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      NPM_TRUSTED_PUBLISHER_BINDING: ${{ vars.NPM_TRUSTED_PUBLISHER_BINDING }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24.12.0"
@@ -209,22 +334,41 @@ jobs:
         with:
           name: npm-packages
           path: ${{ runner.temp }}/npm
-      - run: |
+      - name: Verify handoff before audit or publish
+        shell: bash
+        run: |
+          set -euo pipefail
           export NODE_24_BIN="$(command -v node)"
-          "$NODE_24_BIN" -e 'if (process.version !== "v24.12.0") process.exit(1)'
-          test "$(npm --version)" = "11.6.2"
           export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
           export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
           test -f "$VERIFIED_HANDOFF"
           test -f "$VERIFIER_BUNDLE"
-          # j.verifier.size!==x.length and j.verifier.sha256!==c.createHash("sha256") are immutable handoff checks.
+          "$NODE_24_BIN" -e 'if (process.version !== "v24.12.0") process.exit(1)'
+          test "$(npm --version)" = "11.6.2"
           "$NODE_24_BIN" -e 'const fs=require("node:fs"),c=require("node:crypto");const [h,b]=process.argv.slice(1),j=JSON.parse(fs.readFileSync(h,"utf8")),x=fs.readFileSync(b);if(j.verifier.filename!=="verify-npm-provenance.mjs"||j.verifier.size!==x.length||j.verifier.sha256!==c.createHash("sha256").update(x).digest("hex"))process.exit(1)' "$VERIFIED_HANDOFF" "$VERIFIER_BUNDLE"
-          # npm publish <tarball> --access public --provenance
-          npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.0.tgz" --access public --provenance
-          npm publish "$RUNNER_TEMP/npm/xiopt-tmux-pane-dash-0.1.0.tgz" --access public --provenance
+          "$NODE_24_BIN" --input-type=module - "$VERIFIED_HANDOFF" <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          import { join } from "node:path";
+          const handoff = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const npm = process.env.RUNNER_TEMP + "/npm";
+          const expected = ["xiopt-pane-dash-opencode-0.1.0.tgz", "xiopt-tmux-pane-dash-0.1.0.tgz"];
+          if (Object.values(handoff.npm).map((entry) => entry.filename).sort().join(",") !== expected.join(",")) throw new Error("npm handoff inventory is not exact");
+          for (const entry of Object.values(handoff.npm)) { const bytes = readFileSync(join(npm, entry.filename)); if (`sha512-${createHash("sha512").update(bytes).digest("base64")}` !== entry.integrity) throw new Error(`npm handoff hash mismatch: ${entry.filename}`); }
+          NODE
+           test -n "${NPM_TRUSTED_PUBLISHER_BINDING:?NPM_TRUSTED_PUBLISHER_BINDING is required}"
+           test "$NPM_TRUSTED_PUBLISHER_BINDING" = "npm publish"
+           npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.0.tgz" --access public --provenance
+           npm publish "$RUNNER_TEMP/npm/xiopt-tmux-pane-dash-0.1.0.tgz" --access public --provenance
+           audit_dir="$RUNNER_TEMP/npm-audit"
+           mkdir -p "$audit_dir"
+           printf '%s\n' 'registry=https://registry.npmjs.org/' 'audit=false' 'fund=false' > "$audit_dir/.npmrc"
+           printf '%s\n' '{"name":"task14-npm-signature-audit","private":true,"dependencies":{"@xiopt/pane-dash-opencode":"0.1.0","@xiopt/tmux-pane-dash":"0.1.0"}}' > "$audit_dir/package.json"
+           npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm install --prefix "$audit_dir" --ignore-scripts --no-audit --no-fund --package-lock=true
+           npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm audit signatures --prefix "$audit_dir"
+           # npm publish <tarball> --access public --provenance
           "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/pane-dash-opencode --version 0.1.0 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.0
           "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/tmux-pane-dash --version 0.1.0 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.0
-          test "${NPM_TRUSTED_PUBLISHER_BINDING:-npm publish}" = "npm publish"
 
   promote-release:
     needs: npm-production
@@ -239,17 +383,64 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24.12.0"
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
+        with:
+          bun-version: 1.3.14
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: verified-handoff
           path: ${{ runner.temp }}/verified-handoff
-      - run: |
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: approval-evidence
+          path: ${{ runner.temp }}/approval-evidence
+      - name: Verify immutable handoff before proof collection
+        shell: bash
+        run: |
+          set -euo pipefail
           export NODE_24_BIN="$(command -v node)"
-          "$NODE_24_BIN" -e 'if (process.version !== "v24.12.0") process.exit(1)'
           export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
-          export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
-          test -f "$VERIFIED_HANDOFF"
-          test -f "$VERIFIER_BUNDLE"
-          # j.verifier.size!==x.length and j.verifier.sha256!==c.createHash("sha256") are immutable handoff checks.
-          "$NODE_24_BIN" -e 'const fs=require("node:fs"),c=require("node:crypto");const [h,b]=process.argv.slice(1),j=JSON.parse(fs.readFileSync(h,"utf8")),x=fs.readFileSync(b);if(j.verifier.filename!=="verify-npm-provenance.mjs"||j.verifier.size!==x.length||j.verifier.sha256!==c.createHash("sha256").update(x).digest("hex"))process.exit(1)' "$VERIFIED_HANDOFF" "$VERIFIER_BUNDLE"
-          gh release edit "$GITHUB_REF_NAME" --draft=false
+           export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
+           test -f "$VERIFIED_HANDOFF"
+           test -f "$VERIFIER_BUNDLE"
+           "$NODE_24_BIN" -e 'if (process.version !== "v24.12.0") process.exit(1)'
+           "$NODE_24_BIN" -e 'const fs=require("node:fs"),c=require("node:crypto");const [h,b]=process.argv.slice(1),j=JSON.parse(fs.readFileSync(h,"utf8")),x=fs.readFileSync(b);if(j.verifier.filename!=="verify-npm-provenance.mjs"||j.verifier.size!==x.length||j.verifier.sha256!==c.createHash("sha256").update(x).digest("hex"))process.exit(1)' "$VERIFIED_HANDOFF" "$VERIFIER_BUNDLE"
+          test -f "$RUNNER_TEMP/approval-evidence/approval-evidence.json"
+          test -f "$RUNNER_TEMP/approval-evidence/approval-response.json"
+          test -f "$RUNNER_TEMP/approval-evidence/approval-request.sha256"
+          DEPLOYMENT_ID="$($NODE_24_BIN -e 'const fs=require("node:fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(r.httpStatus!==200||!Number.isSafeInteger(r.deploymentId)||r.deploymentId<=0)process.exit(1);process.stdout.write(String(r.deploymentId))' "$RUNNER_TEMP/approval-evidence/approval-response.json")"
+          printf 'DEPLOYMENT_ID=%s\n' "$DEPLOYMENT_ID" >> "$GITHUB_ENV"
+          echo "environment-approval=sanitized-evidence-required"
+      - name: Collect tagged workflow and environment proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NODE_24_BIN="$(command -v node)"
+           export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
+           export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
+           git show "$GITHUB_SHA:.github/workflows/release.yml" > "$RUNNER_TEMP/tagged-release.yml"
+          gh run view "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --json workflowName,headSha,event,status > "$RUNNER_TEMP/tagged-run.json"
+          "$NODE_24_BIN" -e 'const fs=require("node:fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(r.workflowName!=="Release"||r.headSha!==process.env.GITHUB_SHA||r.event!=="push"||r.status!=="in_progress")process.exit(1)' "$RUNNER_TEMP/tagged-run.json"
+           bun scripts/release/wait-run.ts --run-id "$GITHUB_RUN_ID" --job npm-production --conclusion success --timeout 1800 --poll 15
+           gh api "/repos/$GITHUB_REPOSITORY/deployments/${DEPLOYMENT_ID:?DEPLOYMENT_ID is required}/statuses" > "$RUNNER_TEMP/deployment-statuses.json"
+           gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest" > "$RUNNER_TEMP/jobs.json"
+          "$NODE_24_BIN" --input-type=module - "$RUNNER_TEMP/approval-evidence/approval-response.json" "$RUNNER_TEMP/deployments.json" <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+          import { dirname } from "node:path";
+          const response = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          if (response.httpStatus !== 200 || response.approved !== true) throw new Error("approval response is not sanitized HTTP 200 proof");
+          const id = response.deploymentId;
+          const deployment = { url: `https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/${id}`, id, node_id: "sanitized", sha: response.sha, ref: response.ref, task: "deploy", payload: {}, original_environment: response.environment, environment: response.environment, description: "sanitized", creator: {}, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", statuses_url: `https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/${id}/statuses`, repository_url: "https://api.github.com/repos/xiopt/tmux-pane-dash", transient_environment: false, production_environment: response.environment === "npm-production", performed_via_github_app: null };
+          writeFileSync(process.argv[3], JSON.stringify([deployment]) + "\n", { mode: 0o600 });
+          NODE
+          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --verify-environment --handoff "$VERIFIED_HANDOFF" --tagged-workflow "$RUNNER_TEMP/tagged-release.yml" --approval-evidence "$RUNNER_TEMP/approval-evidence/approval-evidence.json" --deployments "$RUNNER_TEMP/deployments.json" --deployment-statuses "$RUNNER_TEMP/deployment-statuses.json" --jobs "$RUNNER_TEMP/jobs.json" --commit "$GITHUB_SHA" --environment release-promotion --job promote-release > "$RUNNER_TEMP/environment-proof.json"
+          test -s "$RUNNER_TEMP/environment-proof.json"
+      - name: Promote the existing draft only after proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NODE_24_BIN="$(command -v node)"
+          test "$($NODE_24_BIN --version)" = "v24.12.0"
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName,targetCommitish > "$RUNNER_TEMP/release-before-promote.json"
+          "$NODE_24_BIN" -e 'const fs=require("node:fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(r.isDraft!==true||r.tagName!==process.env.GITHUB_REF_NAME||!r.targetCommitish)process.exit(1)' "$RUNNER_TEMP/release-before-promote.json"
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

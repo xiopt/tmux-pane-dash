@@ -36,12 +36,12 @@ async function command(argv: string[], env?: Record<string, string>, cwd?: strin
 async function runtimeSmoke(binary: string): Promise<void> {
   const version = await command([binary, "--version"]).catch(() => undefined)
   if (!version || version.code !== 0 || version.stdout !== "pane-dash 0.1.0\n" || version.stderr !== "") throw new Error("binary does not report the exact version")
-  const root = await mkdtemp(join(tmpdir(), "pane-dash-artifact-tmux-")), socket = `pd-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`
+  const root = await mkdtemp(join("/tmp", "pane-dash-artifact-tmux-")), socket = `pd-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`
   const tmux = process.env.TMUX_BIN ?? "tmux"
   try {
-    const environment = { ...process.env, TMUX_TMPDIR: root }
+    const environment = { ...process.env, TMUX: "", TMUX_PANE: "", TMUX_TMPDIR: root }
     const launched = await command([tmux, "-L", socket, "-f", "/dev/null", "new-session", "-d", "-s", "smoke", "sleep", "30"], environment)
-    if (launched.code !== 0) throw new Error("binary real tmux smoke did not start")
+    if (launched.code !== 0) throw new Error(`binary real tmux smoke did not start: ${launched.stderr.trim() || launched.stdout.trim() || `exit ${launched.code}`}`)
     const retained = await command([tmux, "-L", socket, "set-option", "-t", "smoke:0", "remain-on-exit", "on"], environment)
     if (retained.code !== 0) throw new Error("binary real tmux smoke did not configure")
     const invoked = await command([tmux, "-L", socket, "respawn-pane", "-k", "-t", "smoke:0", binary, "--version"], environment)
@@ -50,18 +50,18 @@ async function runtimeSmoke(binary: string): Promise<void> {
     const pane = await command([tmux, "-L", socket, "list-panes", "-t", "smoke", "-F", "#{pane_dead} #{pane_dead_status}"], environment)
     if (pane.code !== 0 || pane.stdout.trim() !== "1 0") throw new Error("binary real tmux smoke did not complete")
   } finally {
-    await command([tmux, "-L", socket, "kill-server"], { ...process.env, TMUX_TMPDIR: root }).catch(() => undefined)
+    await command([tmux, "-L", socket, "kill-server"], { ...process.env, TMUX: "", TMUX_PANE: "", TMUX_TMPDIR: root }).catch(() => undefined)
     await rm(root, { recursive: true, force: true })
   }
 }
 
-async function tagEpoch(): Promise<number> {
+async function tagEpoch(tagCommit = TAG_COMMIT): Promise<number> {
   const git = { run: async (args: string[]) => {
     const result = await command(["git", ...args])
     if (result.code !== 0) throw new Error(result.stderr.trim())
     return result.stdout
   } }
-  const expected = await git.run(["rev-parse", `${TAG_COMMIT}^{commit}`])
+  const expected = await git.run(["rev-parse", `${tagCommit}^{commit}`])
   const expectedCommit = expected.trim()
   const timestamp = await git.run(["show", "-s", "--format=%ct", expectedCommit])
   if (!/^[0-9]+\n$/.test(timestamp)) throw new Error("tag commit has invalid committer timestamp")
@@ -136,11 +136,12 @@ export async function verifyPackages(root: string): Promise<void> {
 }
 
 if (import.meta.main) {
-  const [argument, extra] = process.argv.slice(2)
-  if (!argument || extra) throw new Error("usage: verify-artifacts.ts DIRECTORY | --packages")
+  const [argument, ...flags] = process.argv.slice(2)
+  if (!argument || (flags.length !== 0 && (flags.length !== 2 || flags[0] !== "--tag-commit" || !flags[1]))) throw new Error("usage: verify-artifacts.ts DIRECTORY [--tag-commit COMMIT] | --packages")
+  const tagCommit = flags.length === 2 ? flags[1] : undefined
   if (argument === "--packages") {
     await verifyPackages(process.cwd()); console.log("packages=1 inventory=exact PASS")
   } else {
-    await verifyReleaseDirectory(argument); console.log("archives=4 assets=6 inventories=exact reproducible=PASS")
+    await verifyReleaseDirectory(argument, tagCommit ? await tagEpoch(tagCommit) : undefined); console.log("archives=4 assets=6 inventories=exact reproducible=PASS")
   }
 }

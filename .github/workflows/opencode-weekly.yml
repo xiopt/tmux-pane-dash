@@ -23,16 +23,22 @@ jobs:
           bun-version: 1.3.14
       - run: node -e 'if (process.version !== "v20.0.0") process.exit(1)'
       - run: |
-          test -x "${OPENCODE_1_17_20_BIN:?absolute pinned OpenCode path required}"
-          test -x "${OPENCODE_LATEST_BIN:?absolute latest OpenCode path required}"
-          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$OPENCODE_1_17_20_BIN" --version
-          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$OPENCODE_LATEST_BIN" --version
+          export NODE_20_BIN="$(command -v node)" NPM_20_CLI="$(command -v npm)"
           export npm_config_cache="$RUNNER_TEMP/opencode-npm-cache"
           export npm_config_userconfig="$RUNNER_TEMP/opencode.npmrc"
           printf '%s\n' 'registry=https://registry.npmjs.org/' 'audit=false' 'fund=false' > "$npm_config_userconfig"
           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-min" --ignore-scripts --no-audit --no-fund --package-lock=false opencode-ai@1.17.20
           export OPENCODE_LATEST_VERSION="$(PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- npm view opencode-ai dist-tags.latest)"
+          [[ "$OPENCODE_LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-latest" --ignore-scripts --no-audit --no-fund --package-lock=false "opencode-ai@$OPENCODE_LATEST_VERSION"
-          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$RUNNER_TEMP/opencode-min/node_modules/.bin/opencode" --version
-          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$RUNNER_TEMP/opencode-latest/node_modules/.bin/opencode" --version
-          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test opencode-plugin/tests/real-opencode.test.ts
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view opencode-ai@1.17.20 version dist.integrity --json
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view "opencode-ai@$OPENCODE_LATEST_VERSION" version dist.integrity --json
+          export OPENCODE_1_17_20_BIN="$RUNNER_TEMP/opencode-min/node_modules/.bin/opencode"
+          export OPENCODE_LATEST_BIN="$RUNNER_TEMP/opencode-latest/node_modules/.bin/opencode"
+          test -x "$OPENCODE_1_17_20_BIN"
+          test -x "$OPENCODE_LATEST_BIN"
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$OPENCODE_1_17_20_BIN" --version
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$OPENCODE_LATEST_BIN" --version
+          export BUN_BOOTSTRAP="$(command -v bun)"
+          run_isolated() { tests/release/with-npa.sh -- env PANE_DASH_NODE20_PREPROVIDED=1 NODE_20_BIN="$NODE_20_BIN" NPM_20_CLI="$NPM_20_CLI" tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$@"; }
+          run_isolated bun test opencode-plugin/tests/real-opencode.test.ts

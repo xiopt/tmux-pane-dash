@@ -54,7 +54,7 @@ if [ -n "${PANE_DASH_NPA_ROOT:-}" ]; then
   preserve_npa=1
 fi
 
-tool_names=(NODE_20_BIN NPM_20_CLI OPENCODE_1_17_20_BIN OPENCODE_LATEST_BIN TMUX_BIN RUSTUP_BOOTSTRAP BUN_BOOTSTRAP)
+tool_names=(NODE_20_BIN NPM_20_CLI OPENCODE_1_17_20_BIN OPENCODE_LATEST_BIN TMUX_BIN RUSTUP_BOOTSTRAP BUN_BOOTSTRAP BATS_BIN SHELLCHECK_BIN)
 tool_values=()
 tmux_bin=''
 if [ -z "${TMUX_BIN:-}" ]; then
@@ -169,7 +169,14 @@ export BUN_INSTALL_CACHE_DIR="$root/bun-cache"
 export TMPDIR="$tmp_root"
 export TMUX_TMPDIR="$tmux_root"
 export PANE_DASH_TMUX_SOCKET="$socket"
-[ "$preserve_rust" -eq 1 ] && export PANE_DASH_ISOLATED_RUST_ROOT="$isolated_rust_root" RUSTUP_HOME="$isolated_rust_root/rustup" CARGO_HOME="$isolated_rust_root/cargo" CARGO="$rust_toolchain_bin/cargo" RUSTC="$rust_toolchain_bin/rustc" RUSTDOC="$rust_toolchain_bin/rustdoc" RUSTFMT="$rust_toolchain_bin/rustfmt" CLIPPY_DRIVER="$rust_toolchain_bin/clippy-driver" PATH="$rust_toolchain_bin:/usr/bin:/bin:/usr/sbin:/sbin"
+node_tool_bin=''
+[ -n "${NODE_20_BIN:-}" ] && node_tool_bin="$(dirname "$NODE_20_BIN")"
+test_tool_bins=''
+for tool in BATS_BIN SHELLCHECK_BIN; do
+  value="${!tool:-}"
+  [ -n "$value" ] && test_tool_bins="$test_tool_bins:$(dirname "$value")"
+done
+[ "$preserve_rust" -eq 1 ] && export PANE_DASH_ISOLATED_RUST_ROOT="$isolated_rust_root" RUSTUP_HOME="$isolated_rust_root/rustup" CARGO_HOME="$isolated_rust_root/cargo" CARGO="$rust_toolchain_bin/cargo" RUSTC="$rust_toolchain_bin/rustc" RUSTDOC="$rust_toolchain_bin/rustdoc" RUSTFMT="$rust_toolchain_bin/rustfmt" CLIPPY_DRIVER="$rust_toolchain_bin/clippy-driver" PATH="$rust_toolchain_bin${node_tool_bin:+:$node_tool_bin}$test_tool_bins:/usr/bin:/bin:/usr/sbin:/sbin"
 mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$npm_config_cache" "$BUN_INSTALL_CACHE_DIR" "$TMPDIR" "$TMUX_TMPDIR"
 
 # Job control gives the child its own process group, including descendants.

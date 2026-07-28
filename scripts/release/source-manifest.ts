@@ -76,6 +76,7 @@ export const SOURCE_ARCHIVE_PREFIX = "tmux-pane-dash-"
 const SOURCE_ARCHIVE_SUFFIX = "-source.tar.gz"
 const executableSet = new Set<string>(SOURCE_EXECUTABLES)
 const rootSet = new Set<string>(SOURCE_ROOTS)
+const REQUIRED_WORKFLOWS = ["ci.yml", "opencode-weekly.yml", "release.yml"] as const
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
@@ -165,6 +166,8 @@ async function validateRoots(root: string): Promise<void> {
     const expectedDirectory = ![".gitignore", "LICENSE", "Makefile", "README.md", "VERSION", "bun.lock", "package.json", "pane_dash.tmux"].includes(path)
     if (expectedDirectory !== info.isDirectory()) fail(`source root has the wrong kind: ${path}`)
   }
+  const workflows = (await readdir(join(root, ".github", "workflows"))).sort(comparePaths)
+  if (workflows.length !== REQUIRED_WORKFLOWS.length || workflows.some((path, index) => path !== REQUIRED_WORKFLOWS[index])) fail(".github/workflows must contain exactly ci.yml, opencode-weekly.yml, and release.yml")
 }
 
 function modeFor(path: string, mode: number): SourceMode {

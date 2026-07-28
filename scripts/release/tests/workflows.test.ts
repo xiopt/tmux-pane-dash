@@ -16,6 +16,11 @@ const setupNode = (body: string, version: string) => {
   expect(body).not.toMatch(/^\s+cache(?:-dependency-path)?:/m)
 }
 
+const permissions = (body: string): Record<string, string> => {
+  const block = /^    permissions:\n((?:      [A-Za-z-]+: [^\n]+\n?)*)/m.exec(body)?.[1] ?? ""
+  return Object.fromEntries([...block.matchAll(/^      ([A-Za-z-]+): ([^\n]+)$/gm)].map((match) => [match[1], match[2]]))
+}
+
 test("CI is read-only, ordered, and runs all four target commands plus isolated contracts", async () => {
   const text = await workflow("ci.yml")
   expect(text).toContain("pull_request:")
@@ -77,12 +82,14 @@ test("release graph has exact least-privilege jobs, environments, handoff, and t
   expect(draft).toContain("contents: write")
   expect(draft).toContain("id-token: write")
   expect(draft).toContain("attestations: write")
+  expect(permissions(draft)).toEqual({ contents: "write", "id-token": "write", attestations: "write" })
   const npm = job(text, "npm-production")
   expect(npm).toContain("environment: npm-production")
   expect(npm).toContain("runs-on: ubuntu-24.04")
   expect(npm).toContain("contents: read")
   expect(npm).toContain("id-token: write")
   expect(npm).not.toContain("contents: write")
+  expect(permissions(npm)).toEqual({ contents: "read", "id-token": "write" })
   setupNode(npm, "24.12.0")
   expect(npm).toContain('test "$(npm --version)" = "11.6.2"')
   expect(npm).not.toMatch(/npm install --global|npm install.*sigstore|bun build/)
@@ -93,6 +100,7 @@ test("release graph has exact least-privilege jobs, environments, handoff, and t
   expect(promote).toContain("contents: write")
   expect(promote).toContain("actions: read")
   expect(promote).toContain("deployments: read")
+  expect(permissions(promote)).toEqual({ contents: "write", actions: "read", deployments: "read" })
   expect(promote).toContain("needs: npm-production")
   setupNode(promote, "24.12.0")
   for (const name of ["npm-production", "promote-release"]) {
@@ -110,6 +118,91 @@ test("release graph has exact least-privilege jobs, environments, handoff, and t
   expect(text).toContain("release-manifest.json")
   expect(text).toContain("SHA256SUMS")
   console.log("promotion-permissions=contents:write,actions:read,deployments:read npm-permissions=unchanged")
+})
+
+test("release validation derives identity from the checked-in version and protected tag graph", async () => {
+  const text = await workflow("release.yml")
+  const validation = job(text, "validate-tag")
+  expect(validation).toContain('version="$(tr -d')
+  expect(validation).toContain('expected_tag="v$version"')
+  expect(validation).toContain('git rev-parse "$GITHUB_SHA^{commit}"')
+  expect(validation).toContain('git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}"')
+  expect(validation).toContain('refs/remotes/origin/master')
+  expect(validation).toContain('git merge-base --is-ancestor "$GITHUB_SHA"')
+  expect(validation).not.toContain("ci(release): add gated v0.1 delivery pipeline")
+  expect(validation).not.toMatch(/git show -s --format=%s/)
+  expect(validation).not.toMatch(/test "\$GITHUB_REF_NAME" = "v0\.1\.0"/)
+})
+
+test("release target executions use matching hosted runners and never local fixtures", async () => {
+  const text = await workflow("release.yml")
+  const targets = job(text, "build-four-targets")
+  expect(targets).toContain("runner: macos-14")
+  expect(targets).toContain("runner: macos-13")
+  expect(targets).toContain("runner: ubuntu-24.04-arm")
+  expect(targets).toContain("runner: ubuntu-24.04")
+  expect(targets).toContain("runs-on: ${{ matrix.runner }}")
+  expect(targets).toContain("cargo build --release --locked")
+  expect(targets).toContain("cargo test --workspace --locked")
+  expect(targets).toContain("--target \"${RUST_TARGET}\"")
+  expect(targets).toContain("--target \"${TARGET_KEY}\"")
+  expect(targets).toContain("actions/upload-artifact")
+  expect(targets).toContain("${{ matrix.asset }}")
+  expect(targets).not.toContain("--local-fixtures")
+  expect(targets).not.toMatch(/build-four-targets:\n[\s\S]*?runs-on: ubuntu-24\.04\n/)
+})
+
+test("downstream jobs verify the immutable handoff before use or mutation", async () => {
+  const text = await workflow("release.yml")
+  const mutationMarkers = ["gh release create", "gh release upload", "attest-build-provenance", "npm publish", "gh release edit"]
+  for (const name of ["draft-release", "validate-draft", "npm-production", "promote-release"]) {
+    const body = job(text, name)
+    const check = body.indexOf("j.verifier.size!==x.length")
+    expect(check, `${name} handoff check`).toBeGreaterThanOrEqual(0)
+    expect(body).toContain('j.verifier.sha256!==c.createHash("sha256")')
+    for (const marker of mutationMarkers) {
+      const index = body.indexOf(marker)
+      if (index >= 0) expect(check, `${name} before ${marker}`).toBeLessThan(index)
+    }
+  }
+})
+
+test("draft mutation is non-clobbering and draft validation binds all six assets", async () => {
+  const text = await workflow("release.yml")
+  const draft = job(text, "draft-release")
+  const validation = job(text, "validate-draft")
+  expect(draft).not.toContain("--clobber")
+  expect(draft).toContain("gh release view")
+  expect(validation).toContain("releaseAssets")
+  expect(validation).toContain("attestation-subjects=6")
+  expect(validation).toContain("verify-artifacts.ts")
+  expect(validation).toContain("architecture")
+  expect(validation).toContain("version")
+})
+
+test("npm production audits signatures without fallback bindings and verifies publication order", async () => {
+  const text = await workflow("release.yml")
+  const npm = job(text, "npm-production")
+  expect(npm).toContain("npm audit signatures")
+  expect(npm).toContain('NPM_TRUSTED_PUBLISHER_BINDING:?')
+  expect(npm).not.toMatch(/NPM_TRUSTED_PUBLISHER_BINDING:-/)
+  const plugin = npm.indexOf("xiopt-pane-dash-opencode-0.1.0.tgz")
+  const cli = npm.indexOf("xiopt-tmux-pane-dash-0.1.0.tgz")
+  expect(plugin).toBeGreaterThanOrEqual(0)
+  expect(cli).toBeGreaterThan(plugin)
+  expect(npm.indexOf("--package @xiopt/pane-dash-opencode")).toBeLessThan(npm.indexOf("--package @xiopt/tmux-pane-dash"))
+})
+
+test("promotion consumes sanitized approval and environment proof before draft=false", async () => {
+  const text = await workflow("release.yml")
+  const promote = job(text, "promote-release")
+  for (const value of ["--verify-environment", "--tagged-workflow", "--approval-evidence", "--deployments", "--deployment-statuses", "--jobs", "environment-approval"]) expect(promote).toContain(value)
+  const proof = promote.indexOf("--verify-environment")
+  const edit = promote.indexOf("gh release edit")
+  expect(proof).toBeGreaterThanOrEqual(0)
+  expect(edit).toBeGreaterThan(proof)
+  expect(promote).toContain("approval-evidence.json")
+  expect(promote).toContain("approval-request.sha256")
 })
 
 test("both publishable package manifests retain the exact public repository URL", async () => {

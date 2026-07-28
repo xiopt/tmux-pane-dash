@@ -82,9 +82,9 @@ async function assertPrivateRegular(path: string): Promise<void> {
   if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o600) fail(`evidence ${path} must be a mode-0600 regular file`)
 }
 
-async function writeText(deps: ApprovalDependencies, path: string, text: string): Promise<void> {
+async function writeText(path: string, text: string): Promise<void> {
   const temporary = `${path}.${process.pid}.tmp`
-  await writeFile(temporary, text, { mode: 0o600 })
+  await writeFile(temporary, text, { mode: 0o600, flag: "wx" })
   await chmod(temporary, 0o600)
   await rename(temporary, path)
 }
@@ -97,6 +97,20 @@ async function readJson(path: string): Promise<unknown> {
 function ghJson(result: { code: number; stdout: string; stderr: string }, label: string): unknown {
   if (result.code !== 0) fail(`${label} failed: ${result.stderr.trim() || "gh api failed"}`)
   try { return JSON.parse(result.stdout) } catch { fail(`${label} returned invalid JSON`) }
+}
+
+function includedJson(result: { code: number; stdout: string; stderr: string }, label: string): { status: number; body: unknown } {
+  if (result.code !== 0) fail(`${label} failed: ${result.stderr.trim() || "gh api failed"}`)
+  const statuses = [...result.stdout.matchAll(/^HTTP\/[0-9.]+\s+(\d{3})(?:\s|$)/gm)]
+  if (statuses.length !== 1) fail(`${label} did not return exactly one HTTP response`)
+  const status = Number(statuses[0]![1])
+  if (status !== 200) fail(`${label} returned HTTP ${status}`)
+  const crlf = result.stdout.indexOf("\r\n\r\n")
+  const lf = result.stdout.indexOf("\n\n")
+  const bodyStart = crlf >= 0 ? crlf : lf
+  const separatorLength = crlf >= 0 ? 4 : 2
+  if (bodyStart < 0) fail(`${label} did not return an HTTP body`)
+  try { return { status, body: JSON.parse(result.stdout.slice(bodyStart + separatorLength)) } } catch { fail(`${label} returned invalid JSON`) }
 }
 
 function login(result: { code: number; stdout: string; stderr: string }): string {
@@ -154,8 +168,11 @@ function exactDeployment(value: unknown, input: { runId: number; expectedSha: st
   const expectedKeys = [...deploymentKeys].sort()
   if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) fail("deployment object has undocumented or missing fields")
   const id = positive(deployment.id, "deployment id")
-  if (deployment.sha !== input.expectedSha || deployment.environment !== input.environment || deployment.ref !== REF || deployment.repository_url !== `https://api.github.com/repos/${REPOSITORY}` || deployment.url !== `https://api.github.com/repos/${REPOSITORY}/deployments/${id}` || deployment.statuses_url !== `https://api.github.com/repos/${REPOSITORY}/deployments/${id}/statuses`) fail("deployment does not match the approved request")
-  if (typeof deployment.task !== "string" || typeof deployment.payload !== "object" || deployment.payload === null || typeof deployment.creator !== "object" || deployment.creator === null) fail("deployment object has invalid documented fields")
+  const stringKeys = ["node_id", "sha", "ref", "task", "original_environment", "environment", "created_at", "updated_at", "statuses_url", "repository_url"] as const
+  if (stringKeys.some((key) => typeof deployment[key] !== "string" || deployment[key] === "") || (typeof deployment.description !== "string" && deployment.description !== null)) fail("deployment object has invalid string fields")
+  if (typeof deployment.payload !== "object" || deployment.payload === null || Array.isArray(deployment.payload) || typeof deployment.creator !== "object" || deployment.creator === null || Array.isArray(deployment.creator)) fail("deployment object has invalid documented fields")
+  if (typeof deployment.transient_environment !== "boolean" || typeof deployment.production_environment !== "boolean" || (deployment.performed_via_github_app !== null && (typeof deployment.performed_via_github_app !== "object" || Array.isArray(deployment.performed_via_github_app)))) fail("deployment object has invalid boolean/app fields")
+  if (deployment.task !== "deploy" || deployment.original_environment !== input.environment || deployment.sha !== input.expectedSha || deployment.environment !== input.environment || deployment.ref !== REF || deployment.repository_url !== `https://api.github.com/repos/${REPOSITORY}` || deployment.url !== `https://api.github.com/repos/${REPOSITORY}/deployments/${id}` || deployment.statuses_url !== `https://api.github.com/repos/${REPOSITORY}/deployments/${id}/statuses` || Number.isNaN(Date.parse(deployment.created_at as string)) || Number.isNaN(Date.parse(deployment.updated_at as string))) fail("deployment does not match the approved request")
   return { httpStatus: 200, runId: input.runId, environmentId, deploymentId: id, environment: input.environment, sha: input.expectedSha, ref: REF, approved: true }
 }
 
@@ -176,11 +193,10 @@ export async function approvePendingDeployment(input: { runId: number; expectedS
   const storedRequestBytes = await readFile(requestPath)
   if (Buffer.compare(Buffer.from(canonical({ schemaVersion: 1, runId: input.runId, expectedSha: input.expectedSha, environment: parts.environment, currentUserCanApprove: true })), Buffer.from(canonical(storedPending))) !== 0 || storedApprover.approver !== parts.approver || storedApprover.currentUserCanApprove !== true || Buffer.compare(Buffer.from(requestBytes), storedRequestBytes) !== 0) fail("capture evidence is stale or was modified")
   const requestSha256 = deps.sha256(requestBytes)
-  await writeText(deps, join(input.evidenceDir, "approval-request.sha256"), requestSha256 + "\n")
-  const post = await deps.runGh(["api", "--method", "POST", endpoint(input.runId), "--input", requestPath])
-  const httpStatus = (post as { httpStatus?: unknown }).httpStatus
-  if (httpStatus !== undefined && httpStatus !== 200) fail("approval POST returned HTTP " + String(httpStatus))
-  const response = exactDeployment(ghJson(post, "approval POST"), input, parts.environment.id)
+  await writeText(join(input.evidenceDir, "approval-request.sha256"), requestSha256 + "\n")
+  const post = await deps.runGh(["api", "--include", "--method", "POST", endpoint(input.runId), "--input", requestPath])
+  const included = includedJson(post, "approval POST")
+   const response = exactDeployment(included.body, input, parts.environment.id)
   const evidence: ApprovalEvidence = {
     schemaVersion: 1,
     runId: input.runId,
@@ -201,7 +217,7 @@ function defaultWritePrivateJson(path: string, value: unknown): Promise<void> {
   return (async () => {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 })
     const temporary = `${path}.${process.pid}.tmp`
-    await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 })
+    await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600, flag: "wx" })
     await chmod(temporary, 0o600)
     await rename(temporary, path)
   })()

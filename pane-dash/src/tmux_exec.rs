@@ -272,7 +272,9 @@ impl TmuxExec {
 
     async fn run<const N: usize>(&self, args: [&str; N]) -> Result<Vec<u8>> {
         let output = Command::new(self.bin())
+            .env("LC_ALL", "C.UTF-8")
             .args(args)
+            .env("LC_ALL", "C.UTF-8")
             .output()
             .await
             .with_context(|| format!("spawn {}", self.bin().display()))?;
@@ -289,7 +291,9 @@ impl TmuxExec {
 
     async fn run_dynamic(&self, args: &[String]) -> Result<Vec<u8>> {
         let output = Command::new(self.bin())
+            .env("LC_ALL", "C.UTF-8")
             .args(args)
+            .env("LC_ALL", "C.UTF-8")
             .output()
             .await
             .with_context(|| format!("spawn {}", self.bin().display()))?;
@@ -819,7 +823,6 @@ mod tests {
             "@pane_dash_tag",
             "test",
         ]);
-
         let dir = tempfile::tempdir().unwrap();
         let wrapper = dir.path().join("tmux-pd-rust-it");
         fs::write(

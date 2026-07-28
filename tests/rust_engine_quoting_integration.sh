@@ -4,6 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMUX_BIN="$(command -v "${TMUX_BIN:-tmux}")"
+tmux_dir="$(dirname "$TMUX_BIN")"
+export PATH="$tmux_dir:$PATH"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/pane-dash-quoting.XXXXXX")"
 declare -a CLIENT_PIDS=() SOCKETS=()
 

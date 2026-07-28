@@ -5,7 +5,11 @@ set -euo pipefail
 
 SOCK="pd-int-$$"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-T() { TMUX='' command tmux -L "$SOCK" "$@"; }
+tmux_bin_candidate="${TMUX_BIN:-tmux}"
+tmux_bin="$(command -v "$tmux_bin_candidate")"
+tmux_dir="$(dirname "$tmux_bin")"
+export PATH="$tmux_dir:$PATH"
+T() { TMUX='' "$tmux_bin" -L "$SOCK" "$@"; }
 fail() { echo "FAIL: $1"; T kill-server 2>/dev/null || true; exit 1; }
 pass() { echo "ok: $1"; }
 pane_has_command() { [ "$(T display-message -p -t "$1" '#{pane_current_command}')" = "$2" ]; }

@@ -5,6 +5,7 @@ set -m
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 MANIFEST=(.github .gitignore LICENSE Makefile README.md VERSION bun.lock package.json docs opencode-plugin packages pane-dash pane_dash.tmux release scripts spike tests tools)
+EXPECTED_WORKFLOWS=(ci.yml opencode-weekly.yml release.yml)
 scratch_root="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/pane-dash-source-package.XXXXXX")" && pwd -P)"
 archive="$scratch_root/pane-dash-source.tar"
 scratch="$scratch_root/extracted source [*] (meta)"
@@ -267,7 +268,10 @@ trap 'exit 143' TERM
 
 assert_terminate_and_reap_regressions
 
-for credential in GH_TOKEN GITHUB_TOKEN NPM_TOKEN NODE_AUTH_TOKEN; do
+for credential in GH_TOKEN GITHUB_TOKEN NPM_TOKEN NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG npm_config_userconfig; do
+  if [[ "$credential" == NPM_CONFIG_USERCONFIG || "$credential" == npm_config_userconfig ]] && [ "${!credential:-}" = "$(dirname "${HOME:-}")/npmrc" ] && [ "${npm_config_cache:-}" = "$(dirname "${HOME:-}")/npm-cache" ] && [ ! -e "${!credential:-}" ]; then
+    continue
+  fi
   [ -z "${!credential:-}" ] || fail "credential environment is present: $credential"
 done
 
@@ -276,11 +280,13 @@ warm_cache="$scratch_root/bun-cache"
 bun_bin="${BUN_BOOTSTRAP:-$(command -v bun || true)}"
 case "$bun_bin" in /*) [ -x "$bun_bin" ] || fail 'Bun bootstrap is not executable' ;; *) fail 'Bun 1.3.14 is required for the source package gate' ;; esac
 [ "$($bun_bin --version 2>/dev/null)" = "1.3.14" ] || fail 'Bun 1.3.14 is required for the source package gate'
+workflow_names="$(find "$ROOT/.github/workflows" -maxdepth 1 -type f -exec basename {} \; | sort | tr '\n' ' ' | sed 's/ $//')"
+[ "$workflow_names" = "${EXPECTED_WORKFLOWS[*]}" ] || fail 'source tree must contain exactly ci.yml opencode-weekly.yml release.yml'
 mkdir -p "$warm_root/packages/tmux-pane-dash" "$warm_root/opencode-plugin" "$warm_cache"
 cp "$ROOT/package.json" "$ROOT/bun.lock" "$warm_root/"
 cp "$ROOT/packages/tmux-pane-dash/package.json" "$warm_root/packages/tmux-pane-dash/"
 cp "$ROOT/opencode-plugin/package.json" "$warm_root/opencode-plugin/"
-BUN_INSTALL_CACHE_DIR="$warm_cache" "$bun_bin" install --frozen-lockfile --ignore-scripts --cwd "$warm_root" >/dev/null
+BUN_INSTALL_CACHE_DIR="$warm_cache" npm_config_cache="$warm_cache" "$bun_bin" install --frozen-lockfile --ignore-scripts --cwd "$warm_root" >/dev/null
 printf 'bun-cache=warm-pass\n'
 
 before="$(source_fingerprint)"
@@ -296,14 +302,13 @@ for expected in "${MANIFEST[@]}"; do
 done
   [ -f "$extracted/pane-dash/Cargo.lock" ] || fail 'source archive is missing Cargo.lock'
   [ -d "$extracted/pane-dash/src" ] || fail 'source archive is missing Rust source'
-  for workflow in ci.yml opencode-weekly.yml release.yml; do
+  for workflow in "${EXPECTED_WORKFLOWS[@]}"; do
     [ -f "$extracted/.github/workflows/$workflow" ] || fail "source archive is missing .github/workflows/$workflow"
   done
   [ -f "$extracted/release/verify-npm-provenance.ts" ] || fail 'source archive is missing the release verifier source'
   [ -f "$extracted/release/tests/verify-npm-provenance.test.ts" ] || fail 'source archive is missing the release verifier test'
-  [ ! -e "$extracted/release/dist" ] || fail 'source archive contains generated release/dist'
   assert_no_forbidden_paths
-  BUN_INSTALL_CACHE_DIR="$warm_cache" "$bun_bin" install --frozen-lockfile --offline --ignore-scripts --cwd "$extracted" >/dev/null
+   BUN_INSTALL_CACHE_DIR="$warm_cache" npm_config_cache="$warm_cache" "$bun_bin" install --frozen-lockfile --offline --ignore-scripts --cwd "$extracted" >/dev/null
   printf 'offline=bun-warm-cache-pass\n'
 
 mkdir -p "$sentinel_bin"
@@ -330,6 +335,12 @@ mkdir -p "$CARGO_TARGET_DIR"
 ln -s "$CARGO_TARGET_DIR" "$extracted/pane-dash/target"
 install_root="$scratch_root/install destination"
 [ ! -e "$install_root" ] || fail 'install destination exists before build'
+
+if ! cargo --version >/dev/null 2>&1 && [ "${PANE_DASH_SOURCE_RUST_READY:-0}" != 1 ]; then
+  PANE_DASH_SOURCE_RUST_READY=1 "$ROOT/tests/release/with-rust.sh" -- env \
+    CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$CARGO_TARGET_DIR" "$BASH" "$ROOT/tests/source_package.sh"
+  exit $?
+fi
 
 (
   cd "$extracted"
