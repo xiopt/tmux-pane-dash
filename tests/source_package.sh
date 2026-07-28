@@ -222,8 +222,9 @@ LEADER
     [ -s "$nested_dir/child-pid" ] && [ -s "$nested_dir/grandchild" ] && break
     sleep 0.05
   done
-  [ -s "$nested_dir/child-pid" ] && [ -s "$nested_dir/grandchild" ] ||
+  if [ ! -s "$nested_dir/child-pid" ] || [ ! -s "$nested_dir/grandchild" ]; then
     fail 'terminate_and_reap regression fixture did not start nested descendants'
+  fi
   child="$(<"$nested_dir/child-pid")"
   grandchild="$(<"$nested_dir/grandchild")"
   terminate_and_reap "$leader"
