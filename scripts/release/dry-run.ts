@@ -41,7 +41,7 @@ async function gitRemotes(root: string): Promise<string[]> {
   return lines
 }
 
-function assertGitRemotes(remotes: readonly string[]): void {
+export function assertGitRemotes(remotes: readonly string[]): void {
   if (remotes.length === 0) return
   const kinds = new Set<string>()
   const pattern = /^origin[ \t]+https:\/\/github\.com\/xiopt\/tmux-pane-dash(?:\.git)?[ \t]+\((fetch|push)\)$/

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
-import { runDryRun } from "../dry-run"
+import { assertGitRemotes, runDryRun } from "../dry-run"
 
 const root = process.cwd()
 
@@ -18,18 +18,13 @@ test("dry-run simulates immutable archives, six release assets, attestations, pa
   expect(output).toContain("release-dry-run: PASS")
 })
 
-test("dry-run accepts only the exact reviewed origin fetch/push pairs", async () => {
+test("remote guard accepts only the exact reviewed origin fetch/push pairs", () => {
   for (const [fetchUrl, pushUrl] of [
     ["https://github.com/xiopt/tmux-pane-dash", "https://github.com/xiopt/tmux-pane-dash"],
     ["https://github.com/xiopt/tmux-pane-dash.git", "https://github.com/xiopt/tmux-pane-dash.git"],
     ["https://github.com/xiopt/tmux-pane-dash", "https://github.com/xiopt/tmux-pane-dash.git"],
   ]) {
-    const output = await runDryRun({
-      root,
-      environment: {},
-      remotes: [`origin\t${fetchUrl} (fetch)`, `origin\t${pushUrl} (push)`],
-    })
-    expect(output).toContain("release-dry-run: PASS")
+    expect(() => assertGitRemotes([`origin\t${fetchUrl} (fetch)`, `origin\t${pushUrl} (push)`])).not.toThrow()
   }
 })
 
@@ -54,7 +49,7 @@ test("dry-run rejects unreviewed, incomplete, and malformed remotes, non-loopbac
     ["", `origin\t${exact} (fetch)`, `origin\t${exact} (push)`],
     ["https://github.com/xiopt/tmux-pane-dash.git"],
   ]
-  for (const remotes of hostileRemotes) await expect(runDryRun({ root, environment: {}, remotes })).rejects.toThrow("remote")
+  for (const remotes of hostileRemotes) expect(() => assertGitRemotes(remotes)).toThrow("remote")
   await expect(runDryRun({ root, environment: {}, fixtureUrl: "https://registry.npmjs.org" })).rejects.toThrow("loopback")
   for (const command of ["git push", "git tag", "gh release create", "npm publish", "bun build release/verify-npm-provenance.ts"]) {
     await expect(runDryRun({ root, environment: {}, commands: [command] })).rejects.toThrow(/mutation|publish|rebuild/i)
