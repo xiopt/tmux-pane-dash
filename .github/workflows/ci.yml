@@ -309,4 +309,5 @@ jobs:
       - run: |
           echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"
           echo "NPM_20_CLI=$(command -v npm)" >> "$GITHUB_ENV"
+      - run: bun install --frozen-lockfile
       - run: PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun scripts/release/dry-run.ts

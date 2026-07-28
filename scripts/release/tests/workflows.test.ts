@@ -205,6 +205,16 @@ function assertTmuxProvisioning(workflow: ParsedWorkflow, workflowName: string):
   }
 }
 
+function assertArchiveDryRunDependencies(workflow: ParsedWorkflow): void {
+  const job = workflow.jobs["archive-dry-run"]
+  if (!job) throw new Error("archive-dry-run is missing")
+  const install = job.steps.findIndex((step) => step.run === "bun install --frozen-lockfile")
+  const dryRun = job.steps.findIndex((step) => (step.run ?? "").includes("scripts/release/clean-room.sh -- bun scripts/release/dry-run.ts"))
+  if (install < 0) throw new Error("archive-dry-run must install locked dependencies")
+  if (dryRun < 0) throw new Error("archive-dry-run dry-run command is missing")
+  if (install + 1 !== dryRun) throw new Error("archive-dry-run must install locked dependencies immediately before dry-run")
+}
+
 function assertPackedE2EGraph(workflow: ParsedWorkflow): void {
   for (const job of Object.values(workflow.jobs)) for (const step of job.steps) {
     const run = step.run ?? ""
@@ -287,6 +297,22 @@ test("archive-dry-run is the terminal CI status and reaches the required CI grap
     expect(dependsOn(parsed, "archive-dry-run", producer), `archive-dry-run depends on ${producer}`).toBe(true)
   }
   expect(Object.values(parsed.jobs).every((job) => !job.needs.includes("archive-dry-run"))).toBe(true)
+})
+
+test("archive-dry-run installs locked dependencies immediately before its clean-room dry-run", async () => {
+  const text = await workflow("ci.yml")
+  const archive = job(text, "archive-dry-run")
+  const installStep = "      - run: bun install --frozen-lockfile\n"
+  const dryRunStep = "      - run: PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun scripts/release/dry-run.ts\n"
+  const replaceArchive = (body: string): string => text.replace(archive, body)
+  const assertDependencies = (candidate: string) => assertArchiveDryRunDependencies(parseWorkflow(candidate))
+
+  expect(archive).toContain(installStep.trimEnd())
+  expect(archive).toContain(dryRunStep.trimEnd())
+  expect(() => assertDependencies(text)).not.toThrow()
+  expect(() => assertDependencies(replaceArchive(archive.replace(installStep, "")))).toThrow(/locked dependencies/)
+  expect(() => assertDependencies(replaceArchive(archive.replace(installStep + dryRunStep, dryRunStep + installStep)))).toThrow(/immediately before/)
+  expect(() => assertDependencies(replaceArchive(archive.replace(installStep, "      - run: bun install\n")))).toThrow(/locked dependencies/)
 })
 
 test("weekly compatibility is read-only, pinned at the minimum, and resolves latest once", async () => {
