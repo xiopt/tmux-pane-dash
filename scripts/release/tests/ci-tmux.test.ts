@@ -25,7 +25,13 @@ test("CI tmux helper pins the official 3.6a source and checksum in RUNNER_TEMP",
   expect(source).toContain('mktemp -d "$runner_temp/tmux-3.6a.')
   expect(source).toContain('mktemp -d "$runner_temp/tmux-3.6a-install.')
   expect(source).toContain('cd -- "$source_dir"')
-  expect(source).toContain('env HOME="$build_root/home" TMPDIR="$build_root/tmp" ./configure --prefix="$install_root" >&2')
+  expect(source).toContain('libutf8proc-dev')
+  expect(source).toContain('brew install libevent ncurses pkg-config utf8proc')
+  expect(source).toContain('utf8proc_prefix=$(brew --prefix utf8proc)')
+  expect(source).toContain('export CPPFLAGS="-I$event_prefix/include -I$ncurses_prefix/include -I$utf8proc_prefix/include ${CPPFLAGS:-}"')
+  expect(source).toContain('export LDFLAGS="-L$event_prefix/lib -L$ncurses_prefix/lib -L$utf8proc_prefix/lib ${LDFLAGS:-}"')
+  expect(source).toContain('export PKG_CONFIG_PATH="$event_prefix/lib/pkgconfig:$ncurses_prefix/lib/pkgconfig:$utf8proc_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"')
+  expect(source).toContain('env HOME="$build_root/home" TMPDIR="$build_root/tmp" ./configure --prefix="$install_root" --enable-utf8proc >&2')
   expect(source).toContain('make -C "$source_dir" -j"$jobs" >&2')
   expect(source).toContain('make -C "$source_dir" install >&2')
   expect(source).not.toContain("$HOME/.local")
@@ -64,6 +70,7 @@ test("CI tmux helper runs configure and make from the extracted source directory
       mkdir(runnerTemp, { recursive: true }),
       mkdir(join(deps, "libevent"), { recursive: true }),
       mkdir(join(deps, "ncurses"), { recursive: true }),
+      mkdir(join(deps, "utf8proc"), { recursive: true }),
     ])
     await Promise.all([
       writeExecutable(fakeTmux, "#!/bin/sh\nprintf 'tmux 3.5\\n'\n"),
@@ -72,11 +79,18 @@ test("CI tmux helper runs configure and make from the extracted source directory
       writeExecutable(join(bin, "brew"), `#!/bin/sh
 set -eu
 case "$1" in
-  install) exit 0 ;;
+  install)
+    [ "$#" -eq 5 ]
+    [ "$2" = libevent ]
+    [ "$3" = ncurses ]
+    [ "$4" = pkg-config ]
+    [ "$5" = utf8proc ]
+    ;;
   --prefix)
     case "$2" in
       libevent) printf '%s/libevent\\n' "$CI_TMUX_DEPS" ;;
       ncurses) printf '%s/ncurses\\n' "$CI_TMUX_DEPS" ;;
+      utf8proc) printf '%s/utf8proc\\n' "$CI_TMUX_DEPS" ;;
       *) exit 64 ;;
     esac
     ;;
@@ -105,6 +119,20 @@ case "$1" in
 esac
 [ -d "$HOME" ]
 [ -d "$TMPDIR" ]
+[ "$#" -ge 2 ]
+[ "$2" = --enable-utf8proc ]
+case "$CPPFLAGS" in
+  *"-I$CI_TMUX_DEPS/utf8proc/include"*) ;;
+  *) exit 65 ;;
+esac
+case "$LDFLAGS" in
+  *"-L$CI_TMUX_DEPS/utf8proc/lib"*) ;;
+  *) exit 66 ;;
+esac
+case "$PKG_CONFIG_PATH" in
+  *"$CI_TMUX_DEPS/utf8proc/lib/pkgconfig"*) ;;
+  *) exit 67 ;;
+esac
 current=$(pwd -P)
 printf 'configure\\t%s\\t%s\\t%s\\n' "$current" "$HOME" "$TMPDIR" >> "$CI_TMUX_LOG"
 printf '%s\\n' "$prefix" > ci-tmux-prefix

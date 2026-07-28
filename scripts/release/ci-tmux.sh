@@ -68,14 +68,15 @@ if command -v apt-get >/dev/null 2>&1; then
     apt=(sudo apt-get)
   fi
   "${apt[@]}" update >&2
-  "${apt[@]}" install -y build-essential pkg-config libevent-dev libncurses-dev >&2
+  "${apt[@]}" install -y build-essential pkg-config libevent-dev libncurses-dev libutf8proc-dev >&2
 elif command -v brew >/dev/null 2>&1; then
-  brew install libevent ncurses pkg-config >&2
+  brew install libevent ncurses pkg-config utf8proc >&2
   event_prefix=$(brew --prefix libevent)
   ncurses_prefix=$(brew --prefix ncurses)
-  export CPPFLAGS="-I$event_prefix/include -I$ncurses_prefix/include ${CPPFLAGS:-}"
-  export LDFLAGS="-L$event_prefix/lib -L$ncurses_prefix/lib ${LDFLAGS:-}"
-  export PKG_CONFIG_PATH="$event_prefix/lib/pkgconfig:$ncurses_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  utf8proc_prefix=$(brew --prefix utf8proc)
+  export CPPFLAGS="-I$event_prefix/include -I$ncurses_prefix/include -I$utf8proc_prefix/include ${CPPFLAGS:-}"
+  export LDFLAGS="-L$event_prefix/lib -L$ncurses_prefix/lib -L$utf8proc_prefix/lib ${LDFLAGS:-}"
+  export PKG_CONFIG_PATH="$event_prefix/lib/pkgconfig:$ncurses_prefix/lib/pkgconfig:$utf8proc_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 else
   fail 'CI tmux build requires apt-get or brew'
 fi
@@ -92,9 +93,10 @@ fi
 tar -xzf "$archive" -C "$build_root/src" >&2
 source_dir="$build_root/src/tmux-3.6a"
 [ -d "$source_dir" ] || fail 'tmux source archive has an unexpected root'
+# tmux 3.6a requires an explicit utf8proc choice on macOS; keep Unicode support enabled.
 (
   cd -- "$source_dir"
-  env HOME="$build_root/home" TMPDIR="$build_root/tmp" ./configure --prefix="$install_root" >&2
+  env HOME="$build_root/home" TMPDIR="$build_root/tmp" ./configure --prefix="$install_root" --enable-utf8proc >&2
 )
 jobs=2
 if command -v getconf >/dev/null 2>&1; then
