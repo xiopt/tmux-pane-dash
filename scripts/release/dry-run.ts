@@ -28,7 +28,6 @@ async function assertCleanEnvironment(input: DryRunInput): Promise<void> {
     if ((key === "NPM_CONFIG_USERCONFIG" || key === "npm_config_userconfig") && environment.HOME && environment.npm_config_cache && value === join(dirname(environment.HOME), "npmrc") && environment.npm_config_cache === join(dirname(environment.HOME), "npm-cache") && !(await stat(value).catch(() => null))) continue
     fail(`credential/auth configuration is present: ${key}`)
   }
-  if (input.remotes?.some((remote) => remote.trim() !== "")) fail("Git remotes are forbidden in local dry-run")
   if (input.fixtureUrl && !/^https?:\/\/(?:127\.0\.0\.1|localhost)(?::[0-9]+)?(?:\/|$)/.test(input.fixtureUrl)) fail("fixture URL must be loopback")
   for (const command of input.commands ?? []) if (forbiddenCommands.some((pattern) => pattern.test(command))) fail(`remote/publish/rebuild mutation is forbidden: ${command}`)
 }
@@ -37,7 +36,21 @@ async function gitRemotes(root: string): Promise<string[]> {
   const child = Bun.spawn(["git", "-C", root, "remote", "-v"], { stdout: "pipe", stderr: "pipe" })
   const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited])
   if (code !== 0) fail("cannot inspect Git remotes")
-  return stdout.split("\n").map((line) => line.trim()).filter(Boolean)
+  const lines = stdout.split("\n")
+  if (lines[lines.length - 1] === "") lines.pop()
+  return lines
+}
+
+function assertGitRemotes(remotes: readonly string[]): void {
+  if (remotes.length === 0) return
+  const kinds = new Set<string>()
+  const pattern = /^origin[ \t]+https:\/\/github\.com\/xiopt\/tmux-pane-dash(?:\.git)?[ \t]+\((fetch|push)\)$/
+  for (const remote of remotes) {
+    const match = pattern.exec(remote)
+    if (!match) fail("Git remotes must be empty or contain only the exact origin fetch and push URLs")
+    kinds.add(match[1]!)
+  }
+  if (remotes.length !== 2 || kinds.size !== 2) fail("Git remotes must include exactly one origin fetch URL and one origin push URL")
 }
 
 async function assertNoGeneratedVerifier(root: string): Promise<void> {
@@ -74,10 +87,10 @@ async function inMemoryVerifier(root: string): Promise<{ size: number; sha256: s
 export async function runDryRun(input: DryRunInput): Promise<string> {
   const root = resolve(input.root)
   await assertCleanEnvironment(input)
+  const remotes = input.remotes ?? await gitRemotes(root)
+  assertGitRemotes(remotes)
   await assertWorkspace(root)
   await assertNoGeneratedVerifier(root)
-  const remotes = input.remotes ?? await gitRemotes(root)
-  if (remotes.length > 0) fail("Git remotes are forbidden in local dry-run")
   const verifier = await inMemoryVerifier(root)
   if (Object.keys(TARGETS).length !== 4 || RELEASE_ASSETS.length !== 6 || VERSION !== "0.1.0") fail("release inventory is not exact")
   return [

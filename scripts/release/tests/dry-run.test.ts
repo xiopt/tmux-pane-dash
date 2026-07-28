@@ -5,8 +5,8 @@ import { runDryRun } from "../dry-run"
 
 const root = process.cwd()
 
-test("dry-run simulates immutable archives, six release assets, attestations, packages, and handoff hashes", async () => {
-  const output = await runDryRun({ root, environment: {} })
+test("dry-run simulates immutable archives, six release assets, attestations, packages, and handoff hashes without a remote", async () => {
+  const output = await runDryRun({ root, environment: {}, remotes: [] })
   expect(output).toContain("archives=4")
   expect(output).toContain("assets=6")
   expect(output).toContain("attestation-subjects=6")
@@ -18,14 +18,43 @@ test("dry-run simulates immutable archives, six release assets, attestations, pa
   expect(output).toContain("release-dry-run: PASS")
 })
 
+test("dry-run accepts only the exact reviewed origin fetch/push pairs", async () => {
+  for (const [fetchUrl, pushUrl] of [
+    ["https://github.com/xiopt/tmux-pane-dash", "https://github.com/xiopt/tmux-pane-dash"],
+    ["https://github.com/xiopt/tmux-pane-dash.git", "https://github.com/xiopt/tmux-pane-dash.git"],
+    ["https://github.com/xiopt/tmux-pane-dash", "https://github.com/xiopt/tmux-pane-dash.git"],
+  ]) {
+    const output = await runDryRun({
+      root,
+      environment: {},
+      remotes: [`origin\t${fetchUrl} (fetch)`, `origin\t${pushUrl} (push)`],
+    })
+    expect(output).toContain("release-dry-run: PASS")
+  }
+})
+
 test("dry-run refuses every credential and auth configuration input", async () => {
   for (const name of ["GH_TOKEN", "GITHUB_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN", "NPM_CONFIG_USERCONFIG", "npm_config_userconfig"]) {
     await expect(runDryRun({ root, environment: { [name]: "/tmp/credential" } })).rejects.toThrow(/credential|auth/i)
   }
 })
 
-test("dry-run rejects remotes, non-loopback fixtures, and mutation commands", async () => {
-  await expect(runDryRun({ root, environment: {}, remotes: ["https://github.com/xiopt/tmux-pane-dash.git"] })).rejects.toThrow("remote")
+test("dry-run rejects unreviewed, incomplete, and malformed remotes, non-loopback fixtures, and mutation commands", async () => {
+  const exact = "https://github.com/xiopt/tmux-pane-dash.git"
+  const hostileRemotes = [
+    ["origin\tgit@github.com:xiopt/tmux-pane-dash.git (fetch)", "origin\tgit@github.com:xiopt/tmux-pane-dash.git (push)"],
+    ["origin\thttps://user:password@github.com/xiopt/tmux-pane-dash.git (fetch)", "origin\thttps://user:password@github.com/xiopt/tmux-pane-dash.git (push)"],
+    ["origin\thttps://github.example.com/xiopt/tmux-pane-dash.git (fetch)", "origin\thttps://github.example.com/xiopt/tmux-pane-dash.git (push)"],
+    ["origin\thttps://github.com/xiopt/other-repository.git (fetch)", "origin\thttps://github.com/xiopt/other-repository.git (push)"],
+    ["origin\thttps://github.com/xiopt/tmux-pane-dash.evil (fetch)", "origin\thttps://github.com/xiopt/tmux-pane-dash.evil (push)"],
+    [`origin\t${exact} (fetch)`, `origin\t${exact} (push)`, `upstream\t${exact} (fetch)`, `upstream\t${exact} (push)`],
+    [`origin\t${exact} (fetch)`],
+    [`origin\t${exact} fetch`, `origin\t${exact} push`],
+    ["origin\thttps://github.com/xiopt/tmux-pane-dash?substitution=1 (fetch)", "origin\thttps://github.com/xiopt/tmux-pane-dash?substitution=1 (push)"],
+    ["", `origin\t${exact} (fetch)`, `origin\t${exact} (push)`],
+    ["https://github.com/xiopt/tmux-pane-dash.git"],
+  ]
+  for (const remotes of hostileRemotes) await expect(runDryRun({ root, environment: {}, remotes })).rejects.toThrow("remote")
   await expect(runDryRun({ root, environment: {}, fixtureUrl: "https://registry.npmjs.org" })).rejects.toThrow("loopback")
   for (const command of ["git push", "git tag", "gh release create", "npm publish", "bun build release/verify-npm-provenance.ts"]) {
     await expect(runDryRun({ root, environment: {}, commands: [command] })).rejects.toThrow(/mutation|publish|rebuild/i)
