@@ -224,6 +224,28 @@ function assertPackedE2EGraph(workflow: ParsedWorkflow): void {
   }
 }
 
+function assertCiCliNpaIsolation(workflow: ParsedWorkflow): void {
+  const ciCli = workflow.jobs["ci-cli"]
+  if (!ciCli) throw new Error("ci-cli is missing")
+  const command = "bun test scripts/release/tests release/tests"
+  const steps = ciCli.steps.filter((step) => (step.run ?? "").includes(command))
+  if (steps.length !== 1) throw new Error("ci-cli must run the release test suites exactly once")
+  const run = steps[0]!.run ?? ""
+  let previous = -1
+  for (const marker of [
+    "tests/release/with-npa.sh --",
+    'NODE_20_BIN="$NODE_20_BIN"',
+    'NPM_20_CLI="$NPM_20_CLI"',
+    "tests/release/with-node20.sh --",
+    "scripts/release/clean-room.sh --",
+    command,
+  ]) {
+    const position = run.indexOf(marker, previous + 1)
+    if (position <= previous) throw new Error("ci-cli release tests must use with-npa before Node20 and clean-room")
+    previous = position
+  }
+}
+
 function assertPromotionGraph(workflow: ParsedWorkflow): void {
   const job = workflow.jobs["promote-release"]
   if (!job) throw new Error("promote-release is missing")
@@ -244,6 +266,7 @@ function assertWorkflowGraph(text: string, workflowName: string): void {
   assertArtifactGraph(workflow)
   assertTmuxProvisioning(workflow, workflowName)
   assertPackedE2EGraph(workflow)
+  if (workflowName === "ci.yml") assertCiCliNpaIsolation(workflow)
   if (workflowName === "release.yml") assertPromotionGraph(workflow)
 }
 
@@ -560,4 +583,12 @@ test("workflow graph rejects a bare packed E2E command", async () => {
   const text = await workflow("release.yml")
   const broken = text.replace("          tests/release/with-rust.sh -- env \\\n", "          bun test \\\n")
   expect(() => assertWorkflowGraph(broken, "release.yml")).toThrow(/bare packed E2E/)
+})
+
+test("ci-cli rejects an unwrapped release test command", async () => {
+  const text = await workflow("ci.yml")
+  const ciCli = job(text, "ci-cli")
+  expect(() => assertCiCliNpaIsolation(parseWorkflow(text))).not.toThrow()
+  const unwrapped = text.replace(ciCli, ciCli.replace("tests/release/with-npa.sh -- ", ""))
+  expect(() => assertCiCliNpaIsolation(parseWorkflow(unwrapped))).toThrow(/with-npa/)
 })

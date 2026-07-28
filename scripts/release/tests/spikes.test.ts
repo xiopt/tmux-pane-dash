@@ -110,7 +110,7 @@ test("reads an absolute OpenCode binary through the bounded process seam", async
   await expect(runOpenCodeVersion("opencode", run)).rejects.toThrow("absolute")
 })
 
-test("observes the exact scoped OpenCode plugin spec with npm-package-arg", async () => {
+test.skipIf(process.platform !== "darwin")("observes the exact scoped OpenCode plugin spec with npm-package-arg", async () => {
   await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.0")).resolves.toEqual({
     name: "@xiopt/pane-dash-opencode",
     rawSpec: "0.1.0",
@@ -120,7 +120,7 @@ test("observes the exact scoped OpenCode plugin spec with npm-package-arg", asyn
   }
 })
 
-test("keeps the validated parser root when the clean room replaces TMPDIR", async () => {
+test.skipIf(process.platform !== "darwin")("keeps the validated parser root when the clean room replaces TMPDIR", async () => {
   const cleanTmp = join(root, "clean-tmp")
   const previousTmpdir = process.env.TMPDIR
   await mkdir(cleanTmp)
@@ -176,7 +176,7 @@ test("fails closed when the Seatbelt parser returns malformed or noncanonical pa
   }
 })
 
-test("observeOpenCodePluginSpec launches parser under /usr/bin/sandbox-exec with PANE_DASH_NPA_ROOT profile", async () => {
+test.skipIf(process.platform !== "darwin")("observeOpenCodePluginSpec launches parser under /usr/bin/sandbox-exec with PANE_DASH_NPA_ROOT profile", async () => {
   // Construct a valid parser root inside the OS tempdir with physical path (no symlinks)
   const { realpath: nodeRealpath } = await import("node:fs/promises")
   const physicalRoot = await nodeRealpath(root)
