@@ -9,6 +9,11 @@ const job = (text: string, name: string): string => {
   if (!match) throw new Error(`missing workflow job ${name}`)
   return match[1]
 }
+const runnerForTarget = (body: string, target: string): string => {
+  const match = new RegExp(`^[ \\t]+- target: ${target}\\n[ \\t]+runner: ([^\\n]+)$`, "m").exec(body)
+  if (!match) throw new Error(`missing runner mapping for ${target}`)
+  return match[1]
+}
 
 const setupNode = (body: string, version: string) => {
   expect(body).toContain("uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0")
@@ -137,8 +142,8 @@ test("release validation derives identity from the checked-in version and protec
 test("release target executions use matching hosted runners and never local fixtures", async () => {
   const text = await workflow("release.yml")
   const targets = job(text, "build-four-targets")
-  expect(targets).toContain("runner: macos-14")
-  expect(targets).toContain("runner: macos-13")
+  expect(runnerForTarget(targets, "darwin-arm64")).toBe("macos-14")
+  expect(runnerForTarget(targets, "darwin-x64")).toBe("macos-15-intel")
   expect(targets).toContain("runner: ubuntu-24.04-arm")
   expect(targets).toContain("runner: ubuntu-24.04")
   expect(targets).toContain("runs-on: ${{ matrix.runner }}")
