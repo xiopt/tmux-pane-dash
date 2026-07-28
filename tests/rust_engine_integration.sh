@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMUX_BIN="$(command -v "${TMUX_BIN:-tmux}")"
+PTY_HELPER="$ROOT/tests/pane_dash_pty.sh"
 SOCK="pd-rust-routing-$$"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/pane-dash-routing.XXXXXX")"
 CLIENT1_PID=""
@@ -42,8 +43,10 @@ TMUX='' PATH="$WRAPPER:$PATH" "$TMUX_BIN" -L "$SOCK" new-session -d -s two 'slee
 TMUX='' PATH="$WRAPPER:$PATH" bash "$PLUGIN/pane_dash.tmux"
 
 start_client() { # variable session input script
-  python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
-    bash -c "$3 | exec script -q /dev/null \"$TMUX_BIN\" -L \"$SOCK\" attach-session -t \"$2\" >/dev/null 2>&1" &
+  # shellcheck disable=SC2016 # The nested Bash expands positional producer/helper arguments.
+  TMUX='' python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    bash -c 'bash -c "$1" | exec "$2" "${@:3}" >/dev/null 2>&1' \
+    bash "$3" "$PTY_HELPER" "$TMUX_BIN" -L "$SOCK" attach-session -t "$2" &
   printf -v "$1" '%s' "$!"
 }
 

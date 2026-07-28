@@ -26,3 +26,11 @@ pane_dash_run_in_pty() {
     TERM="$term" "$script_bin" -q /dev/null "$@"
   fi
 }
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  if (( $# == 0 )); then
+    printf 'usage: %s COMMAND [ARGUMENT...]\n' "$0" >&2
+    exit 2
+  fi
+  pane_dash_run_in_pty "$@"
+fi
