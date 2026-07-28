@@ -80,6 +80,8 @@ test("the checked-in tree includes committed source roots and docs but no genera
 
   for (const path of SOURCE_ROOTS) expect(paths.some((entry) => entry === path || entry.startsWith(`${path}/`))).toBe(true)
   expect(paths).toContain("docs/superpowers/specs/2026-07-23-v0.1-release-distribution-design.md")
+  expect(paths).toContain("docs/release-bootstrap.md")
+  expect(paths).toContain("docs/release-runbook.md")
   expect(paths).toContain("scripts/release/clean-room.sh")
   expect(paths).toContain("scripts/release/ci-tmux.sh")
   expect(paths).toContain(".github/workflows/ci.yml")

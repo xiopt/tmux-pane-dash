@@ -307,9 +307,11 @@ done
   done
   [ -f "$extracted/release/verify-npm-provenance.ts" ] || fail 'source archive is missing the release verifier source'
   [ -f "$extracted/release/tests/verify-npm-provenance.test.ts" ] || fail 'source archive is missing the release verifier test'
+  [ -f "$extracted/docs/release-bootstrap.md" ] || fail 'source archive is missing the release bootstrap documentation'
+  [ -f "$extracted/docs/release-runbook.md" ] || fail 'source archive is missing the release runbook documentation'
   [ -x "$extracted/scripts/release/ci-tmux.sh" ] || fail 'source archive is missing the executable CI tmux helper'
   assert_no_forbidden_paths
-   BUN_INSTALL_CACHE_DIR="$warm_cache" npm_config_cache="$warm_cache" "$bun_bin" install --frozen-lockfile --offline --ignore-scripts --cwd "$extracted" >/dev/null
+  BUN_INSTALL_CACHE_DIR="$warm_cache" npm_config_cache="$warm_cache" "$bun_bin" install --frozen-lockfile --offline --ignore-scripts --cwd "$extracted" >/dev/null
   printf 'offline=bun-warm-cache-pass\n'
 
 mkdir -p "$sentinel_bin"
