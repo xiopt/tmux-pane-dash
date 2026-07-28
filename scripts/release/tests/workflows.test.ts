@@ -256,6 +256,8 @@ test("CI is read-only, ordered, and runs all four target commands plus isolated 
     "aarch64-unknown-linux-musl",
     "x86_64-unknown-linux-musl",
   ]) expect(text).toContain(target)
+  expect(text).toContain('cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"')
+  expect(text).toContain('cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"')
   for (const command of [
     "cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check",
     "cargo clippy --workspace --all-targets --all-features --manifest-path pane-dash/Cargo.toml -- -D warnings",
@@ -372,8 +374,8 @@ test("release target executions use matching hosted runners and never local fixt
   expect(targets).toContain("runner: ubuntu-24.04-arm")
   expect(targets).toContain("runner: ubuntu-24.04")
   expect(targets).toContain("runs-on: ${{ matrix.runner }}")
-  expect(targets).toContain("cargo build --release --locked")
-  expect(targets).toContain("cargo test --workspace --locked")
+  expect(targets).toContain("cargo build --release --locked --manifest-path pane-dash/Cargo.toml")
+  expect(targets).toContain("cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml")
   expect(targets).toContain("--target \"${RUST_TARGET}\"")
   expect(targets).toContain("--target \"${TARGET_KEY}\"")
   expect(targets).toContain("actions/upload-artifact")

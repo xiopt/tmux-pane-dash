@@ -130,8 +130,8 @@ jobs:
           rustup toolchain install 1.96.1 --profile minimal --no-self-update
           rustup target add "${{ matrix.rust_target }}"
           if [[ "${{ matrix.rust_target }}" == *unknown-linux-musl ]]; then sudo apt-get update; sudo apt-get install -y musl-tools; fi
-          cargo build --release --locked --target "${{ matrix.rust_target }}"
-          cargo test --workspace --locked --target "${{ matrix.rust_target }}"
+          cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"
+          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"
           test -x "pane-dash/target/${{ matrix.rust_target }}/release/pane-dash"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
