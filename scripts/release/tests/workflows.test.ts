@@ -294,6 +294,74 @@ function assertPackedE2EGraph(workflow: ParsedWorkflow): void {
   }
 }
 
+function assertCiPackedE2EToolchain(workflow: ParsedWorkflow): void {
+  const job = workflow.jobs["packed-e2e"]
+  if (!job) throw new Error("packed-e2e is missing")
+  const target = "x86_64-unknown-linux-musl"
+  const provisionIndex = job.steps.findIndex((step) => {
+    const run = step.run ?? ""
+    return run.includes("sudo apt-get update") &&
+      run.includes("sudo apt-get install -y musl-tools") &&
+      run.includes('export RUSTUP_BOOTSTRAP="$(command -v rustup)"') &&
+      run.includes(`tests/release/with-rust.sh -- "$RUSTUP_BOOTSTRAP" target add ${target} --toolchain 1.96.1`) &&
+      run.includes("tests/release/with-rust.sh -- bash -ceu") &&
+      run.includes('test "$RUSTUP_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup"') &&
+      run.includes('test "$CARGO_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/cargo"') &&
+      run.includes('[[ "$CARGO" == "$PANE_DASH_ISOLATED_RUST_ROOT"/rustup/toolchains/1.96.1-*/bin/cargo ]]')
+  })
+  if (provisionIndex < 0) throw new Error("packed-e2e must provision musl-tools and its isolated Rust target")
+  const provisionRun = job.steps[provisionIndex]!.run ?? ""
+  const provisionMarkers = [
+    "sudo apt-get update",
+    "sudo apt-get install -y musl-tools",
+    'export RUSTUP_BOOTSTRAP="$(command -v rustup)"',
+    `"$RUSTUP_BOOTSTRAP" target add ${target} --toolchain 1.96.1`,
+    "tests/release/with-rust.sh -- bash -ceu",
+    'test "$RUSTUP_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup"',
+    'test "$CARGO_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/cargo"',
+    '[[ "$CARGO" == "$PANE_DASH_ISOLATED_RUST_ROOT"/rustup/toolchains/1.96.1-*/bin/cargo ]]',
+  ]
+  let previous = -1
+  for (const marker of provisionMarkers) {
+    const position = provisionRun.indexOf(marker, previous + 1)
+    if (position <= previous) throw new Error("packed-e2e musl provisioning must identify and use the isolated Rust toolchain in order")
+    previous = position
+  }
+  const packedIndex = job.steps.findIndex((step) => (step.run ?? "").includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts"))
+  if (packedIndex < 0) throw new Error("packed-e2e fixture command is missing")
+  if (provisionIndex >= packedIndex) throw new Error("packed-e2e must provision its isolated musl target before the fixture")
+}
+
+function assertOpenCodeProvisioning(workflow: ParsedWorkflow): void {
+  const job = workflow.jobs["opencode-compatibility"]
+  if (!job) throw new Error("opencode-compatibility is missing")
+  const step = job.steps.find((candidate) => {
+    const run = candidate.run ?? ""
+    return run.includes("opencode-ai@1.17.20") && run.includes("opencode-ai@$OPENCODE_LATEST_VERSION")
+  })
+  if (!step) throw new Error("opencode compatibility installs are missing")
+  const run = step.run ?? ""
+  const markers = [
+    '"$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-min" --ignore-scripts',
+    'run_opencode_postinstall "$RUNNER_TEMP/opencode-min"',
+    '"$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-latest" --ignore-scripts',
+    'run_opencode_postinstall "$RUNNER_TEMP/opencode-latest"',
+    '"$NPM_20_CLI" view opencode-ai@1.17.20 version dist.integrity --json',
+    '"$NPM_20_CLI" view "opencode-ai@$OPENCODE_LATEST_VERSION" version dist.integrity --json',
+    '"$OPENCODE_1_17_20_BIN" --version',
+    '"$OPENCODE_LATEST_BIN" --version',
+  ]
+  let previous = -1
+  for (const marker of markers) {
+    const position = run.indexOf(marker, previous + 1)
+    if (position <= previous) throw new Error("OpenCode installs, targeted postinstalls, integrity checks, and version checks are out of order")
+    previous = position
+  }
+  if (!run.includes('local postinstall="$prefix/node_modules/opencode-ai/postinstall.mjs"')) throw new Error("OpenCode postinstall must target opencode-ai only")
+  if (!run.includes('tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NODE_20_BIN" "$postinstall"')) throw new Error("OpenCode postinstall must run through exact Node20 and clean-room")
+  if (run.includes("npm rebuild") || run.includes("npm run") || run.includes("npm exec")) throw new Error("OpenCode compatibility must not run broad npm scripts")
+}
+
 function assertCiCliNpaIsolation(workflow: ParsedWorkflow): void {
   const ciCli = workflow.jobs["ci-cli"]
   if (!ciCli) throw new Error("ci-cli is missing")
@@ -408,6 +476,8 @@ function assertWorkflowGraph(text: string, workflowName: string): void {
   if (workflowName === "ci.yml") {
     assertCiCliNpaIsolation(workflow)
     assertCiCliMuslFixture(workflow)
+    assertCiPackedE2EToolchain(workflow)
+    assertOpenCodeProvisioning(workflow)
     assertBatsProvisioning(workflow)
     assertRustLiveBinaryBuild(workflow)
   }
@@ -531,6 +601,28 @@ test("ci-cli builds the pinned musl fixture before Node20 release tests and reje
   const fixtureStep = reorderedSteps.splice(fixtureIndex, 1)[0]!
   reorderedSteps.splice(nodeWrapperIndex, 0, fixtureStep)
   expect(() => assertCiCliMuslFixture(withCiCliSteps(reorderedSteps))).toThrow(/before Node20 wrapper tests/)
+})
+
+test("packed E2E provisions musl in the isolated Rust toolchain before its fixture", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  expect(() => assertCiPackedE2EToolchain(parsed)).not.toThrow()
+
+  const packed = parsed.jobs["packed-e2e"]!
+  const provisionIndex = packed.steps.findIndex((step) => (step.run ?? "").includes('"$RUSTUP_BOOTSTRAP" target add x86_64-unknown-linux-musl --toolchain 1.96.1'))
+  const broken = packed.steps.map((step, index) => index === provisionIndex ? { ...step, run: (step.run ?? "").replace('test "$RUSTUP_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup"', "") } : step)
+  expect(() => assertCiPackedE2EToolchain({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: broken } } })).toThrow(/isolated Rust target/)
+})
+
+test("OpenCode compatibility runs only its targeted postinstalls before integrity and version checks", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  expect(() => assertOpenCodeProvisioning(parsed)).not.toThrow()
+
+  const job = parsed.jobs["opencode-compatibility"]!
+  const stepIndex = job.steps.findIndex((step) => (step.run ?? "").includes("run_opencode_postinstall"))
+  const broken = job.steps.map((step, index) => index === stepIndex ? { ...step, run: (step.run ?? "").replace('run_opencode_postinstall "$RUNNER_TEMP/opencode-latest"', "") } : step)
+  expect(() => assertOpenCodeProvisioning({ ...parsed, jobs: { ...parsed.jobs, "opencode-compatibility": { ...job, steps: broken } } })).toThrow(/out of order/)
 })
 
 test("archive-dry-run is the terminal CI status and reaches the required CI graph", async () => {
