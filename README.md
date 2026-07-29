@@ -18,6 +18,9 @@ the dashboard is still useful for tagged panes without it.
 Node.js is not needed for TPM or manual source builds. OpenCode is only needed
 for companion status; the dashboard itself does not require it.
 
+The current npm installer supports macOS arm64 only. TPM and manual builds are
+still available on other supported tmux platforms.
+
 ## Install with npx
 
 The npm CLI installs and manages the dashboard for the current user. The setup

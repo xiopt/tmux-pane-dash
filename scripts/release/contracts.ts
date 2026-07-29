@@ -72,6 +72,7 @@ export const CLI_PACKAGE_FILES = [
   "package/dist/cli.js",
   "package/dist/runtime.js",
   "package/generated/release-manifest.json",
+  "package/payload/tmux-pane-dash-v0.1.1-aarch64-apple-darwin.tar.gz",
 ] as const
 
 export const OPENCODE_PACKAGE_FILES = [

@@ -1,5 +1,5 @@
 import { parseArgs } from "./args"
-import type { Command, LockHandle, MutationCommand, ReleaseManifest } from "./contracts"
+import type { Command, LockHandle, MutationCommand, ReleaseAssetRecord, ReleaseManifest } from "./contracts"
 import { CliError } from "./errors"
 import { parseReleaseManifest, selectRelease } from "./manifest"
 import type { FsOps } from "./fs"
@@ -22,6 +22,8 @@ export type Dependencies = {
   ownedVersion?: string
   lock?: (command: MutationCommand) => Promise<LockHandle>
   fetch?: (url: string, init: { redirect: "manual"; signal: AbortSignal; headers: Record<string, never> }) => Promise<FetchResponse>
+  /** The bundled archive for the only platform this basic package supports. */
+  embeddedArchive?: (record: ReleaseAssetRecord) => Promise<Uint8Array | undefined>
   fs?: FsOps
   nowMs?: () => number
   timers?: TimerOps

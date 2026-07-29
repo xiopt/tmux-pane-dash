@@ -1,6 +1,7 @@
 # @xiopt/tmux-pane-dash
 
-Install or update the immutable tmux-pane-dash release for the current supported platform.
+Install or update tmux-pane-dash on macOS arm64. The package includes its
+dashboard payload, so setup does not download a GitHub release.
 
 ```sh
 npx @xiopt/tmux-pane-dash@latest setup

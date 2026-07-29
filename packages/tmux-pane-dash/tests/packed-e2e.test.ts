@@ -203,15 +203,20 @@ test("isolation: local pack install is offline before package JavaScript runs", 
       const unpackedTarball = await mkdtemp(join(tmpdir(), "pane-dash-packed-files-"))
       const untar = Bun.spawn(["tar", "-xzf", packed.tarball, "-C", unpackedTarball], { stdout: "pipe", stderr: "pipe" })
       expect(await untar.exited).toBe(0)
-      const paths = (await readdir(join(unpackedTarball, "package"), { recursive: true })).filter(path => path !== "dist" && path !== "generated").map(path => `package/${path}`).sort()
+      const paths = (await readdir(join(unpackedTarball, "package"), { recursive: true })).filter(path => !["dist", "generated", "payload"].includes(path)).map(path => `package/${path}`).sort()
       expect(paths).toEqual([...CLI_PACKAGE_FILES].sort())
-      const files = await Promise.all(CLI_PACKAGE_FILES.map(async path => [path, await readFile(join(unpackedTarball, path), "utf8")] as const))
+      const textPaths = CLI_PACKAGE_FILES.filter(path => !path.includes("/payload/"))
+      const files = await Promise.all(textPaths.map(async path => [path, await readFile(join(unpackedTarball, path), "utf8")] as const))
       for (const [path, content] of files) {
         expect(content, path).not.toMatch(/(?:127\.0\.0\.1|localhost|(?:endpoint|manifest|version|checksum|root)[-_]?(?:override|url|path))/i)
       }
       const bundle = files.map(([, content]) => content).join("\n")
       assertPackedNodeBundle(files.find(([path]) => path === "package/dist/cli.js")![1])
       assertPackedNodeBundle(files.find(([path]) => path === "package/dist/runtime.js")![1])
+      const manifest = JSON.parse(await readFile(join(unpackedTarball, "package/generated/release-manifest.json"), "utf8"))
+      const payload = await readFile(join(unpackedTarball, `package/payload/${manifest.assets["darwin-arm64"].asset}`))
+      expect(payload.length).toBe(manifest.assets["darwin-arm64"].size)
+      expect(sha(payload)).toBe(manifest.assets["darwin-arm64"].sha256)
       const urls = [...bundle.matchAll(/https?:\/\/[^\s"']+/g)].map(([url]) => url)
       expect(urls.every(url => /^https:\/\/github\.com(?::443)?\/xiopt\/tmux-pane-dash(?:\.git|#|\/|$)/.test(url)), urls.join("\n")).toBe(true)
       const metadata = JSON.parse(await readFile(join(unpacked, "package.json"), "utf8")) as Record<string, unknown>

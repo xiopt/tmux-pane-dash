@@ -23,7 +23,7 @@ async function fixtureRoot(): Promise<string> {
   const fixture = await mkdtemp(join(tmpdir(), "tmux-pane-dash-package-fixture-"))
   await copy(join(root, "package.json"), join(fixture, "package.json"))
   await copy(join(root, "packages/tmux-pane-dash/src"), join(fixture, "packages/tmux-pane-dash/src"))
-  for (const path of ["package.json", "README.md", "LICENSE", "generated/release-manifest.json", "dist/cli.js", "dist/runtime.js"]) {
+  for (const path of ["package.json", "README.md", "LICENSE", "generated/release-manifest.json", "payload/tmux-pane-dash-v0.1.1-aarch64-apple-darwin.tar.gz", "dist/cli.js", "dist/runtime.js"]) {
     await copy(join(root, "packages/tmux-pane-dash", path), join(fixture, "packages/tmux-pane-dash", path))
   }
   await copy(join(root, "opencode-plugin/pane-dash.ts"), join(fixture, "opencode-plugin/pane-dash.ts"))
@@ -36,7 +36,7 @@ async function fixtureRoot(): Promise<string> {
 
 async function expectedManifest(fixture: string, mutate?: (manifest: Record<string, any>) => void): Promise<{ path: string; bytes: Uint8Array; value: Record<string, any> }> {
   const value = JSON.parse(await readFile(join(root, "packages/tmux-pane-dash/generated/release-manifest.json"), "utf8")) as Record<string, any>
-  for (const [index, asset] of Object.values(value.assets as Record<string, { sha256: string }>).entries()) asset.sha256 = String(index + 1).repeat(64)
+  for (const [index, [key, asset]] of Object.entries(value.assets as Record<string, { sha256: string }>).entries()) if (key !== "darwin-arm64") asset.sha256 = String(index + 1).repeat(64)
   mutate?.(value)
   const bytes = canonicalJson(value)
   const path = join(fixture, "release-manifest.json")

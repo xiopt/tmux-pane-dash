@@ -135,12 +135,16 @@ export async function verifyReleaseDirectory(path: string, expectedEpoch?: numbe
 
 export async function verifyPackages(root: string, expectedManifestPath?: string): Promise<void> {
   const packageRoot = join(root, "packages", "tmux-pane-dash")
-  const expected = expectedManifestPath ? expectedPackageManifest(await readFile(expectedManifestPath)) : undefined
+  const sourceManifest = expectedPackageManifest(await readFile(join(packageRoot, "generated", "release-manifest.json")))
+  const expected = expectedManifestPath ? expectedPackageManifest(await readFile(expectedManifestPath)) : sourceManifest
   const pkg = parseJson(await readFile(join(packageRoot, "package.json")))
-  const files = ["dist/cli.js", "dist/runtime.js", "generated/release-manifest.json", "README.md", "LICENSE"]
+  const files = ["dist/cli.js", "dist/runtime.js", "generated/release-manifest.json", `payload/${sourceManifest.manifest.assets["darwin-arm64"].asset}`, "README.md", "LICENSE"]
   const packageKeys = ["name", "version", "description", "type", "engines", "bin", "files", "repository", "homepage", "bugs", "license", "publishConfig"]
-  if (!hasExactKeys(pkg, packageKeys) || pkg.name !== "@xiopt/tmux-pane-dash" || pkg.version !== VERSION || pkg.description !== "Immutable installer for tmux-pane-dash" || pkg.type !== "module" || JSON.stringify(pkg.engines) !== JSON.stringify({ node: ">=20" }) || JSON.stringify(pkg.bin) !== JSON.stringify({ "tmux-pane-dash": "dist/cli.js" }) || JSON.stringify(pkg.files) !== JSON.stringify(files) || JSON.stringify(pkg.repository) !== JSON.stringify({ type: "git", url: "git+https://github.com/xiopt/tmux-pane-dash.git" }) || pkg.homepage !== "https://github.com/xiopt/tmux-pane-dash#readme" || JSON.stringify(pkg.bugs) !== JSON.stringify({ url: "https://github.com/xiopt/tmux-pane-dash/issues" }) || pkg.license !== "MIT" || JSON.stringify(pkg.publishConfig) !== JSON.stringify({ access: "public" }) || Object.hasOwn(pkg, "exports") || ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "bundledDependencies", "gypfile", "os", "cpu", "binary", "preinstall", "install", "postinstall", "prepare", "prepublish", "prepublishOnly", "prepack", "postpack"].some((key) => Object.hasOwn(pkg, key))) throw new Error("invalid CLI package metadata")
-  if (expected && !Buffer.from(await readFile(join(packageRoot, "generated", "release-manifest.json"))).equals(Buffer.from(expected.bytes))) throw new Error("source generated release manifest differs from expected")
+  if (!hasExactKeys(pkg, packageKeys) || pkg.name !== "@xiopt/tmux-pane-dash" || pkg.version !== VERSION || pkg.description !== "macOS arm64 installer for tmux-pane-dash" || pkg.type !== "module" || JSON.stringify(pkg.engines) !== JSON.stringify({ node: ">=20" }) || JSON.stringify(pkg.bin) !== JSON.stringify({ "tmux-pane-dash": "dist/cli.js" }) || JSON.stringify(pkg.files) !== JSON.stringify(files) || JSON.stringify(pkg.repository) !== JSON.stringify({ type: "git", url: "git+https://github.com/xiopt/tmux-pane-dash.git" }) || pkg.homepage !== "https://github.com/xiopt/tmux-pane-dash#readme" || JSON.stringify(pkg.bugs) !== JSON.stringify({ url: "https://github.com/xiopt/tmux-pane-dash/issues" }) || pkg.license !== "MIT" || JSON.stringify(pkg.publishConfig) !== JSON.stringify({ access: "public" }) || Object.hasOwn(pkg, "exports") || ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "bundledDependencies", "gypfile", "os", "cpu", "binary", "preinstall", "install", "postinstall", "prepare", "prepublish", "prepublishOnly", "prepack", "postpack"].some((key) => Object.hasOwn(pkg, key))) throw new Error("invalid CLI package metadata")
+  if (!Buffer.from(sourceManifest.bytes).equals(Buffer.from(expected.bytes))) throw new Error("source generated release manifest differs from expected")
+  const payload = sourceManifest.manifest.assets["darwin-arm64"]
+  const sourcePayload = await readFile(join(packageRoot, "payload", payload.asset))
+  if (sourcePayload.length !== payload.size || sha256(sourcePayload) !== payload.sha256) throw new Error("source bundled payload differs from release manifest")
   const node = process.env.NODE_20_BIN, npm = process.env.NPM_20_CLI
   if (!node || !npm) throw new Error("CLI package check requires with-node20")
   const output = await mkdtemp(join(tmpdir(), "pane-dash-cli-pack-"))
@@ -163,10 +167,12 @@ export async function verifyPackages(root: string, expectedManifestPath?: string
     const packedRoot = join(extracted, "package")
     const packedMetadata = parseJson(await readFile(join(packedRoot, "package.json")))
     if (JSON.stringify(packedMetadata) !== JSON.stringify(pkg)) throw new Error("packed package metadata differs")
-    if (expected && !Buffer.from(await readFile(join(packedRoot, "generated", "release-manifest.json"))).equals(Buffer.from(expected.bytes))) throw new Error("packed generated release manifest differs from expected")
+    if (!Buffer.from(await readFile(join(packedRoot, "generated", "release-manifest.json"))).equals(Buffer.from(expected.bytes))) throw new Error("packed generated release manifest differs from expected")
+    const packedPayload = await readFile(join(packedRoot, "payload", payload.asset))
+    if (packedPayload.length !== payload.size || sha256(packedPayload) !== payload.sha256) throw new Error("packed bundled payload differs from release manifest")
     const [cli, runtime] = await Promise.all([readFile(join(packedRoot, "dist", "cli.js"), "utf8"), readFile(join(packedRoot, "dist", "runtime.js"), "utf8")])
     for (const bundle of [cli, runtime]) assertPackedNodeBundle(bundle)
-    if (expected) assertManifestIdentities(cli, expected.manifest)
+    assertManifestIdentities(cli, expected.manifest)
     if ((cli.match(/\.argv/g) ?? []).length !== 1 || !/\.argv\.slice\(2\)/.test(cli) || /\.argv/.test(runtime)) throw new Error("packed Node artifact has an invalid argv override")
     const noCommand = await command([node, join(packedRoot, "dist", "cli.js")], { ...process.env, PATH: "/usr/bin:/bin" })
     if (noCommand.code !== 2 || noCommand.stdout !== "" || !noCommand.stderr.startsWith("E_USAGE:") || noCommand.stderr.length > 241) throw new Error("packed CLI does not return bounded E_USAGE")

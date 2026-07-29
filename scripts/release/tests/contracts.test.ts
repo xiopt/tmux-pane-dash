@@ -57,6 +57,7 @@ test("defines exact archive and package inventories before consumers", () => {
     "package/dist/cli.js",
     "package/dist/runtime.js",
     "package/generated/release-manifest.json",
+    "package/payload/tmux-pane-dash-v0.1.1-aarch64-apple-darwin.tar.gz",
   ])
   expect(OPENCODE_PACKAGE_FILES).toEqual([
     "package/package.json",

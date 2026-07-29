@@ -36,6 +36,21 @@ test("reuses an exact healthy payload offline and stages a real archive outside 
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test("stages a bundled archive without fetching", async () => {
+  const root = await temp("bundled"), { bytes, record: stagedRecord } = goodDownload(), h = fixtureDependencies()
+  h.deps.manifest = releaseManifest(stagedRecord)
+  h.deps.embeddedArchive = async (requested) => {
+    expect(requested).toEqual(stagedRecord)
+    return bytes
+  }
+  h.deps.fetch = async () => { throw new Error("network must not be used") }
+  try {
+    await expect(acquireRelease({ versionDirectory: join(root, "missing"), stagingRoot: join(root, "staging"), record: stagedRecord, deps: h.deps })).resolves.toMatchObject({ kind: "staged" })
+    expect(await Bun.file(join(root, "staging", "bin", "pane-dash")).exists()).toBeTrue()
+    expect(await Bun.file(`${join(root, "staging")}.download.tar.gz`).exists()).toBeFalse()
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test("only validated corruptions stage; operational faults propagate without fetching", async () => {
   for (const mutation of ["same-size-hash", "file-directory", "symlink", "extra-file", "extra-directory", "wrong-version", "wrong-target", "wrong-asset", "wrong-mode", "special-mode", "missing-directory"] as const) {
       const h = await installedFixture(), { bytes, record: stagedRecord } = goodDownload()

@@ -1493,12 +1493,21 @@ async function acquireRelease(context) {
     if (!isValidatedCorruption(error))
       throw error;
   }
-  const archive = `${context.stagingRoot}.download.tar.gz`;
   await fs.rm(context.stagingRoot);
   await fs.mkdir(context.stagingRoot);
   try {
-    await downloadAsset(record, archive, { ...context.deps, fs }, manifest.tag);
-    const bytes = await fs.readFile(archive);
+    const bundled = context.deps.embeddedArchive ? await context.deps.embeddedArchive(record) : undefined;
+    if (context.deps.embeddedArchive && !bundled)
+      throw new CliError("E_PLATFORM", "this package supports macOS arm64 only");
+    const archive = `${context.stagingRoot}.download.tar.gz`;
+    const bytes = bundled ?? await (async () => {
+      await downloadAsset(record, archive, { ...context.deps, fs }, manifest.tag);
+      try {
+        return await fs.readFile(archive);
+      } finally {
+        await fs.rm(archive);
+      }
+    })();
     async function* stream() {
       yield bytes;
     }
@@ -1508,8 +1517,6 @@ async function acquireRelease(context) {
   } catch (error) {
     await fs.rm(context.stagingRoot);
     throw error;
-  } finally {
-    await fs.rm(archive);
   }
 }
 var MAX, signals, emptyHeaders, archiveLimits;
