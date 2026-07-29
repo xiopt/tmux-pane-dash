@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test"
-import { cp, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, cp, mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { canonicalJson } from "../canonical-json"
-import { buildPackages, createReleaseManifestPlugin, parsePackageBuildArgs } from "../package-build"
+import { buildPackages, createReleaseManifestPlugin, parsePackageBuildArgs, publishAtomicallyForTest } from "../package-build"
 import { verifyPackages } from "../verify-artifacts"
 
 const root = process.cwd()
@@ -91,6 +91,7 @@ test("package build atomically publishes exact outputs, embeds every release ide
       expect(cli).toContain(asset.url)
       expect(cli).toContain(asset.sha256)
     }
+    for (const [path, mode] of [[outputPaths[0], 0o644], [outputPaths[1], 0o755], [outputPaths[2], 0o644], [outputPaths[3], 0o644]] as const) expect((await stat(join(fixture, path))).mode & 0o7777).toBe(mode)
     const directBuild = await mkdtemp(join(tmpdir(), "tmux-pane-dash-direct-build-test-"))
     try {
       for (const [entry, filename] of [["cli.ts", "cli.js"], ["runtime.ts", "runtime.js"]] as const) {
@@ -119,6 +120,29 @@ test("package build leaves all committed outputs unchanged and cleans temporary 
     await expect(buildPackages({ root: fixture, releaseManifestPath: expected.path })).rejects.toThrow()
     expect(await snapshots(fixture)).toEqual(before)
     await assertNoTemporaryOutputs(fixture)
+  } finally {
+    await rm(fixture, { recursive: true, force: true })
+  }
+})
+
+test("atomic rollback restores varied preimage modes and removes temporary outputs", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "tmux-pane-dash-mode-rollback-test-"))
+  const paths = [
+    join(fixture, "generated", "release-manifest.json"),
+    join(fixture, "dist", "cli.js"),
+    join(fixture, "dist", "runtime.js"),
+    join(fixture, "opencode", "index.js"),
+  ]
+  const preimage = [0o601, 0o602, 0o603, 0o604]
+  try {
+    const files = paths.map((target, index) => ({ target, bytes: new TextEncoder().encode(`new-${index}`), mode: [0o644, 0o755, 0o644, 0o644][index]! }))
+    await Promise.all(paths.map(async (path, index) => { await mkdir(dirname(path), { recursive: true }); await writeFile(path, `old-${index}`); await chmod(path, preimage[index]!) }))
+    await expect(publishAtomicallyForTest(files, 2)).rejects.toThrow("forced publish failure")
+    for (const [path, mode] of paths.map((path, index) => [path, preimage[index]!] as const)) {
+      expect(await readFile(path, "utf8")).toMatch(/^old-/)
+      expect((await stat(path)).mode & 0o7777).toBe(mode)
+    }
+    for (const directory of [join(fixture, "generated"), join(fixture, "dist"), join(fixture, "opencode")]) expect((await readdir(directory)).filter(name => name.includes("package-build"))).toEqual([])
   } finally {
     await rm(fixture, { recursive: true, force: true })
   }
@@ -234,8 +258,9 @@ const destination = destinationIndex >= 0 ? process.argv[destinationIndex + 1] :
 const archive = path.isAbsolute(filename) ? filename : path.join(destination, filename);
 const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "package-build-tar-") );
 try {
-  childProcess.execFileSync("tar", ["-xzf", archive, "-C", extracted]);
-  fs.writeFileSync(path.join(extracted, "package", "generated", "release-manifest.json"), "{}\\n");
+childProcess.execFileSync("tar", ["-xzf", archive, "-C", extracted]);
+  if (process.env.MUTATE_MODE === "1") fs.chmodSync(path.join(extracted, "package", "dist", "cli.js"), 0o644);
+  else fs.writeFileSync(path.join(extracted, "package", "generated", "release-manifest.json"), "{}\\n");
   childProcess.execFileSync("tar", ["-czf", archive, "-C", extracted, "package"]);
 } finally { fs.rmSync(extracted, { recursive: true, force: true }); }
 process.stdout.write(real.stdout);
@@ -245,6 +270,14 @@ process.stdout.write(real.stdout);
       await expect(verifyPackages(fixture, expected.path)).rejects.toThrow("packed generated")
       process.env.NPM_20_CLI = realNpm
       delete process.env.REAL_NPM
+
+      process.env.NPM_20_CLI = mutatingNpm
+      process.env.REAL_NPM = realNpm
+      process.env.MUTATE_MODE = "1"
+      await expect(verifyPackages(fixture, expected.path)).rejects.toThrow("invalid mode")
+      process.env.NPM_20_CLI = realNpm
+      delete process.env.REAL_NPM
+      delete process.env.MUTATE_MODE
 
       const staleCli = await readFile(join(fixture, "packages/tmux-pane-dash/dist/cli.js"), "utf8")
       await writeFile(join(fixture, "packages/tmux-pane-dash/dist/cli.js"), staleCli.replace(expected.value.assets["darwin-arm64"].sha256, "0".repeat(64)))

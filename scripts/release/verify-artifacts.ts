@@ -47,6 +47,19 @@ function tarFiles(bytes: Uint8Array): Map<string, Uint8Array> {
   return files
 }
 
+function tarHeaders(bytes: Uint8Array): Map<string, { mode: number; type: number }> {
+  const tar = gunzipSync(bytes); const headers = new Map<string, { mode: number; type: number }>()
+  for (let offset = 0; offset + 512 <= tar.length;) { const header = tar.subarray(offset, offset + 512); if (header.every((byte) => byte === 0)) break; const zero = header.indexOf(0); const name = decoder.decode(header.subarray(0, zero < 0 ? 100 : zero)); const size = Number.parseInt(decoder.decode(header.subarray(124, 136)).replace(/\0.*$/, "").trim(), 8) || 0; const mode = Number.parseInt(decoder.decode(header.subarray(100, 108)).replace(/\0.*$/, "").trim(), 8) || 0; headers.set(name, { mode, type: header[156] ?? 0 }); offset += 512 + Math.ceil(size / 512) * 512 }
+  return headers
+}
+
+function assertPackageModes(headers: Map<string, { mode: number; type: number }>): void {
+  for (const path of CLI_PACKAGE_FILES) {
+    const entry = headers.get(path), expected = path === "package/dist/cli.js" ? 0o755 : 0o644
+    if (!entry || (entry.type !== 0 && entry.type !== 48) || entry.mode !== expected) throw new Error(`packed package file has invalid mode: ${path}`)
+  }
+}
+
 const hostTarget = () => process.platform === "darwin" ? process.arch === "arm64" ? "aarch64-apple-darwin" : process.arch === "x64" ? "x86_64-apple-darwin" : undefined : process.platform === "linux" ? process.arch === "arm64" ? "aarch64-unknown-linux-musl" : process.arch === "x64" ? "x86_64-unknown-linux-musl" : undefined : undefined
 
 async function command(argv: string[], env?: Record<string, string>, cwd?: string): Promise<{ stdout: string; stderr: string; code: number }> {
@@ -146,6 +159,7 @@ export async function verifyPackages(root: string, expectedManifestPath?: string
       await mkdir(dirname(destination), { recursive: true })
       await writeFile(destination, content)
     }
+    assertPackageModes(tarHeaders(await readFile(join(output, filename))))
     const packedRoot = join(extracted, "package")
     const packedMetadata = parseJson(await readFile(join(packedRoot, "package.json")))
     if (JSON.stringify(packedMetadata) !== JSON.stringify(pkg)) throw new Error("packed package metadata differs")

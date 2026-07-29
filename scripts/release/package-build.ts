@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import type { ReleaseManifest } from "../../packages/tmux-pane-dash/src/contracts"
@@ -34,11 +34,15 @@ type ReleaseManifestPlugin = {
 type BuiltFile = {
   target: string
   bytes: Uint8Array
+  mode: number
 }
 
 type FileSnapshot = {
   bytes?: Uint8Array
+  mode?: number
 }
+
+type BeforeRename = (index: number) => void | Promise<void>
 
 function missing(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT"
@@ -136,7 +140,8 @@ function assertNoBuildResidue(bundle: string, buildRoot: string, label: string):
 
 async function snapshot(path: string): Promise<FileSnapshot> {
   try {
-    return { bytes: new Uint8Array(await readFile(path)) }
+    const [bytes, info] = await Promise.all([readFile(path), stat(path)])
+    return { bytes: new Uint8Array(bytes), mode: info.mode & 0o7777 }
   } catch (error) {
     if (missing(error)) return {}
     throw error
@@ -144,23 +149,23 @@ async function snapshot(path: string): Promise<FileSnapshot> {
 }
 
 async function restore(path: string, previous: FileSnapshot): Promise<void> {
-  if (previous.bytes === undefined) {
+  if (previous.bytes === undefined || previous.mode === undefined) {
     await rm(path, { force: true })
     return
   }
   const temporary = join(dirname(path), `.${basename(path)}.package-build-restore-${crypto.randomUUID()}`)
   try {
-    await writeFile(temporary, previous.bytes, { mode: 0o644 })
-    await chmod(temporary, 0o644)
+    await writeFile(temporary, previous.bytes, { mode: previous.mode })
+    await chmod(temporary, previous.mode)
     await rename(temporary, path)
   } finally {
     await rm(temporary, { force: true })
   }
 }
 
-async function publishAtomically(files: readonly BuiltFile[], requireChange: boolean): Promise<void> {
+async function publishAtomically(files: readonly BuiltFile[], requireChange: boolean, beforeRename?: BeforeRename): Promise<void> {
   const previous = await Promise.all(files.map(file => snapshot(file.target)))
-  if (requireChange && files.every((file, index) => previous[index]!.bytes !== undefined && sameBytes(previous[index]!.bytes!, file.bytes))) throw new Error("package build would be a no-op")
+  if (requireChange && files.every((file, index) => previous[index]!.bytes !== undefined && previous[index]!.mode === file.mode && sameBytes(previous[index]!.bytes!, file.bytes))) throw new Error("package build would be a no-op")
 
   const temporary: Array<string | undefined> = []
   const published: number[] = []
@@ -169,18 +174,20 @@ async function publishAtomically(files: readonly BuiltFile[], requireChange: boo
       await mkdir(dirname(file.target), { recursive: true })
       const path = join(dirname(file.target), `.${basename(file.target)}.package-build-${crypto.randomUUID()}`)
       temporary.push(path)
-      await writeFile(path, file.bytes, { mode: 0o644 })
-      await chmod(path, 0o644)
+      await writeFile(path, file.bytes, { mode: file.mode })
+      await chmod(path, file.mode)
     }
     for (let index = 0; index < files.length; index += 1) {
       const path = temporary[index]
       if (!path) throw new Error("package build temporary output is missing")
+      await beforeRename?.(index)
       await rename(path, files[index]!.target)
       temporary[index] = undefined
       published.push(index)
     }
     for (const file of files) {
-      if (!sameBytes(new Uint8Array(await readFile(file.target)), file.bytes)) throw new Error(`published output differs: ${file.target}`)
+      const [bytes, info] = await Promise.all([readFile(file.target), stat(file.target)])
+      if (!sameBytes(new Uint8Array(bytes), file.bytes) || (info.mode & 0o7777) !== file.mode) throw new Error(`published output differs: ${file.target}`)
     }
   } catch (error) {
     let rollbackError: unknown
@@ -196,6 +203,11 @@ async function publishAtomically(files: readonly BuiltFile[], requireChange: boo
   } finally {
     await Promise.all(temporary.filter((path): path is string => path !== undefined).map(path => rm(path, { force: true })))
   }
+}
+
+/** Test-only fault-injection seam for proving rollback restores the preimage. */
+export async function publishAtomicallyForTest(files: readonly BuiltFile[], failAt: number): Promise<void> {
+  await publishAtomically(files, false, index => { if (index === failAt) throw new Error("forced publish failure") })
 }
 
 export async function buildPackages(input: PackageBuildInput): Promise<void> {
@@ -220,10 +232,10 @@ export async function buildPackages(input: PackageBuildInput): Promise<void> {
     assertManifestIdentities(cliText, release.manifest)
 
     await publishAtomically([
-      { target: join(packageRoot, "generated", "release-manifest.json"), bytes: release.bytes },
-      { target: join(packageRoot, "dist", "cli.js"), bytes: cli },
-      { target: join(packageRoot, "dist", "runtime.js"), bytes: runtime },
-      { target: join(root, "opencode-plugin", "dist", "index.js"), bytes: opencode },
+      { target: join(packageRoot, "generated", "release-manifest.json"), bytes: release.bytes, mode: 0o644 },
+      { target: join(packageRoot, "dist", "cli.js"), bytes: cli, mode: 0o755 },
+      { target: join(packageRoot, "dist", "runtime.js"), bytes: runtime, mode: 0o644 },
+      { target: join(root, "opencode-plugin", "dist", "index.js"), bytes: opencode, mode: 0o644 },
     ], input.requireChange === true)
   } finally {
     await rm(buildRoot, { recursive: true, force: true })
