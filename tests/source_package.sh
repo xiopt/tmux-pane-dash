@@ -39,7 +39,16 @@ sha256_file() {
 }
 
 mode_of() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  local value
+  if value=$(stat -c '%a' "$1" 2>/dev/null) && [[ "$value" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  if value=$(stat -f '%Lp' "$1" 2>/dev/null) && [[ "$value" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  return 1
 }
 
 shell_quote() {
@@ -213,8 +222,9 @@ LEADER
     [ -s "$nested_dir/child-pid" ] && [ -s "$nested_dir/grandchild" ] && break
     sleep 0.05
   done
-  [ -s "$nested_dir/child-pid" ] && [ -s "$nested_dir/grandchild" ] ||
+  if [ ! -s "$nested_dir/child-pid" ] || [ ! -s "$nested_dir/grandchild" ]; then
     fail 'terminate_and_reap regression fixture did not start nested descendants'
+  fi
   child="$(<"$nested_dir/child-pid")"
   grandchild="$(<"$nested_dir/grandchild")"
   terminate_and_reap "$leader"
@@ -309,7 +319,11 @@ done
   [ -f "$extracted/release/tests/verify-npm-provenance.test.ts" ] || fail 'source archive is missing the release verifier test'
   [ ! -e "$extracted/docs" ] || fail 'source archive contains ignored documentation'
   [ -x "$extracted/scripts/release/ci-tmux.sh" ] || fail 'source archive is missing the executable CI tmux helper'
+  [ -x "$extracted/tests/pane_dash_pty.sh" ] || fail 'source archive is missing the executable PTY helper'
+  [ "$(mode_of "$extracted/tests/pane_dash_pty.sh")" = 755 ] || fail 'source archive did not preserve mode 0755 for the PTY helper'
   assert_no_forbidden_paths
+  # shellcheck disable=SC1091 # The extracted source package supplies this helper.
+  source "$extracted/tests/pane_dash_pty.sh"
   BUN_INSTALL_CACHE_DIR="$warm_cache" npm_config_cache="$warm_cache" "$bun_bin" install --frozen-lockfile --offline --ignore-scripts --cwd "$extracted" >/dev/null
   printf 'offline=bun-warm-cache-pass\n'
 
@@ -396,11 +410,11 @@ TMUX='' PATH="$sentinel_bin:$PATH" "$tmux_bin" -L "$socket" -f /dev/null new-ses
 TMUX='' "$tmux_bin" -L "$socket" new-session -d -s two 'sleep 120'
 server_path="$(TMUX='' "$tmux_bin" -L "$socket" show-environment -g PATH)"
 [[ "$server_path" == *"$sentinel_bin"* ]] || fail 'isolated tmux server did not retain sentinel PATH'
-{ sleep 2; printf '\002'; sleep 600; } | TMUX='' script -q /dev/null "$tmux_bin" -L "$socket" attach-session -t one >/dev/null 2>&1 &
+{ sleep 2; printf '\002'; sleep 600; } | TMUX='' "$extracted/tests/pane_dash_pty.sh" "$tmux_bin" -L "$socket" attach-session -t one >/dev/null 2>&1 &
 client_one_pid=$!
 active_pids+=("$client_one_pid")
 active_process_groups+=("$(ps -o pgid= -p "$client_one_pid" | tr -d ' ')")
-{ sleep 600; } | TMUX='' script -q /dev/null "$tmux_bin" -L "$socket" attach-session -t two >/dev/null 2>&1 &
+{ sleep 600; } | TMUX='' "$extracted/tests/pane_dash_pty.sh" "$tmux_bin" -L "$socket" attach-session -t two >/dev/null 2>&1 &
 client_two_pid=$!
 active_pids+=("$client_two_pid")
 active_process_groups+=("$(ps -o pgid= -p "$client_two_pid" | tr -d ' ')")

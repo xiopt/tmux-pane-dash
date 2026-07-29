@@ -27,6 +27,53 @@ SH
   chmod +x "$bin/rustup"
 }
 
+make_stat_stub() {
+  local bin=$1
+  cat > "$bin/stat" <<'SH'
+#!/bin/sh
+set -eu
+uid=${STAT_STUB_UID:?STAT_STUB_UID is required}
+case "$STAT_STUB_MODE:$1:$2" in
+  gnu-partial:-c:*)
+    printf 'GNU filesystem report from failed probe\n'
+    exit 1
+    ;;
+  gnu-partial:-f:%Lp) printf '600\n' ;;
+  gnu-partial:-f:%u) printf '%s\n' "$uid" ;;
+  bsd-partial:-f:*)
+    printf 'GNU filesystem report from failed probe\n'
+    exit 1
+    ;;
+  bsd-partial:-c:%a) printf '600\n' ;;
+  bsd-partial:-c:%u) printf '%s\n' "$uid" ;;
+  *)
+    printf 'unexpected stat invocation: %s %s\n' "$1" "$2" >&2
+    exit 2
+    ;;
+esac
+SH
+  chmod +x "$bin/stat"
+}
+
+@test "stat probes discard partial output and accept one exact value from either backend" {
+  root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+  bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$bin"
+  make_fake_rustup "$bin"
+  make_stat_stub "$bin"
+
+  for mode in gnu-partial bsd-partial; do
+    tmp="$BATS_TEST_TMPDIR/$mode"
+    mkdir -p "$tmp"
+    tmp="$(cd "$tmp" && pwd -P)"
+    run env TMPDIR="$tmp" PATH="$bin:$PATH" STAT_STUB_MODE="$mode" STAT_STUB_UID="$(id -u)" RUSTUP_BOOTSTRAP="$bin/rustup" \
+      "$root/tests/release/with-rust.sh" -- sh -c 'printf "%s\n" "$PANE_DASH_ISOLATED_RUST_ROOT"'
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 1 ]
+    [[ "$output" == "$tmp/tmux-pane-dash-rust."* ]]
+  done
+}
+
 @test "with-rust rejects ambient state and provides exact isolated Rust" {
   root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
   run "$root/tests/release/with-rust.sh" -- sh -c 'test "$(cargo --version | awk "{print \$2}")" = 1.96.1 && test -n "$RUSTUP_HOME" && test -n "$CARGO_HOME"'

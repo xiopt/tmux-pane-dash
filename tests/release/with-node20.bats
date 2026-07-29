@@ -32,6 +32,47 @@ base_env() {
 
 descriptor_value() { awk -F= -v key="$1" '$1 == key { print $2 }' "$work/.cortexkit/v0.1-release/node20.env"; }
 
+mode_of() {
+  local value
+  if value=$(stat -c '%a' "$1" 2>/dev/null) && [[ "$value" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  if value=$(stat -f '%Lp' "$1" 2>/dev/null) && [[ "$value" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  return 1
+}
+
+make_stat_stub() {
+  local bin=$1
+  cat > "$bin/stat" <<'SH'
+#!/bin/sh
+set -eu
+uid=${STAT_STUB_UID:?STAT_STUB_UID is required}
+case "$STAT_STUB_MODE:$1:$2" in
+  gnu-partial:-c:*)
+    printf 'GNU filesystem report from failed probe\n'
+    exit 1
+    ;;
+  gnu-partial:-f:%Lp) printf '600\n' ;;
+  gnu-partial:-f:%u) printf '%s\n' "$uid" ;;
+  bsd-partial:-f:*)
+    printf 'GNU filesystem report from failed probe\n'
+    exit 1
+    ;;
+  bsd-partial:-c:%a) printf '600\n' ;;
+  bsd-partial:-c:%u) printf '%s\n' "$uid" ;;
+  *)
+    printf 'unexpected stat invocation: %s %s\n' "$1" "$2" >&2
+    exit 2
+    ;;
+esac
+SH
+  chmod +x "$bin/stat"
+}
+
 assert_pid_reaped() {
   local pid=$1
   for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -74,6 +115,22 @@ EOF
   chmod +x "$work/bin/mise"
 }
 
+@test "stat probes discard partial output and accept one exact value from either backend" {
+  write_fake_mise
+  make_stat_stub "$work/bin"
+  physical_tmp="$(cd "$private_tmp" && pwd -P)"
+
+  for mode in gnu-partial bsd-partial; do
+    rm -rf "$work/.cortexkit/v0.1-release"
+    run base_env STAT_STUB_MODE="$mode" STAT_STUB_UID="$(id -u)" PROVISION_LOG="$BATS_TEST_TMPDIR/provisions-$mode" \
+      "$work/tests/release/with-node20.sh" -- sh -c 'printf "%s\n" "$NODE_20_BIN"'
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 1 ]
+    root="${output%%/mise/*}"
+    [[ "$root" == "$physical_tmp/tmux-pane-dash-node20."* ]]
+  done
+}
+
 @test "uses validated exact preprovided Node without creating persistent state" {
   run env PANE_DASH_NODE20_PREPROVIDED=1 NODE_20_BIN="$work/bin/node" NPM_20_CLI="$work/bin/npm" "$work/tests/release/with-node20.sh" -- node --version
   [ "$status" -eq 0 ]
@@ -113,7 +170,7 @@ EOF
   [ "$status" -eq 0 ]
   [ "$output" = "v20.0.0" ]
   descriptor="$work/.cortexkit/v0.1-release/node20.env"
-  [ "$(stat -f '%Lp' "$descriptor" 2>/dev/null || stat -c '%a' "$descriptor")" = 600 ]
+  [ "$(mode_of "$descriptor")" = 600 ]
   root="$(awk -F= '$1 == "ROOT" { print $2 }' "$descriptor")"
   npm_cli="$(awk -F= '$1 == "NPM_20_CLI" { print $2 }' "$descriptor")"
   physical_tmp="$(cd "$BATS_TEST_TMPDIR/private/var/tmp" && pwd -P)"

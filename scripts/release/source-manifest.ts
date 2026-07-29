@@ -62,6 +62,8 @@ export const SOURCE_EXECUTABLES = [
   "spike/tests/70_lifecycle_test.sh",
   "tests/integration.sh",
   "tests/pane_dash_integration.sh",
+  "tests/pane_dash_pty.sh",
+  "tests/pane_dash_pty_helper_test.sh",
   "tests/release/with-node20.sh",
   "tests/release/with-npa.sh",
   "tests/release/with-rust.sh",

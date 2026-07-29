@@ -4,14 +4,20 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { canonicalJson, sha256 } from "../canonical-json"
-import { TARGETS } from "../contracts"
+import { TAG_COMMIT, TARGETS } from "../contracts"
 import { assertPackedNodeBundle, verifyPackages, verifyReleaseDirectory } from "../verify-artifacts"
 
 const decoder = new TextDecoder()
-const epoch = 1784813242
+const epoch = 1785267132
+
+async function runGit(args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+  const child = Bun.spawn(["git", ...args], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" })
+  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+  return { stdout, stderr, code }
+}
 
 async function buildRelease(root: string): Promise<void> {
-  const child = Bun.spawn([process.execPath, "scripts/release/build.ts", "--local-fixtures", "--tag-commit", "7bc976a", "--output", root], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" })
+  const child = Bun.spawn([process.execPath, "scripts/release/build.ts", "--local-fixtures", "--tag-commit", "d47a37a", "--output", root], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" })
   if (await child.exited) throw new Error(await new Response(child.stderr).text())
 }
 
@@ -50,6 +56,17 @@ test("packed override scanner permits internal names but rejects environment ove
   expect(() => assertPackedNodeBundle("const installRoot = '/owned'; export { installRoot }")) .not.toThrow()
   expect(() => assertPackedNodeBundle("const root = process.env.INSTALL_ROOT")) .toThrow("forbidden override")
   expect(() => assertPackedNodeBundle("const env = { INSTALL_ROOT: '/tmp' }")) .toThrow("forbidden override")
+})
+
+test("release fixture anchor resolves from current history and is an ancestor of HEAD", async () => {
+  const resolved = await runGit(["rev-parse", `${TAG_COMMIT}^{commit}`])
+  expect(resolved.code).toBe(0)
+  expect(resolved.stderr).toBe("")
+  expect(resolved.stdout.trim()).toMatch(/^[0-9a-f]{40}$/)
+
+  const ancestor = await runGit(["merge-base", "--is-ancestor", TAG_COMMIT, "HEAD"])
+  expect(ancestor.code).toBe(0)
+  expect(ancestor.stderr).toBe("")
 })
 
 test("package verifier executes and imports the packed Node artifact", async () => {
@@ -123,7 +140,7 @@ test("verifier rejects a release tag that no longer resolves to the expected com
     await buildRelease(root)
     await writeFile(git, `#!/bin/sh
 case "$*" in
-  'rev-parse 7bc976a^{commit}') printf '%s\\n' expected-release-commit ;;
+  'rev-parse d47a37a^{commit}') printf '%s\\n' expected-release-commit ;;
   'show -s --format=%ct expected-release-commit') printf '%s\\n' ${epoch} ;;
   'rev-parse --verify --quiet refs/tags/v0.1.0') printf '%s\\n' release-tag-ref ;;
   'rev-parse v0.1.0^{commit}') printf '%s\\n' moved-release-tag ;;
@@ -148,7 +165,7 @@ test("verifier uses the expected commit epoch before the release tag exists", as
     await buildRelease(root)
     await writeFile(git, `#!/bin/sh
 case "$*" in
-  'rev-parse 7bc976a^{commit}') printf '%s\\n' expected-release-commit ;;
+  'rev-parse d47a37a^{commit}') printf '%s\\n' expected-release-commit ;;
   'show -s --format=%ct expected-release-commit') printf '%s\\n' ${epoch} ;;
   *) exit 1 ;;
 esac

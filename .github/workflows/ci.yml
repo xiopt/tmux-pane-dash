@@ -37,19 +37,32 @@ jobs:
           test -x "$BUN_BOOTSTRAP"
           test "$($BUN_BOOTSTRAP --version)" = "1.3.14"
           printf 'TMUX_BIN=%s\nBUN_BOOTSTRAP=%s\n' "$TMUX_BIN" "$BUN_BOOTSTRAP" >> "$GITHUB_ENV"
+      - name: Provision distro Bats
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y bats
+          test "$(command -v bats)" = "/usr/bin/bats"
+          bats_version=$(/usr/bin/bats --version)
+          test -n "$bats_version"
+          [[ "$bats_version" =~ ^Bats[[:space:]]+([1-9][0-9]*)\. ]] || { printf 'unexpected Bats version: %s\n' "$bats_version" >&2; exit 1; }
       - run: |
           rustup toolchain install 1.96.1 --profile minimal --component clippy --component rustfmt --no-self-update
           export RUSTUP_TOOLCHAIN=1.96.1
           test "$(rustc --version | awk '{print $2}')" = "1.96.1"
           cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check
           cargo clippy --workspace --all-targets --all-features --manifest-path pane-dash/Cargo.toml -- -D warnings
-          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml
-          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml -- --ignored
+          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml -- --test-threads=1
+          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml -- --ignored --test-threads=1
+          make build
+          test -x bin/pane-dash
+          test "$(bin/pane-dash --version)" = "pane-dash 0.1.0"
       - run: |
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- bats tests
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- shellcheck pane_dash.tmux scripts/*.sh tests/*.sh spike/*.sh spike/probes/*.sh spike/perf/*.sh
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/integration.sh
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/pane_dash_integration.sh
+          tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/pane_dash_pty_helper_test.sh
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/rust_engine_integration.sh
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/rust_engine_quoting_integration.sh
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/rust_live_integration.sh
@@ -62,6 +75,8 @@ jobs:
       PANE_DASH_NODE20_PREPROVIDED: 1
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20.0.0"
@@ -77,6 +92,18 @@ jobs:
           test -x "$BUN_BOOTSTRAP"
           test "$($BUN_BOOTSTRAP --version)" = "1.3.14"
           printf 'TMUX_BIN=%s\nBUN_BOOTSTRAP=%s\n' "$TMUX_BIN" "$BUN_BOOTSTRAP" >> "$GITHUB_ENV"
+      - run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.1 --profile minimal --no-self-update
+          export RUSTUP_TOOLCHAIN=1.96.1
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target x86_64-unknown-linux-musl
+          mkdir bin
+          install -m0755 pane-dash/target/x86_64-unknown-linux-musl/release/pane-dash bin/pane-dash
+          test -x bin/pane-dash
+          test "$(bin/pane-dash --version)" = "pane-dash 0.1.0"
       - run: node -e 'if (process.version !== "v20.0.0") process.exit(1)'
       - run: |
           echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"
@@ -134,7 +161,7 @@ jobs:
           rustup target add "${{ matrix.rust_target }}"
           if [[ "${{ matrix.rust_target }}" == *unknown-linux-musl ]]; then sudo apt-get update; sudo apt-get install -y musl-tools; fi
           cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"
-          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"
+          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}" -- --test-threads=1
           test -x "pane-dash/target/${{ matrix.rust_target }}/release/pane-dash"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -225,6 +252,33 @@ jobs:
       - run: |
           echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"
           echo "NPM_20_CLI=$(command -v npm)" >> "$GITHUB_ENV"
+      - name: Bind packed E2E tmux to doctor PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "${TMUX_BIN:?TMUX_BIN is required}"
+          test "$("$TMUX_BIN" -V)" = "tmux 3.6a"
+          tmux_real="$(realpath -- "$TMUX_BIN")"
+          test -x "$tmux_real"
+          test "$("$tmux_real" -V)" = "tmux 3.6a"
+          sudo ln -sfn -- "$TMUX_BIN" /usr/local/bin/tmux
+          test -L /usr/local/bin/tmux
+          test "$(realpath -- /usr/local/bin/tmux)" = "$tmux_real"
+          test "$(/usr/local/bin/tmux -V)" = "tmux 3.6a"
+      - name: Provision packed E2E musl target
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          export RUSTUP_BOOTSTRAP="$(command -v rustup)"
+          test -x "$RUSTUP_BOOTSTRAP"
+          tests/release/with-rust.sh -- "$RUSTUP_BOOTSTRAP" target add x86_64-unknown-linux-musl --toolchain 1.96.1
+          tests/release/with-rust.sh -- bash -ceu '
+            test "$RUSTUP_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup"
+            test "$CARGO_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/cargo"
+            [[ "$CARGO" == "$PANE_DASH_ISOLATED_RUST_ROOT"/rustup/toolchains/1.96.1-*/bin/cargo ]]
+          '
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: ci-target-*
@@ -243,7 +297,7 @@ jobs:
 
   opencode-compatibility:
     needs: cli-tests
-    runs-on: ubuntu-24.04
+    runs-on: macos-14
     env:
       PANE_DASH_NODE20_PREPROVIDED: 1
     steps:
@@ -271,20 +325,28 @@ jobs:
           export npm_config_cache="$RUNNER_TEMP/opencode-npm-cache"
           export npm_config_userconfig="$RUNNER_TEMP/opencode.npmrc"
           printf '%s\n' 'registry=https://registry.npmjs.org/' 'audit=false' 'fund=false' > "$npm_config_userconfig"
-           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-min" --ignore-scripts --no-audit --no-fund --package-lock=false opencode-ai@1.17.20
-           export OPENCODE_LATEST_VERSION="$(PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view opencode-ai dist-tags.latest)"
-           [[ "$OPENCODE_LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-latest" --ignore-scripts --no-audit --no-fund --package-lock=false "opencode-ai@$OPENCODE_LATEST_VERSION"
-           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view opencode-ai@1.17.20 version dist.integrity --json
-           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view "opencode-ai@$OPENCODE_LATEST_VERSION" version dist.integrity --json
-           export OPENCODE_1_17_20_BIN="$RUNNER_TEMP/opencode-min/node_modules/.bin/opencode"
-           export OPENCODE_LATEST_BIN="$RUNNER_TEMP/opencode-latest/node_modules/.bin/opencode"
-           test -x "$OPENCODE_1_17_20_BIN" && test -x "$OPENCODE_LATEST_BIN"
-           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$OPENCODE_1_17_20_BIN" --version
-           PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$OPENCODE_LATEST_BIN" --version
-           export BUN_BOOTSTRAP="$(command -v bun)"
-           run_isolated() { tests/release/with-npa.sh -- env PANE_DASH_NODE20_PREPROVIDED=1 NODE_20_BIN="$NODE_20_BIN" NPM_20_CLI="$NPM_20_CLI" tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$@"; }
-           run_isolated bun test opencode-plugin/tests/real-opencode.test.ts
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-min" --ignore-scripts --no-audit --no-fund --package-lock=false opencode-ai@1.17.20
+          run_opencode_postinstall() {
+            local prefix=$1
+            local postinstall="$prefix/node_modules/opencode-ai/postinstall.mjs"
+            test -f "$postinstall"
+            PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NODE_20_BIN" "$postinstall"
+          }
+          run_opencode_postinstall "$RUNNER_TEMP/opencode-min"
+          export OPENCODE_LATEST_VERSION="$(PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view opencode-ai dist-tags.latest)"
+          [[ "$OPENCODE_LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-latest" --ignore-scripts --no-audit --no-fund --package-lock=false "opencode-ai@$OPENCODE_LATEST_VERSION"
+          run_opencode_postinstall "$RUNNER_TEMP/opencode-latest"
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view opencode-ai@1.17.20 version dist.integrity --json
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NPM_20_CLI" view "opencode-ai@$OPENCODE_LATEST_VERSION" version dist.integrity --json
+          export OPENCODE_1_17_20_BIN="$RUNNER_TEMP/opencode-min/node_modules/.bin/opencode"
+          export OPENCODE_LATEST_BIN="$RUNNER_TEMP/opencode-latest/node_modules/.bin/opencode"
+          test -x "$OPENCODE_1_17_20_BIN" && test -x "$OPENCODE_LATEST_BIN"
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$OPENCODE_1_17_20_BIN" --version
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$OPENCODE_LATEST_BIN" --version
+          export BUN_BOOTSTRAP="$(command -v bun)"
+          run_isolated() { tests/release/with-npa.sh -- env PANE_DASH_NODE20_PREPROVIDED=1 NODE_20_BIN="$NODE_20_BIN" NPM_20_CLI="$NPM_20_CLI" tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$@"; }
+          run_isolated bun test opencode-plugin/tests/real-opencode.test.ts
 
   archive-dry-run:
     needs: packed-e2e

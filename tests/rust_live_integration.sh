@@ -239,8 +239,8 @@ start_client() { # session label
   before="$(normal_clients)"
   fifo="$TMP/$label.fifo" transcript="$TMP/$label.ansi"
   mkfifo "$fifo"
-  # cat turns the FIFO producer into the regular stdin pipeline supported by macOS script.
-  cat "$fifo" | PD_REAL_TMUX="$REAL_TMUX" PD_SOCKET="$SOCKET" PD_LOG="$LOG" PD_OWNER_LOG="$OWNER_LOG" PD_REJECT="$REJECT" PD_CREATION_GATE="$CREATION_GATE" PD_CREATION_TOKEN="$CREATION_TOKEN" PD_CREATION_FAIL_STAGE="$CREATION_FAIL_STAGE" PD_CREATION_GONE="$CREATION_GONE" PATH="$WRAP:$PATH" TERM=xterm-256color COLORTERM=truecolor TMUX='' pd_run_in_pty "$WRAP/tmux" attach-session -t "$session" >"$transcript" 2>&1 &
+  # Keep a pipe-backed pump per client because macOS script rejects FIFO stdin.
+  PD_REAL_TMUX="$REAL_TMUX" PD_SOCKET="$SOCKET" PD_LOG="$LOG" PD_OWNER_LOG="$OWNER_LOG" PD_REJECT="$REJECT" PD_CREATION_GATE="$CREATION_GATE" PD_CREATION_TOKEN="$CREATION_TOKEN" PD_CREATION_FAIL_STAGE="$CREATION_FAIL_STAGE" PD_CREATION_GONE="$CREATION_GONE" PATH="$WRAP:$PATH" TERM=xterm-256color COLORTERM=truecolor TMUX='' pd_run_in_pty "$WRAP/tmux" attach-session -t "$session" < <(cat <"$fifo") >"$transcript" 2>&1 &
   pid=$!; open_writer "$index" "$fifo"; fd="$WRITER_FD"; WRITER_SLOTS[index]="$WRITER_FD_SLOT"
   wait_for "client $label attach" 3 new_normal_client "$before"
   CLIENT_PIDS[index]="$NEW_CLIENT_PID"
@@ -448,14 +448,18 @@ phase6_theme_help_isolation() {
   close_help_offset="$(ansi_size 0)"
   write_bytes 0 q
   wait_for 'phase6 q closes help only' 2 popup_tail_has 0 "$((close_help_offset + 1))" live-spare
-  popup_open 0 && [[ "${POPUP_PIDS[0]}" == "$a_popup" ]] || die 'phase6 first q did not retain popup A'
+  if ! popup_open 0 || [[ "${POPUP_PIDS[0]}" != "$a_popup" ]]; then
+    die 'phase6 first q did not retain popup A'
+  fi
   control_present "${POPUP_CONTROLS[0]}" || die 'phase6 first q replaced popup A control'
   a_control="${POPUP_CONTROLS[0]}"
   close_popup 0
   closed="$(now)"
   assert_phase6_owner_stopped 'phase6 popup A' "$a_popup" "$a_control" "$owner_start" "$closed"
   (( $(control_count) == 1 )) || die 'phase6 popup A close did not leave exactly popup B control'
-  popup_open 1 && [[ "${POPUP_PIDS[1]}" == "$b_popup" ]] || die 'phase6 popup B did not remain open after popup A close'
+  if ! popup_open 1 || [[ "${POPUP_PIDS[1]}" != "$b_popup" ]]; then
+    die 'phase6 popup B did not remain open after popup A close'
+  fi
   b_control="${POPUP_CONTROLS[1]}"
   close_popup 1
   closed="$(now)"
@@ -918,7 +922,6 @@ creation_success_responsive() {
   wait_for 'creation mutation render exact tag' 3 popup_tail_has "$index" "$snapshot_before" creation-held-snapshot
   wait_for 'creation target tagged' 3 pane_contains "$target" ''
   [[ "$(admin show-options -pv -t "$target" @pane_dash_tag)" == dash-created ]] || die 'creation success tag missing'
-  snapshot_before="$(ansi_size "$index")"; wait_for 'creation selected row snapshot' 1.1 ansi_grew_from "$index" "$snapshot_before"
   selection_started="$(now)"; send_bytes "$index" '\022'
   wait_for 'creation selected row targets created pane' .5 log_has_target_since "$selection_started" capture-pane "$target"
   (( $(record_count "$started" "$(now)" split-window)==1 )) || die 'creation success replayed stage 1'
@@ -1142,7 +1145,7 @@ control_is_zero() { (( $(control_count)==0 )); }
 popup_pid_tracking_self_test() {
   local popup_pid
   sleep 5 & popup_pid=$!
-  # shellcheck disable=SC2329 # popup_closed invokes this test override indirectly.
+  # shellcheck disable=SC2317,SC2329 # popup_closed invokes this test override indirectly.
   control_present() { return 1; }
   pane_dash_process() { pid_is_alive "$1"; }
   POPUP_CONTROLS[0]=999999

@@ -205,6 +205,76 @@ function assertTmuxProvisioning(workflow: ParsedWorkflow, workflowName: string):
   }
 }
 
+const wrappedBatsCommand = "tests/release/with-rust.sh -- scripts/release/clean-room.sh -- bats tests"
+
+const isBatsProvision = (step: ParsedStep): boolean => {
+  const run = step.run ?? ""
+  return run.includes("sudo apt-get install -y bats") &&
+    run.includes('test "$(command -v bats)" = "/usr/bin/bats"') &&
+    run.includes("bats_version=$(/usr/bin/bats --version)") &&
+    run.includes('test -n "$bats_version"') &&
+    run.includes('[[ "$bats_version" =~ ^Bats[[:space:]]+([1-9][0-9]*)\\. ]]')
+}
+
+function assertBatsProvisioning(workflow: ParsedWorkflow): void {
+  const rust = workflow.jobs["rust"]
+  if (!rust) throw new Error("rust job is missing")
+  const provision = rust.steps.findIndex(isBatsProvision)
+  const bats = rust.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === wrappedBatsCommand))
+  if (bats < 0) throw new Error("rust job must run Bats through with-rust and clean-room")
+  if (provision < 0) throw new Error("rust job must provision distro Bats at /usr/bin")
+  if (provision >= bats) throw new Error("rust job must provision Bats before the wrapped Bats command")
+}
+
+const rustToolchainInstall = "rustup toolchain install 1.96.1 --profile minimal --component clippy --component rustfmt --no-self-update"
+const rustLiveCommand = "tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/rust_live_integration.sh"
+const cargoTestPrefix = "cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml"
+const rustGateCommands = [
+  "cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check",
+  "cargo clippy --workspace --all-targets --all-features --manifest-path pane-dash/Cargo.toml -- -D warnings",
+  `${cargoTestPrefix} -- --test-threads=1`,
+  `${cargoTestPrefix} -- --ignored --test-threads=1`,
+] as const
+const rustBuildCommands = [
+  "make build",
+  "test -x bin/pane-dash",
+  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.0"',
+] as const
+
+function assertRustLiveBinaryBuild(workflow: ParsedWorkflow): void {
+  const rust = workflow.jobs["rust"]
+  if (!rust) throw new Error("rust job is missing")
+  const gateIndex = rust.steps.findIndex((step) => {
+    const commands = stepCommands(step).map((line) => line.trim())
+    return commands.includes(rustToolchainInstall) &&
+      commands.includes("export RUSTUP_TOOLCHAIN=1.96.1") &&
+      rustGateCommands.every((command) => commands.includes(command))
+  })
+  if (gateIndex < 0) throw new Error("rust job must run its pinned Rust gates in one step")
+
+  const liveIndex = rust.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === rustLiveCommand))
+  if (liveIndex < 0) throw new Error("rust job must run rust_live_integration through with-rust and clean-room")
+
+  const gateCommands = stepCommands(rust.steps[gateIndex]!).map((line) => line.trim())
+  if (rust.steps.some((step) => stepCommands(step).some((line) => /^cargo build(?:\s|$)/.test(line.trim())))) {
+    throw new Error("rust job must use make build instead of bare cargo build")
+  }
+  const gateEnd = Math.max(...rustGateCommands.map((command) => gateCommands.indexOf(command)))
+  const buildPositions = rustBuildCommands.map((command) => gateCommands.indexOf(command))
+  if (buildPositions.some((position) => position < 0)) throw new Error("rust job must run make build and assert the built pane-dash binary")
+  if (buildPositions[0]! <= gateEnd) throw new Error("rust job must run make build after the Rust gates")
+  if (!(buildPositions[0]! < buildPositions[1]! && buildPositions[1]! < buildPositions[2]!)) {
+    throw new Error("rust job must assert pane-dash after make build")
+  }
+  const buildLocations = rust.steps.flatMap((step, index) =>
+    stepCommands(step).filter((line) => line.trim() === rustBuildCommands[0]).map(() => index),
+  )
+  if (buildLocations.length !== 1) throw new Error("rust job must run exactly one make build")
+  const buildIndex = buildLocations[0]!
+  if (buildIndex !== gateIndex) throw new Error("rust job must run make build in the pinned Rust gate step")
+  if (liveIndex <= buildIndex) throw new Error("rust job must build pane-dash before rust_live_integration")
+}
+
 function assertArchiveDryRunDependencies(workflow: ParsedWorkflow): void {
   const job = workflow.jobs["archive-dry-run"]
   if (!job) throw new Error("archive-dry-run is missing")
@@ -224,9 +294,120 @@ function assertPackedE2EGraph(workflow: ParsedWorkflow): void {
   }
 }
 
+function assertCiPackedE2EToolchain(workflow: ParsedWorkflow): void {
+  const job = workflow.jobs["packed-e2e"]
+  if (!job) throw new Error("packed-e2e is missing")
+  const target = "x86_64-unknown-linux-musl"
+  const provisionIndex = job.steps.findIndex((step) => {
+    const run = step.run ?? ""
+    return run.includes("sudo apt-get update") &&
+      run.includes("sudo apt-get install -y musl-tools") &&
+      run.includes('export RUSTUP_BOOTSTRAP="$(command -v rustup)"') &&
+      run.includes(`tests/release/with-rust.sh -- "$RUSTUP_BOOTSTRAP" target add ${target} --toolchain 1.96.1`) &&
+      run.includes("tests/release/with-rust.sh -- bash -ceu") &&
+      run.includes('test "$RUSTUP_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup"') &&
+      run.includes('test "$CARGO_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/cargo"') &&
+      run.includes('[[ "$CARGO" == "$PANE_DASH_ISOLATED_RUST_ROOT"/rustup/toolchains/1.96.1-*/bin/cargo ]]')
+  })
+  if (provisionIndex < 0) throw new Error("packed-e2e must provision musl-tools and its isolated Rust target")
+  const provisionRun = job.steps[provisionIndex]!.run ?? ""
+  const provisionMarkers = [
+    "sudo apt-get update",
+    "sudo apt-get install -y musl-tools",
+    'export RUSTUP_BOOTSTRAP="$(command -v rustup)"',
+    `"$RUSTUP_BOOTSTRAP" target add ${target} --toolchain 1.96.1`,
+    "tests/release/with-rust.sh -- bash -ceu",
+    'test "$RUSTUP_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup"',
+    'test "$CARGO_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/cargo"',
+    '[[ "$CARGO" == "$PANE_DASH_ISOLATED_RUST_ROOT"/rustup/toolchains/1.96.1-*/bin/cargo ]]',
+  ]
+  let previous = -1
+  for (const marker of provisionMarkers) {
+    const position = provisionRun.indexOf(marker, previous + 1)
+    if (position <= previous) throw new Error("packed-e2e musl provisioning must identify and use the isolated Rust toolchain in order")
+    previous = position
+  }
+  const packedIndex = job.steps.findIndex((step) => (step.run ?? "").includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts"))
+  if (packedIndex < 0) throw new Error("packed-e2e fixture command is missing")
+  if (provisionIndex >= packedIndex) throw new Error("packed-e2e must provision its isolated musl target before the fixture")
+}
+
+function assertCiPackedE2ETmuxBinding(workflow: ParsedWorkflow): void {
+  const packed = workflow.jobs["packed-e2e"]
+  if (!packed) throw new Error("packed-e2e is missing")
+  const binding = (step: ParsedStep): boolean => {
+    const run = step.run ?? ""
+    return run.includes('test -x "${TMUX_BIN:?TMUX_BIN is required}"') &&
+      run.includes('test "$("$TMUX_BIN" -V)" = "tmux 3.6a"') &&
+      run.includes('tmux_real="$(realpath -- "$TMUX_BIN")"') &&
+      run.includes('test "$("$tmux_real" -V)" = "tmux 3.6a"') &&
+      run.includes('sudo ln -sfn -- "$TMUX_BIN" /usr/local/bin/tmux') &&
+      run.includes("test -L /usr/local/bin/tmux") &&
+      run.includes('test "$(realpath -- /usr/local/bin/tmux)" = "$tmux_real"') &&
+      run.includes('test "$(/usr/local/bin/tmux -V)" = "tmux 3.6a"')
+  }
+  const bindingIndex = packed.steps.findIndex(binding)
+  if (bindingIndex < 0) throw new Error("packed-e2e must bind its verified tmux binary into /usr/local/bin")
+  if (workflow.jobs && Object.values(workflow.jobs).some(job => job.name !== "packed-e2e" && job.steps.some(binding))) {
+    throw new Error("the fixed tmux binding must be limited to packed-e2e")
+  }
+  const packedIndex = packed.steps.findIndex((step) => (step.run ?? "").includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts"))
+  if (packedIndex < 0) throw new Error("packed-e2e fixture command is missing")
+  if (bindingIndex >= packedIndex) throw new Error("packed-e2e must bind tmux before the fixture")
+}
+
+function assertOpenCodeProvisioning(workflow: ParsedWorkflow): void {
+  const job = workflow.jobs["opencode-compatibility"]
+  if (!job) throw new Error("opencode-compatibility is missing")
+  const step = job.steps.find((candidate) => {
+    const run = candidate.run ?? ""
+    return run.includes("opencode-ai@1.17.20") && run.includes("opencode-ai@$OPENCODE_LATEST_VERSION")
+  })
+  if (!step) throw new Error("opencode compatibility installs are missing")
+  const run = step.run ?? ""
+  const markers = [
+    '"$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-min" --ignore-scripts',
+    'run_opencode_postinstall "$RUNNER_TEMP/opencode-min"',
+    '"$NPM_20_CLI" install --prefix "$RUNNER_TEMP/opencode-latest" --ignore-scripts',
+    'run_opencode_postinstall "$RUNNER_TEMP/opencode-latest"',
+    '"$NPM_20_CLI" view opencode-ai@1.17.20 version dist.integrity --json',
+    '"$NPM_20_CLI" view "opencode-ai@$OPENCODE_LATEST_VERSION" version dist.integrity --json',
+    '"$OPENCODE_1_17_20_BIN" --version',
+    '"$OPENCODE_LATEST_BIN" --version',
+  ]
+  let previous = -1
+  for (const marker of markers) {
+    const position = run.indexOf(marker, previous + 1)
+    if (position <= previous) throw new Error("OpenCode installs, targeted postinstalls, integrity checks, and version checks are out of order")
+    previous = position
+  }
+  if (!run.includes('local postinstall="$prefix/node_modules/opencode-ai/postinstall.mjs"')) throw new Error("OpenCode postinstall must target opencode-ai only")
+  if (!run.includes('tests/release/with-node20.sh -- scripts/release/clean-room.sh -- "$NODE_20_BIN" "$postinstall"')) throw new Error("OpenCode postinstall must run through exact Node20 and clean-room")
+  if (run.includes("npm rebuild") || run.includes("npm run") || run.includes("npm exec")) throw new Error("OpenCode compatibility must not run broad npm scripts")
+}
+
+function assertOpenCodeMacOsSandbox(workflowText: string, harnessText: string): void {
+  const body = job(workflowText, "opencode-compatibility")
+  if (!/^    runs-on: macos-14$/m.test(body)) throw new Error("opencode-compatibility must run on macos-14 for the Seatbelt harness")
+  const markers = [
+    "/usr/bin/sandbox-exec -p",
+    "(version 1) (allow default) (deny network*)",
+    '(allow network-outbound (remote ip "localhost:*"))',
+    "(allow network-outbound (remote unix-socket))",
+  ]
+  let previous = -1
+  for (const marker of markers) {
+    const position = harnessText.indexOf(marker, previous + 1)
+    if (position <= previous) throw new Error("real OpenCode harness must retain the sandbox-exec network denial with loopback-only access")
+    previous = position
+  }
+}
+
 function assertCiCliNpaIsolation(workflow: ParsedWorkflow): void {
   const ciCli = workflow.jobs["ci-cli"]
   if (!ciCli) throw new Error("ci-cli is missing")
+  const checkout = ciCli.steps.find((step) => step.uses?.startsWith("actions/checkout@"))
+  if (checkout?.with["fetch-depth"] !== "0") throw new Error("ci-cli must fetch full history for the release fixture anchor")
   const command = "bun test scripts/release/tests release/tests"
   const steps = ciCli.steps.filter((step) => (step.run ?? "").includes(command))
   if (steps.length !== 1) throw new Error("ci-cli must run the release test suites exactly once")
@@ -244,6 +425,73 @@ function assertCiCliNpaIsolation(workflow: ParsedWorkflow): void {
     if (position <= previous) throw new Error("ci-cli release tests must use with-npa before Node20 and clean-room")
     previous = position
   }
+}
+
+const ciCliMuslTarget = "x86_64-unknown-linux-musl"
+const ciCliMuslToolchainInstall = "rustup toolchain install 1.96.1 --profile minimal --no-self-update"
+const ciCliMuslCargoBuild = `cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target ${ciCliMuslTarget}`
+const ciCliMuslBuildCommands = [
+  "set -euo pipefail",
+  ciCliMuslToolchainInstall,
+  "export RUSTUP_TOOLCHAIN=1.96.1",
+  `rustup target add ${ciCliMuslTarget}`,
+  "sudo apt-get update",
+  "sudo apt-get install -y musl-tools",
+  ciCliMuslCargoBuild,
+  "mkdir bin",
+  `install -m0755 pane-dash/target/${ciCliMuslTarget}/release/pane-dash bin/pane-dash`,
+  "test -x bin/pane-dash",
+  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.0"',
+] as const
+
+function assertCiCliMuslFixture(workflow: ParsedWorkflow): void {
+  const ciCli = workflow.jobs["ci-cli"]
+  if (!ciCli) throw new Error("ci-cli is missing")
+  const provisionIndex = ciCli.steps.findIndex((step) => {
+    const run = step.run ?? ""
+    return run.includes("scripts/release/ci-tmux.sh") && run.includes("export TMUX_BIN") && run.includes("BUN_BOOTSTRAP=") && run.includes("GITHUB_ENV")
+  })
+  if (provisionIndex < 0) throw new Error("ci-cli must provision tmux and Bun before the musl fixture")
+  const fixtureIndex = ciCli.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === ciCliMuslToolchainInstall))
+  if (fixtureIndex < 0) throw new Error("ci-cli musl fixture build is missing")
+  if (fixtureIndex <= provisionIndex) throw new Error("ci-cli musl fixture must follow tmux and Bun provisioning")
+
+  const nodeWrapperIndex = ciCli.steps.findIndex((step) => (step.run ?? "").includes("tests/release/with-node20.sh --"))
+  if (nodeWrapperIndex < 0 || fixtureIndex >= nodeWrapperIndex) throw new Error("ci-cli musl fixture must run before Node20 wrapper tests")
+  const releaseTestsIndex = ciCli.steps.findIndex((step) => (step.run ?? "").includes("scripts/release/tests"))
+  if (releaseTestsIndex < 0 || fixtureIndex >= releaseTestsIndex) throw new Error("ci-cli musl fixture must run before scripts/release tests")
+
+  const commands = stepCommands(ciCli.steps[fixtureIndex]!).map((line) => line.trim())
+  if (commands.some((command) => /^make(?:\s|$)/.test(command))) throw new Error("ci-cli musl fixture must not use plain make")
+  if (commands.some((command) => /^cargo build(?:\s|$)/.test(command) && command !== ciCliMuslCargoBuild)) {
+    throw new Error("ci-cli musl fixture must not use the default GNU cargo target")
+  }
+  const positions = ciCliMuslBuildCommands.map((command) => commands.indexOf(command))
+  if (positions.some((position) => position < 0)) throw new Error("ci-cli must run the exact pinned musl fixture commands")
+  if (!positions.every((position, index) => index === 0 || position > positions[index - 1]!)) {
+    throw new Error("ci-cli musl fixture commands are out of order")
+  }
+  const aptUpdatePosition = positions[4]!
+  const aptInstallPosition = positions[5]!
+  if (aptInstallPosition !== aptUpdatePosition + 1) throw new Error("ci-cli must update apt immediately before installing musl-tools")
+}
+
+function assertSerialCargoTestCommands(body: string, expected: string[], label: string): void {
+  const commands = body.split("\n").map((line) => line.trim()).filter((line) => line.startsWith(cargoTestPrefix))
+  if (JSON.stringify(commands) !== JSON.stringify(expected)) throw new Error(`${label} must use exact serial commands`)
+}
+
+function assertRustTestSerialization(body: string): void {
+  const expected = [
+    `${cargoTestPrefix} -- --test-threads=1`,
+    `${cargoTestPrefix} -- --ignored --test-threads=1`,
+  ]
+  assertSerialCargoTestCommands(body, expected, "rust process-spawning tests")
+}
+
+function assertFourTargetTestSerialization(body: string): void {
+  const target = `${cargoTestPrefix} --target "\${{ matrix.rust_target }}"`
+  assertSerialCargoTestCommands(body, [`${target} -- --test-threads=1`], "four-target process-spawning tests")
 }
 
 function assertPromotionGraph(workflow: ParsedWorkflow): void {
@@ -266,7 +514,15 @@ function assertWorkflowGraph(text: string, workflowName: string): void {
   assertArtifactGraph(workflow)
   assertTmuxProvisioning(workflow, workflowName)
   assertPackedE2EGraph(workflow)
-  if (workflowName === "ci.yml") assertCiCliNpaIsolation(workflow)
+  if (workflowName === "ci.yml") {
+    assertCiCliNpaIsolation(workflow)
+    assertCiCliMuslFixture(workflow)
+    assertCiPackedE2EToolchain(workflow)
+    assertCiPackedE2ETmuxBinding(workflow)
+    assertOpenCodeProvisioning(workflow)
+    assertBatsProvisioning(workflow)
+    assertRustLiveBinaryBuild(workflow)
+  }
   if (workflowName === "release.yml") assertPromotionGraph(workflow)
 }
 
@@ -290,7 +546,7 @@ test("CI is read-only, ordered, and runs all four target commands plus isolated 
     "x86_64-unknown-linux-musl",
   ]) expect(text).toContain(target)
   expect(text).toContain('cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"')
-  expect(text).toContain('cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}"')
+  expect(text).toContain('cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${{ matrix.rust_target }}" -- --test-threads=1')
   for (const command of [
     "cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check",
     "cargo clippy --workspace --all-targets --all-features --manifest-path pane-dash/Cargo.toml -- -D warnings",
@@ -306,6 +562,135 @@ test("CI is read-only, ordered, and runs all four target commands plus isolated 
   }
   expect(text.indexOf("needs: version-check")).toBeLessThan(text.indexOf("needs: rust"))
   expect(text.indexOf("needs: rust")).toBeLessThan(text.indexOf("needs: cli-tests"))
+})
+
+test("Rust and four-target process-spawning tests reject missing or parallel commands", async () => {
+  const text = await workflow("ci.yml")
+  const rust = job(text, "rust")
+  const fourTargets = job(text, "four-targets")
+  const active = `${cargoTestPrefix} -- --test-threads=1`
+  const ignored = `${cargoTestPrefix} -- --ignored --test-threads=1`
+  const target = `${cargoTestPrefix} --target "\${{ matrix.rust_target }}" -- --test-threads=1`
+
+  expect(() => assertRustTestSerialization(rust)).not.toThrow()
+  expect(() => assertRustTestSerialization(rust.replace(ignored, ""))).toThrow(/exact serial commands/)
+  expect(() => assertRustTestSerialization(rust.replace(active, active.replace(" -- --test-threads=1", "")))).toThrow(/exact serial commands/)
+  const reversed = rust.replace(active, "__active__").replace(ignored, active).replace("__active__", ignored)
+  expect(() => assertRustTestSerialization(reversed)).toThrow(/exact serial commands/)
+
+  expect(() => assertFourTargetTestSerialization(fourTargets)).not.toThrow()
+  expect(() => assertFourTargetTestSerialization(fourTargets.replace(target, ""))).toThrow(/exact serial commands/)
+  expect(() => assertFourTargetTestSerialization(fourTargets.replace(target, target.replace(" -- --test-threads=1", "")))).toThrow(/exact serial commands/)
+})
+
+test("Rust builds the live-test binary after its gates and rejects missing, reordered, or bare cargo builds", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  const rust = parsed.jobs["rust"]
+  if (!rust) throw new Error("rust job is missing")
+  const gateIndex = rust.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === rustBuildCommands[0]))
+  if (gateIndex < 0) throw new Error("fixture workflow is missing the Rust build step")
+  const gateRun = rust.steps[gateIndex]!.run ?? ""
+  const buildBlock = rustBuildCommands.join("\n")
+  const withGateRun = (run: string): ParsedWorkflow => ({
+    ...parsed,
+    jobs: {
+      ...parsed.jobs,
+      rust: {
+        ...rust,
+        steps: rust.steps.map((step, index) => index === gateIndex ? { ...step, run } : step),
+      },
+    },
+  })
+
+  expect(() => assertRustLiveBinaryBuild(parsed)).not.toThrow()
+  expect(() => assertRustLiveBinaryBuild(withGateRun(gateRun.replace(buildBlock, "")))).toThrow(/make build/)
+  expect(() => assertRustLiveBinaryBuild(withGateRun(gateRun.replace(buildBlock, "").replace("cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check", `${buildBlock}\ncargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check`)))).toThrow(/after the Rust gates/)
+  expect(() => assertRustLiveBinaryBuild(withGateRun(gateRun.replace("make build", "cargo build --release --locked --manifest-path pane-dash/Cargo.toml")))).toThrow(/make build|bare cargo build/)
+})
+
+test("ci-cli builds the pinned musl fixture before Node20 release tests and rejects host builds", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  const ciCli = parsed.jobs["ci-cli"]
+  if (!ciCli) throw new Error("ci-cli is missing")
+  const fixtureIndex = ciCli.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === ciCliMuslToolchainInstall))
+  if (fixtureIndex < 0) throw new Error("fixture workflow is missing the ci-cli musl build step")
+  const fixtureRun = ciCli.steps[fixtureIndex]!.run ?? ""
+  const buildCommand = ciCliMuslCargoBuild
+  const withFixtureRun = (run: string): ParsedWorkflow => ({
+    ...parsed,
+    jobs: {
+      ...parsed.jobs,
+      "ci-cli": {
+        ...ciCli,
+        steps: ciCli.steps.map((step, index) => index === fixtureIndex ? { ...step, run } : step),
+      },
+    },
+  })
+  const withCiCliSteps = (steps: ParsedStep[]): ParsedWorkflow => ({
+    ...parsed,
+    jobs: { ...parsed.jobs, "ci-cli": { ...ciCli, steps } },
+  })
+
+  expect(() => assertCiCliMuslFixture(parsed)).not.toThrow()
+  expect(() => assertCiCliMuslFixture(withFixtureRun(fixtureRun.replace("sudo apt-get update\n", "")))).toThrow(/exact pinned musl/)
+  expect(() => assertCiCliMuslFixture(withFixtureRun(fixtureRun.replace(buildCommand, "make build")))).toThrow(/plain make/)
+  expect(() => assertCiCliMuslFixture(withFixtureRun(fixtureRun.replace(buildCommand, "cargo build --release --locked --manifest-path pane-dash/Cargo.toml")))).toThrow(/default GNU/)
+
+  const nodeWrapperIndex = ciCli.steps.findIndex((step) => (step.run ?? "").includes("tests/release/with-node20.sh --"))
+  const reorderedSteps = [...ciCli.steps]
+  const fixtureStep = reorderedSteps.splice(fixtureIndex, 1)[0]!
+  reorderedSteps.splice(nodeWrapperIndex, 0, fixtureStep)
+  expect(() => assertCiCliMuslFixture(withCiCliSteps(reorderedSteps))).toThrow(/before Node20 wrapper tests/)
+})
+
+test("packed E2E provisions musl in the isolated Rust toolchain before its fixture", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  expect(() => assertCiPackedE2EToolchain(parsed)).not.toThrow()
+
+  const packed = parsed.jobs["packed-e2e"]!
+  const provisionIndex = packed.steps.findIndex((step) => (step.run ?? "").includes('"$RUSTUP_BOOTSTRAP" target add x86_64-unknown-linux-musl --toolchain 1.96.1'))
+  const broken = packed.steps.map((step, index) => index === provisionIndex ? { ...step, run: (step.run ?? "").replace('test "$RUSTUP_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup"', "") } : step)
+  expect(() => assertCiPackedE2EToolchain({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: broken } } })).toThrow(/isolated Rust target/)
+})
+
+test("packed E2E binds the verified tmux into the doctor PATH before its fixture", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  expect(() => assertCiPackedE2ETmuxBinding(parsed)).not.toThrow()
+
+  const packed = parsed.jobs["packed-e2e"]!
+  const bindingIndex = packed.steps.findIndex((step) => (step.run ?? "").includes("sudo ln -sfn -- \"$TMUX_BIN\" /usr/local/bin/tmux"))
+  const fixtureIndex = packed.steps.findIndex((step) => (step.run ?? "").includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts"))
+  const withoutBinding = packed.steps.filter((_, index) => index !== bindingIndex)
+  expect(() => assertCiPackedE2ETmuxBinding({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: withoutBinding } } })).toThrow(/bind its verified tmux/)
+
+  const reordered = [...packed.steps]
+  const bindingStep = reordered.splice(bindingIndex, 1)[0]!
+  reordered.splice(fixtureIndex, 0, bindingStep)
+  expect(() => assertCiPackedE2ETmuxBinding({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: reordered } } })).toThrow(/before the fixture/)
+})
+
+test("OpenCode compatibility runs only its targeted postinstalls before integrity and version checks", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  expect(() => assertOpenCodeProvisioning(parsed)).not.toThrow()
+
+  const job = parsed.jobs["opencode-compatibility"]!
+  const stepIndex = job.steps.findIndex((step) => (step.run ?? "").includes("run_opencode_postinstall"))
+  const broken = job.steps.map((step, index) => index === stepIndex ? { ...step, run: (step.run ?? "").replace('run_opencode_postinstall "$RUNNER_TEMP/opencode-latest"', "") } : step)
+  expect(() => assertOpenCodeProvisioning({ ...parsed, jobs: { ...parsed.jobs, "opencode-compatibility": { ...job, steps: broken } } })).toThrow(/out of order/)
+})
+
+test("OpenCode compatibility stays on macOS for the Seatbelt loopback sandbox", async () => {
+  const text = await workflow("ci.yml")
+  const harness = await readFile(join(root, "opencode-plugin", "tests", "real-opencode.test.ts"), "utf8")
+  expect(() => assertOpenCodeMacOsSandbox(text, harness)).not.toThrow()
+
+  const ubuntuMutation = text.replace("    runs-on: macos-14", "    runs-on: ubuntu-24.04")
+  expect(() => assertOpenCodeMacOsSandbox(ubuntuMutation, harness)).toThrow(/macos-14/)
 })
 
 test("archive-dry-run is the terminal CI status and reaches the required CI graph", async () => {
@@ -577,6 +962,33 @@ test("workflow graph rejects clean-room work without a prior tmux and Bun export
   const nextStep = text.indexOf("      - run:", provisionStart)
   const broken = text.slice(0, provisionStart) + text.slice(nextStep)
   expect(() => assertWorkflowGraph(broken, "ci.yml")).toThrow(/TMUX_BIN and BUN_BOOTSTRAP/)
+})
+
+test("Rust Bats requires ordered distro provisioning and the wrapped command", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  const rust = parsed.jobs["rust"]
+  if (!rust) throw new Error("rust job is missing")
+  const provisionIndex = rust.steps.findIndex(isBatsProvision)
+  const batsIndex = rust.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === wrappedBatsCommand))
+  if (provisionIndex < 0 || batsIndex < 0) throw new Error("fixture workflow is missing the Bats steps")
+  expect(() => assertBatsProvisioning(parsed)).not.toThrow()
+
+  const withRustSteps = (steps: ParsedStep[]): ParsedWorkflow => ({
+    ...parsed,
+    jobs: { ...parsed.jobs, rust: { ...rust, steps } },
+  })
+  expect(() => assertBatsProvisioning(withRustSteps(rust.steps.filter((_, index) => index !== provisionIndex)))).toThrow(/provision/)
+
+  const reorderedSteps = [...rust.steps]
+  const provisionStep = reorderedSteps.splice(provisionIndex, 1)[0]!
+  reorderedSteps.splice(batsIndex, 0, provisionStep)
+  expect(() => assertBatsProvisioning(withRustSteps(reorderedSteps))).toThrow(/before/)
+
+  for (const command of ["bats tests", "/usr/bin/bats tests"]) {
+    const bareInvocation = rust.steps.map((step, index) => index === batsIndex ? { ...step, run: (step.run ?? "").replace(wrappedBatsCommand, command) } : step)
+    expect(() => assertBatsProvisioning(withRustSteps(bareInvocation))).toThrow(/with-rust/)
+  }
 })
 
 test("workflow graph rejects a bare packed E2E command", async () => {

@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMUX_BIN="$(command -v "${TMUX_BIN:-tmux}")"
+PTY_HELPER="$ROOT/tests/pane_dash_pty.sh"
 tmux_dir="$(dirname "$TMUX_BIN")"
 export PATH="$tmux_dir:$PATH"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/pane-dash-quoting.XXXXXX")"
@@ -28,8 +29,8 @@ wait_for() { # description command...
 
 start_clients() { # socket
   local socket=$1
-  { sleep 600; } | TMUX='' script -q /dev/null "$TMUX_BIN" -S "$socket" attach-session -t one >/dev/null 2>&1 & CLIENT_PIDS+=("$!")
-  { sleep 600; } | TMUX='' script -q /dev/null "$TMUX_BIN" -S "$socket" attach-session -t two >/dev/null 2>&1 & CLIENT_PIDS+=("$!")
+  { sleep 600; } | TMUX='' "$PTY_HELPER" "$TMUX_BIN" -S "$socket" attach-session -t one >/dev/null 2>&1 & CLIENT_PIDS+=("$!")
+  { sleep 600; } | TMUX='' "$PTY_HELPER" "$TMUX_BIN" -S "$socket" attach-session -t two >/dev/null 2>&1 & CLIENT_PIDS+=("$!")
   wait_for 'two attached clients' bash -c "[ \"\$(TMUX='' '$TMUX_BIN' -S '$socket' list-clients | wc -l | tr -d ' ')\" = 2 ]"
 }
 
