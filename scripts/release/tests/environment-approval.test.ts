@@ -6,7 +6,7 @@ import { approvePendingDeployment, capturePendingDeployment, type ApprovalDepend
 
 const pendingPath = "/repos/xiopt/tmux-pane-dash/actions/runs/42/pending_deployments"
 const pending = [{ environment: { id: 99, name: "npm-production" }, wait_timer: 0, reviewers: [], current_user_can_approve: true }]
-const deployment = { url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123", id: 123, node_id: "D_kw", sha: "0123456789abcdef0123456789abcdef01234567", ref: "refs/tags/v0.1.0", task: "deploy", payload: {}, original_environment: "npm-production", environment: "npm-production", description: "release", creator: { login: "github-actions[bot]" }, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", statuses_url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123/statuses", repository_url: "https://api.github.com/repos/xiopt/tmux-pane-dash", transient_environment: false, production_environment: true, performed_via_github_app: null }
+const deployment = { url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123", id: 123, node_id: "D_kw", sha: "0123456789abcdef0123456789abcdef01234567", ref: "v0.1.0", task: "deploy", payload: {}, original_environment: "npm-production", environment: "npm-production", description: null, creator: { login: "github-actions[bot]" }, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", statuses_url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123/statuses", repository_url: "https://api.github.com/repos/xiopt/tmux-pane-dash", transient_environment: false, production_environment: true, performed_via_github_app: null }
 const included = (status: number, body: unknown) => `HTTP/2 ${status}\r\ncontent-type: application/json\r\n\r\n${JSON.stringify(body)}\n`
 
 const setup = async () => {
@@ -145,6 +145,8 @@ test("approval rejects changed current user, expected SHA, and symlink evidence 
 test("approval rejects every independent POST deployment mutation", async () => {
   for (const mutate of [
     (value: typeof deployment) => ({ ...value, sha: "e".repeat(40) }),
+    (value: typeof deployment) => ({ ...value, ref: "refs/tags/v0.1.0" }),
+    (value: typeof deployment) => ({ ...value, ref: "v0.1.1" }),
     (value: typeof deployment) => ({ ...value, environment: "release-promotion" }),
     (value: typeof deployment) => ({ ...value, statuses_url: value.statuses_url.replace("/123/", "/124/") }),
     (value: typeof deployment) => ({ ...value, unexpected: true }),

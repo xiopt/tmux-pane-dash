@@ -526,7 +526,7 @@ jobs:
           jobs_json="$RUNNER_TEMP/release-promotion-jobs.json"
           test "$GITHUB_REF" = "refs/tags/$GITHUB_REF_NAME"
           gh api "/repos/$GITHUB_REPOSITORY/environments/release-promotion" > "$environment_json"
-          gh api "/repos/$GITHUB_REPOSITORY/deployments?sha=$GITHUB_SHA&ref=$GITHUB_REF&environment=release-promotion&task=deploy&per_page=100" > "$deployments_json"
+          gh api "/repos/$GITHUB_REPOSITORY/deployments?sha=$GITHUB_SHA&ref=$GITHUB_REF_NAME&environment=release-promotion&task=deploy&per_page=100" > "$deployments_json"
           deployment_id="$("$NODE_24_BIN" -e 'const fs=require("node:fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Array.isArray(r)||r.length!==1||!Number.isSafeInteger(r[0].id)||r[0].id<=0)process.exit(1);process.stdout.write(String(r[0].id))' "$deployments_json")"
           gh api "/repos/$GITHUB_REPOSITORY/deployments/$deployment_id/statuses?per_page=100" > "$statuses_json"
           gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest" > "$jobs_json"
@@ -540,7 +540,7 @@ jobs:
           const deployments = read(deploymentsPath);
           if (!Array.isArray(deployments) || deployments.length !== 1) throw new Error("expected exactly one release-promotion deployment");
           const deployment = deployments[0];
-          if (!Number.isSafeInteger(deployment.id) || deployment.id <= 0 || deployment.sha !== process.env.GITHUB_SHA || !/^refs\/tags\//.test(deployment.ref) || deployment.ref !== process.env.GITHUB_REF || deployment.environment !== "release-promotion" || deployment.original_environment !== "release-promotion" || deployment.task !== "deploy") throw new Error("deployment identity does not match this tagged run");
+          if (!Number.isSafeInteger(deployment.id) || deployment.id <= 0 || deployment.sha !== process.env.GITHUB_SHA || deployment.ref !== process.env.GITHUB_REF_NAME || deployment.environment !== "release-promotion" || deployment.original_environment !== "release-promotion" || deployment.task !== "deploy") throw new Error("deployment identity does not match this tagged run");
           const statuses = read(statusesPath);
           const matching = Array.isArray(statuses) ? statuses.filter((status) => status?.deployment_id === deployment.id) : [];
           if (matching.length === 0) throw new Error("deployment has no status");

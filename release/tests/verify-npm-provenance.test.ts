@@ -131,7 +131,7 @@ test("environment parser accepts only strict scalar job environments", () => {
 
 const approval = { schemaVersion: 1, runId: 42, expectedSha: handoff.tagCommit, environment: { id: 99, name: "npm-production" }, approver: "reviewer", currentUserCanApprove: true, requestSha256: "c".repeat(64), response: { httpStatus: 200, runId: 42, environmentId: 99, deploymentId: 123, environment: "npm-production", sha: handoff.tagCommit, ref: "refs/tags/v0.1.0", approved: true } } as const
 const deployments = [{
-  url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123", id: 123, node_id: "MDExOkRlcGxveW1lbnQxMjM=", sha: handoff.tagCommit, ref: "refs/tags/v0.1.0", task: "deploy", payload: {}, original_environment: "npm-production", environment: "npm-production", description: "", creator: {}, created_at: "2026-07-27T00:00:00Z", updated_at: "2026-07-27T00:00:00Z", statuses_url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123/statuses", repository_url: "https://api.github.com/repos/xiopt/tmux-pane-dash", transient_environment: false, production_environment: true, performed_via_github_app: null,
+  url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123", id: 123, node_id: "MDExOkRlcGxveW1lbnQxMjM=", sha: handoff.tagCommit, ref: "v0.1.0", task: "deploy", payload: {}, original_environment: "npm-production", environment: "npm-production", description: null, creator: {}, created_at: "2026-07-27T00:00:00Z", updated_at: "2026-07-27T00:00:00Z", statuses_url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123/statuses", repository_url: "https://api.github.com/repos/xiopt/tmux-pane-dash", transient_environment: false, production_environment: true, performed_via_github_app: null,
 }]
 const statuses = [{ id: 456, state: "success", deployment_id: 123, environment_url: "https://github.com/xiopt/tmux-pane-dash/deployments/123" }]
 const jobs = { jobs: [{ id: 789, name: "npm-production", status: "completed", conclusion: "success", head_sha: handoff.tagCommit }] }
@@ -145,6 +145,8 @@ test("environment proof correlates all workflow bindings, sanitized approval, de
     { approvalEvidence: { ...approval, environment: { id: 100, name: "npm-production" } } },
     { approvalEvidence: { ...approval, response: { ...approval.response, deploymentId: 124 } } },
     { deployments: [{ ...deployments[0], sha: "e".repeat(40) }] },
+    { deployments: [{ ...deployments[0], ref: "refs/tags/v0.1.0" }] },
+    { deployments: [{ ...deployments[0], ref: "v0.1.1" }] },
     { deployments: [deployments[0], deployments[0]] },
     { deployments: [{ ...deployments[0], environment: "release-promotion" }] },
     { deploymentStatuses: [{ ...statuses[0], state: "failure" }] },
@@ -154,4 +156,11 @@ test("environment proof correlates all workflow bindings, sanitized approval, de
     { expectedEnvironment: "release-promotion", expectedJob: "npm-production" },
     { expectedEnvironment: "npm-production", expectedJob: "promote-release" },
   ]) expect(() => verifyEnvironmentProof(proofInput(mutation))).toThrow()
+
+  for (const description of ["release", null]) {
+    expect(() => verifyEnvironmentProof(proofInput({ deployments: [{ ...deployments[0], description }] }))).not.toThrow()
+  }
+  for (const description of [undefined, 42, {}, [], true]) {
+    expect(() => verifyEnvironmentProof(proofInput({ deployments: [{ ...deployments[0], description }] }))).toThrow()
+  }
 })

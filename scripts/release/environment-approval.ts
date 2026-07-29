@@ -4,6 +4,7 @@ import { createHash } from "node:crypto"
 import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { ApprovalEvidence, PendingApprovalEvidence, ProtectedEnvironment } from "../../release/verify-npm-provenance"
+import { TAG } from "./contracts"
 
 export interface ApprovalDependencies {
   runGh(argv: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }>
@@ -14,7 +15,7 @@ export interface ApprovalDependencies {
 type JsonRecord = Record<string, unknown>
 
 const REPOSITORY = "xiopt/tmux-pane-dash"
-const REF = "refs/tags/v0.1.0"
+const REF = `refs/tags/${TAG}` as const
 const environments = new Set<ProtectedEnvironment>(["github-draft", "npm-production", "release-promotion"])
 const deploymentKeys = [
   "url", "id", "node_id", "sha", "ref", "task", "payload", "original_environment", "environment",
@@ -172,7 +173,7 @@ function exactDeployment(value: unknown, input: { runId: number; expectedSha: st
   if (stringKeys.some((key) => typeof deployment[key] !== "string" || deployment[key] === "") || (typeof deployment.description !== "string" && deployment.description !== null)) fail("deployment object has invalid string fields")
   if (typeof deployment.payload !== "object" || deployment.payload === null || Array.isArray(deployment.payload) || typeof deployment.creator !== "object" || deployment.creator === null || Array.isArray(deployment.creator)) fail("deployment object has invalid documented fields")
   if (typeof deployment.transient_environment !== "boolean" || typeof deployment.production_environment !== "boolean" || (deployment.performed_via_github_app !== null && (typeof deployment.performed_via_github_app !== "object" || Array.isArray(deployment.performed_via_github_app)))) fail("deployment object has invalid boolean/app fields")
-  if (deployment.task !== "deploy" || deployment.original_environment !== input.environment || deployment.sha !== input.expectedSha || deployment.environment !== input.environment || deployment.ref !== REF || deployment.repository_url !== `https://api.github.com/repos/${REPOSITORY}` || deployment.url !== `https://api.github.com/repos/${REPOSITORY}/deployments/${id}` || deployment.statuses_url !== `https://api.github.com/repos/${REPOSITORY}/deployments/${id}/statuses` || Number.isNaN(Date.parse(deployment.created_at as string)) || Number.isNaN(Date.parse(deployment.updated_at as string))) fail("deployment does not match the approved request")
+  if (deployment.task !== "deploy" || deployment.original_environment !== input.environment || deployment.sha !== input.expectedSha || deployment.environment !== input.environment || deployment.ref !== TAG || deployment.repository_url !== `https://api.github.com/repos/${REPOSITORY}` || deployment.url !== `https://api.github.com/repos/${REPOSITORY}/deployments/${id}` || deployment.statuses_url !== `https://api.github.com/repos/${REPOSITORY}/deployments/${id}/statuses` || Number.isNaN(Date.parse(deployment.created_at as string)) || Number.isNaN(Date.parse(deployment.updated_at as string))) fail("deployment does not match the approved request")
   return { httpStatus: 200, runId: input.runId, environmentId, deploymentId: id, environment: input.environment, sha: input.expectedSha, ref: REF, approved: true }
 }
 
