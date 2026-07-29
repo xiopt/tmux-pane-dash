@@ -54,6 +54,9 @@ jobs:
           cargo clippy --workspace --all-targets --all-features --manifest-path pane-dash/Cargo.toml -- -D warnings
           cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml -- --test-threads=1
           cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml -- --ignored --test-threads=1
+          make build
+          test -x bin/pane-dash
+          test "$(bin/pane-dash --version)" = "pane-dash 0.1.0"
       - run: |
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- bats tests
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- shellcheck pane_dash.tmux scripts/*.sh tests/*.sh spike/*.sh spike/probes/*.sh spike/perf/*.sh

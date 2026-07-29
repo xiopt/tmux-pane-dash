@@ -226,6 +226,55 @@ function assertBatsProvisioning(workflow: ParsedWorkflow): void {
   if (provision >= bats) throw new Error("rust job must provision Bats before the wrapped Bats command")
 }
 
+const rustToolchainInstall = "rustup toolchain install 1.96.1 --profile minimal --component clippy --component rustfmt --no-self-update"
+const rustLiveCommand = "tests/release/with-rust.sh -- scripts/release/clean-room.sh -- tests/rust_live_integration.sh"
+const cargoTestPrefix = "cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml"
+const rustGateCommands = [
+  "cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check",
+  "cargo clippy --workspace --all-targets --all-features --manifest-path pane-dash/Cargo.toml -- -D warnings",
+  `${cargoTestPrefix} -- --test-threads=1`,
+  `${cargoTestPrefix} -- --ignored --test-threads=1`,
+] as const
+const rustBuildCommands = [
+  "make build",
+  "test -x bin/pane-dash",
+  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.0"',
+] as const
+
+function assertRustLiveBinaryBuild(workflow: ParsedWorkflow): void {
+  const rust = workflow.jobs["rust"]
+  if (!rust) throw new Error("rust job is missing")
+  const gateIndex = rust.steps.findIndex((step) => {
+    const commands = stepCommands(step).map((line) => line.trim())
+    return commands.includes(rustToolchainInstall) &&
+      commands.includes("export RUSTUP_TOOLCHAIN=1.96.1") &&
+      rustGateCommands.every((command) => commands.includes(command))
+  })
+  if (gateIndex < 0) throw new Error("rust job must run its pinned Rust gates in one step")
+
+  const liveIndex = rust.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === rustLiveCommand))
+  if (liveIndex < 0) throw new Error("rust job must run rust_live_integration through with-rust and clean-room")
+
+  const gateCommands = stepCommands(rust.steps[gateIndex]!).map((line) => line.trim())
+  if (rust.steps.some((step) => stepCommands(step).some((line) => /^cargo build(?:\s|$)/.test(line.trim())))) {
+    throw new Error("rust job must use make build instead of bare cargo build")
+  }
+  const gateEnd = Math.max(...rustGateCommands.map((command) => gateCommands.indexOf(command)))
+  const buildPositions = rustBuildCommands.map((command) => gateCommands.indexOf(command))
+  if (buildPositions.some((position) => position < 0)) throw new Error("rust job must run make build and assert the built pane-dash binary")
+  if (buildPositions[0]! <= gateEnd) throw new Error("rust job must run make build after the Rust gates")
+  if (!(buildPositions[0]! < buildPositions[1]! && buildPositions[1]! < buildPositions[2]!)) {
+    throw new Error("rust job must assert pane-dash after make build")
+  }
+  const buildLocations = rust.steps.flatMap((step, index) =>
+    stepCommands(step).filter((line) => line.trim() === rustBuildCommands[0]).map(() => index),
+  )
+  if (buildLocations.length !== 1) throw new Error("rust job must run exactly one make build")
+  const buildIndex = buildLocations[0]!
+  if (buildIndex !== gateIndex) throw new Error("rust job must run make build in the pinned Rust gate step")
+  if (liveIndex <= buildIndex) throw new Error("rust job must build pane-dash before rust_live_integration")
+}
+
 function assertArchiveDryRunDependencies(workflow: ParsedWorkflow): void {
   const job = workflow.jobs["archive-dry-run"]
   if (!job) throw new Error("archive-dry-run is missing")
@@ -269,8 +318,6 @@ function assertCiCliNpaIsolation(workflow: ParsedWorkflow): void {
   }
 }
 
-const cargoTestPrefix = "cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml"
-
 function assertSerialCargoTestCommands(body: string, expected: string[], label: string): void {
   const commands = body.split("\n").map((line) => line.trim()).filter((line) => line.startsWith(cargoTestPrefix))
   if (JSON.stringify(commands) !== JSON.stringify(expected)) throw new Error(`${label} must use exact serial commands`)
@@ -312,6 +359,7 @@ function assertWorkflowGraph(text: string, workflowName: string): void {
   if (workflowName === "ci.yml") {
     assertCiCliNpaIsolation(workflow)
     assertBatsProvisioning(workflow)
+    assertRustLiveBinaryBuild(workflow)
   }
   if (workflowName === "release.yml") assertPromotionGraph(workflow)
 }
@@ -371,6 +419,32 @@ test("Rust and four-target process-spawning tests reject missing or parallel com
   expect(() => assertFourTargetTestSerialization(fourTargets)).not.toThrow()
   expect(() => assertFourTargetTestSerialization(fourTargets.replace(target, ""))).toThrow(/exact serial commands/)
   expect(() => assertFourTargetTestSerialization(fourTargets.replace(target, target.replace(" -- --test-threads=1", "")))).toThrow(/exact serial commands/)
+})
+
+test("Rust builds the live-test binary after its gates and rejects missing, reordered, or bare cargo builds", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  const rust = parsed.jobs["rust"]
+  if (!rust) throw new Error("rust job is missing")
+  const gateIndex = rust.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === rustBuildCommands[0]))
+  if (gateIndex < 0) throw new Error("fixture workflow is missing the Rust build step")
+  const gateRun = rust.steps[gateIndex]!.run ?? ""
+  const buildBlock = rustBuildCommands.join("\n")
+  const withGateRun = (run: string): ParsedWorkflow => ({
+    ...parsed,
+    jobs: {
+      ...parsed.jobs,
+      rust: {
+        ...rust,
+        steps: rust.steps.map((step, index) => index === gateIndex ? { ...step, run } : step),
+      },
+    },
+  })
+
+  expect(() => assertRustLiveBinaryBuild(parsed)).not.toThrow()
+  expect(() => assertRustLiveBinaryBuild(withGateRun(gateRun.replace(buildBlock, "")))).toThrow(/make build/)
+  expect(() => assertRustLiveBinaryBuild(withGateRun(gateRun.replace(buildBlock, "").replace("cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check", `${buildBlock}\ncargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check`)))).toThrow(/after the Rust gates/)
+  expect(() => assertRustLiveBinaryBuild(withGateRun(gateRun.replace("make build", "cargo build --release --locked --manifest-path pane-dash/Cargo.toml")))).toThrow(/make build|bare cargo build/)
 })
 
 test("archive-dry-run is the terminal CI status and reaches the required CI graph", async () => {
