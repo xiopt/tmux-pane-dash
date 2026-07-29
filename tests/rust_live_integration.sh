@@ -922,8 +922,7 @@ creation_success_responsive() {
   wait_for 'creation mutation render exact tag' 3 popup_tail_has "$index" "$snapshot_before" creation-held-snapshot
   wait_for 'creation target tagged' 3 pane_contains "$target" ''
   [[ "$(admin show-options -pv -t "$target" @pane_dash_tag)" == dash-created ]] || die 'creation success tag missing'
-  # Prior budget assertions enforce cadence; this wait only tolerates scheduler delay.
-  snapshot_before="$(ansi_size "$index")"; wait_for 'creation selected row snapshot' 3 ansi_grew_from "$index" "$snapshot_before"
+  wait_for 'creation selected row rendered' 3 popup_tail_has "$index" "$snapshot_before" dash-created
   selection_started="$(now)"; send_bytes "$index" '\022'
   wait_for 'creation selected row targets created pane' .5 log_has_target_since "$selection_started" capture-pane "$target"
   (( $(record_count "$started" "$(now)" split-window)==1 )) || die 'creation success replayed stage 1'
@@ -1171,6 +1170,34 @@ resize_timestamp_ordering_self_test() {
   return 1
 }
 
+creation_selected_row_rendered_self_test() {
+  local transcript snapshot_before check_offset
+  transcript="$(mktemp "${TMPDIR:-/tmp}/pane-dash-selected-row.XXXXXXXX")"
+  printf 'pre-creation\n' > "$transcript"
+  TRANSCRIPTS[0]="$transcript"
+  snapshot_before="$(( $(ansi_size 0) + 1 ))"
+  printf 'dash-created\n' >> "$transcript"
+  check_offset="$(ansi_size 0)"
+  # shellcheck disable=SC2317,SC2329 # popup_tail_has invokes this test override indirectly.
+  popup_open() { return 0; }
+  if popup_tail_has 0 "$((check_offset + 1))" dash-created; then
+    rm -f "$transcript"
+    printf 'RED: selected-row predicate accepted content before the check offset\n' >&2
+    return 1
+  fi
+  if ! popup_tail_has 0 "$snapshot_before" dash-created; then
+    rm -f "$transcript"
+    printf 'RED: selected-row predicate missed an already-rendered created row\n' >&2
+    return 1
+  fi
+  if ansi_grew_from 0 "$check_offset"; then
+    rm -f "$transcript"
+    printf 'RED: selected-row self-test unexpectedly needed transcript growth\n' >&2
+    return 1
+  fi
+  rm -f "$transcript"
+}
+
 if [[ "${1:-}" == --popup-pid-self-test ]]; then
   popup_pid_tracking_self_test
   exit
@@ -1178,6 +1205,11 @@ fi
 
 if [[ "${1:-}" == --resize-timestamp-ordering-self-test ]]; then
   resize_timestamp_ordering_self_test
+  exit
+fi
+
+if [[ "${1:-}" == --creation-selected-row-rendered-self-test ]]; then
+  creation_selected_row_rendered_self_test
   exit
 fi
 
