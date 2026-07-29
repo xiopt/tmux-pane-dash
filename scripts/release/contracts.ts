@@ -1,6 +1,6 @@
 export const VERSION = "0.1.0" as const
 export const TAG = `v${VERSION}` as const
-export const TAG_COMMIT = "7bc976a" as const
+export const TAG_COMMIT = "d47a37a" as const
 export const REPOSITORY = "xiopt/tmux-pane-dash" as const
 export const RELEASE_DOWNLOAD_BASE = `https://github.com/${REPOSITORY}/releases/download/${TAG}` as const
 

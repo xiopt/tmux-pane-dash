@@ -248,6 +248,8 @@ function assertPackedE2EGraph(workflow: ParsedWorkflow): void {
 function assertCiCliNpaIsolation(workflow: ParsedWorkflow): void {
   const ciCli = workflow.jobs["ci-cli"]
   if (!ciCli) throw new Error("ci-cli is missing")
+  const checkout = ciCli.steps.find((step) => step.uses?.startsWith("actions/checkout@"))
+  if (checkout?.with["fetch-depth"] !== "0") throw new Error("ci-cli must fetch full history for the release fixture anchor")
   const command = "bun test scripts/release/tests release/tests"
   const steps = ciCli.steps.filter((step) => (step.run ?? "").includes(command))
   if (steps.length !== 1) throw new Error("ci-cli must run the release test suites exactly once")
