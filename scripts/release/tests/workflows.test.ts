@@ -245,7 +245,9 @@ const releaseRustToolchainInstall = "rustup toolchain install 1.96.1 --profile m
 
 const isBatsProvision = (step: ParsedStep): boolean => {
   const run = step.run ?? ""
-  return run.includes("sudo apt-get install -y bats") &&
+  const update = run.indexOf("sudo apt-get update")
+  const install = run.indexOf("sudo apt-get install -y bats")
+  return update >= 0 && install > update &&
     run.includes('test "$(command -v bats)" = "/usr/bin/bats"') &&
     run.includes("bats_version=$(/usr/bin/bats --version)") &&
     run.includes('test -n "$bats_version"') &&
