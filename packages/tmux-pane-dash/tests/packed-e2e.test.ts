@@ -231,6 +231,25 @@ test("isolation: local pack install is offline before package JavaScript runs", 
   } finally { await rm(packed.output, { recursive: true, force: true }) }
 })
 
+test("packed CLI setup installs its bundled archive without a network request", async () => {
+  expect(process.env.TARGET_KEY ?? hostKey).toBe(hostKey)
+  const nodeBin = process.env.NODE_20_BIN, npmCli = process.env.NPM_20_CLI
+  expect(nodeBin).toMatch(/^\//); expect(npmCli).toMatch(/^\//)
+  const packed = await packCli(nodeBin!, npmCli!)
+  try {
+    const h = await packedInstallHarness({ nodeBin: nodeBin!, npmCli: npmCli!, tarball: packed.tarball })
+    try {
+      await h.runner.run([nodeBin!, npmCli!, "install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", packed.tarball], { cwd: h.project, env: h.env, timeoutMs: 60_000 })
+      const installed = join(h.project, "node_modules", "@xiopt", "tmux-pane-dash")
+      const setup = await h.runner.run([nodeBin!, join(installed, "dist", "cli.js"), "setup", "--no-opencode"], { cwd: h.project, env: h.env, timeoutMs: 60_000 })
+      expect(setup.code, setup.stderr).toBe(0)
+      expect(h.sentinel.requests).toEqual([])
+      expect(await Bun.file(join(h.env.XDG_DATA_HOME, "tmux-pane-dash", "current", "bin", "pane-dash")).exists()).toBeTrue()
+      expect(await Bun.file(join(h.env.HOME, ".tmux.conf")).text()).toContain("tmux-pane-dash")
+    } finally { await h.cleanup() }
+  } finally { await rm(packed.output, { recursive: true, force: true }) }
+})
+
 test("lifecycle: packed runtime installs, updates, rolls back, and uninstalls on the matching host", async () => {
   expect(process.env.TARGET_KEY ?? hostKey).toBe(hostKey)
   const nodeBin = process.env.NODE_20_BIN!, npmCli = process.env.NPM_20_CLI!
