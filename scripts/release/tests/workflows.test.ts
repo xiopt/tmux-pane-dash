@@ -386,6 +386,23 @@ function assertOpenCodeProvisioning(workflow: ParsedWorkflow): void {
   if (run.includes("npm rebuild") || run.includes("npm run") || run.includes("npm exec")) throw new Error("OpenCode compatibility must not run broad npm scripts")
 }
 
+function assertOpenCodeMacOsSandbox(workflowText: string, harnessText: string): void {
+  const body = job(workflowText, "opencode-compatibility")
+  if (!/^    runs-on: macos-14$/m.test(body)) throw new Error("opencode-compatibility must run on macos-14 for the Seatbelt harness")
+  const markers = [
+    "/usr/bin/sandbox-exec -p",
+    "(version 1) (allow default) (deny network*)",
+    '(allow network-outbound (remote ip "localhost:*"))',
+    "(allow network-outbound (remote unix-socket))",
+  ]
+  let previous = -1
+  for (const marker of markers) {
+    const position = harnessText.indexOf(marker, previous + 1)
+    if (position <= previous) throw new Error("real OpenCode harness must retain the sandbox-exec network denial with loopback-only access")
+    previous = position
+  }
+}
+
 function assertCiCliNpaIsolation(workflow: ParsedWorkflow): void {
   const ciCli = workflow.jobs["ci-cli"]
   if (!ciCli) throw new Error("ci-cli is missing")
@@ -665,6 +682,15 @@ test("OpenCode compatibility runs only its targeted postinstalls before integrit
   const stepIndex = job.steps.findIndex((step) => (step.run ?? "").includes("run_opencode_postinstall"))
   const broken = job.steps.map((step, index) => index === stepIndex ? { ...step, run: (step.run ?? "").replace('run_opencode_postinstall "$RUNNER_TEMP/opencode-latest"', "") } : step)
   expect(() => assertOpenCodeProvisioning({ ...parsed, jobs: { ...parsed.jobs, "opencode-compatibility": { ...job, steps: broken } } })).toThrow(/out of order/)
+})
+
+test("OpenCode compatibility stays on macOS for the Seatbelt loopback sandbox", async () => {
+  const text = await workflow("ci.yml")
+  const harness = await readFile(join(root, "opencode-plugin", "tests", "real-opencode.test.ts"), "utf8")
+  expect(() => assertOpenCodeMacOsSandbox(text, harness)).not.toThrow()
+
+  const ubuntuMutation = text.replace("    runs-on: macos-14", "    runs-on: ubuntu-24.04")
+  expect(() => assertOpenCodeMacOsSandbox(ubuntuMutation, harness)).toThrow(/macos-14/)
 })
 
 test("archive-dry-run is the terminal CI status and reaches the required CI graph", async () => {

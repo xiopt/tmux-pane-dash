@@ -297,7 +297,7 @@ jobs:
 
   opencode-compatibility:
     needs: cli-tests
-    runs-on: ubuntu-24.04
+    runs-on: macos-14
     env:
       PANE_DASH_NODE20_PREPROVIDED: 1
     steps:
