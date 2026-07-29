@@ -92,7 +92,7 @@ export async function runDryRun(input: DryRunInput): Promise<string> {
   await assertWorkspace(root)
   await assertNoGeneratedVerifier(root)
   const verifier = await inMemoryVerifier(root)
-  if (Object.keys(TARGETS).length !== 4 || RELEASE_ASSETS.length !== 6 || VERSION !== "0.1.0") fail("release inventory is not exact")
+  if (Object.keys(TARGETS).length !== 4 || RELEASE_ASSETS.length !== 6 || !/^\d+\.\d+\.\d+$/.test(VERSION)) fail("release inventory is not exact")
   return [
     "archives=4 assets=6 attestation-subjects=6 npm-inventories=2",
     `archive-names=${Object.values(TARGETS).map((target) => target.asset).join(",")}`,

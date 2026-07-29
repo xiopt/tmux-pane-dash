@@ -1,7 +1,7 @@
 import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { gunzipSync, gzipSync } from "node:zlib"
-import { ARCHIVE_PAYLOAD, TARGETS } from "./contracts"
+import { ARCHIVE_PAYLOAD, TARGETS, VERSION } from "./contracts"
 import { canonicalJson } from "./canonical-json"
 import { internalManifest, type RustTarget } from "./manifest"
 
@@ -24,7 +24,7 @@ export async function buildArchive(input: { target: RustTarget; binary: string; 
   try {
     await writeFile(join(stage, "bin/pane-dash"), new Uint8Array(staging)); await chmod(join(stage, "bin/pane-dash"), 0o755)
     for (const [path, mode] of ARCHIVE_PAYLOAD) if (path !== "bin/pane-dash" && path !== "manifest.json") { await writeFile(join(stage, path), await readFile(join(root, path))); await chmod(join(stage, path), Number.parseInt(mode, 8)) }
-    const asset = config.asset.replace("v0.1.0", `v${input.version ?? "0.1.0"}`)
+    const asset = config.asset.replace(`v${VERSION}`, `v${input.version ?? VERSION}`)
     await writeFile(join(stage, "manifest.json"), canonicalJson(await internalManifest({ target: input.target, asset, root: stage, version: input.version })))
     const paths = ARCHIVE_PAYLOAD.map(([path]) => path).sort((a, b) => Buffer.from(a).compare(Buffer.from(b)))
     const directories = [tarEntry("bin", new Uint8Array(), "0755", input.epoch, "5"), tarEntry("scripts", new Uint8Array(), "0755", input.epoch, "5")]

@@ -83,13 +83,13 @@ assert_no_engine_query() {
 
 @test "keeps the current symlink logical in its dashboard binding" {
   install_root="$BATS_TEST_TMPDIR/install"
-  version_root="$install_root/versions/0.1.0"
+  version_root="$install_root/versions/0.1.1"
   mkdir -p "$version_root/bin" "$version_root/scripts"
   cp "$SCRIPT" "$version_root/pane_dash.tmux"
   cp "$ROOT/scripts/open.sh" "$ROOT/scripts/tag.sh" "$version_root/scripts/"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$version_root/bin/pane-dash"
   chmod +x "$version_root/bin/pane-dash"
-  ln -s versions/0.1.0 "$install_root/current"
+  ln -s versions/0.1.1 "$install_root/current"
 
   run "$install_root/current/pane_dash.tmux"
 

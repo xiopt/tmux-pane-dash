@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url"
 import type { Dependencies } from "../../src/runtime"
 import { buildArchive, inspectArchive } from "../../../../scripts/release/archive"
 import { sha256 } from "../../../../scripts/release/canonical-json"
-import { TARGETS } from "../../../../scripts/release/contracts"
+import { TAG, TARGETS } from "../../../../scripts/release/contracts"
 import { inspectBinary } from "../../../../scripts/release/inspect-binary"
 
 export type ReleaseAssetRecord = { target: string; asset: string; url: string; sha256: string; size: number; bytes: Uint8Array }
@@ -40,11 +40,12 @@ const staticLinuxBinary = async (binary: string, cwd: string, env: Record<string
 }
 
 /** Builds an archive from an isolated copy of the real Rust crate and verifies its Task 4 shape. */
-export async function buildFixtureRelease(input: { version: "0.1.0" | "0.1.1"; target: string; binary: string; root: string }): Promise<ReleaseAssetRecord> {
+export async function buildFixtureRelease(input: { version: "0.1.1" | "0.1.2"; target: string; binary: string; root: string }): Promise<ReleaseAssetRecord> {
+  if (input.version !== "0.1.1" && input.version !== "0.1.2") throw new Error("unsupported fixture version")
   const target = Object.values(TARGETS).find(candidate => candidate.rustTarget === input.target)
   if (!target) throw new Error("unsupported fixture target")
   const stage = await mkdtemp(join(tmpdir(), "pane-dash-release-fixture-"))
-  const asset = target.asset.replace("v0.1.0", `v${input.version}`), archive = join(stage, asset)
+  const asset = target.asset.replace(TAG, `v${input.version}`), archive = join(stage, asset)
   try {
     const cargo = process.env.CARGO, rustc = process.env.RUSTC
     if (!cargo?.startsWith("/") || !rustc?.startsWith("/")) throw new Error("fixture Rust build requires isolated absolute CARGO and RUSTC")

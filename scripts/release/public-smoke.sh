@@ -44,9 +44,9 @@ run_bounded() {
   active=0
 }
 
-run_bounded '@xiopt/tmux-pane-dash@0.1.0' setup
-run_bounded '@xiopt/tmux-pane-dash@0.1.0' doctor
-run_bounded '@xiopt/tmux-pane-dash@0.1.0' setup
+run_bounded '@xiopt/tmux-pane-dash@0.1.1' setup
+run_bounded '@xiopt/tmux-pane-dash@0.1.1' doctor
+run_bounded '@xiopt/tmux-pane-dash@0.1.1' setup
 run_bounded '@xiopt/tmux-pane-dash@latest' update
-run_bounded '@xiopt/tmux-pane-dash@0.1.0' uninstall
+run_bounded '@xiopt/tmux-pane-dash@0.1.1' uninstall
 printf '%s\n' 'ordered=setup,doctor,reuse,latest-update,uninstall bounded=PASS credentials=absent public-network-requests=0 public-smoke: PASS'

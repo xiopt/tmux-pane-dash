@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { buildArchive, inspectArchive } from "../archive"
-import { TARGETS } from "../contracts"
+import { TARGETS, VERSION } from "../contracts"
 import { extractArchive, inspectPayload } from "../../../packages/tmux-pane-dash/src/archive"
 import { nodeFsOps } from "../../../packages/tmux-pane-dash/src/fs"
 
@@ -75,6 +75,6 @@ test("Task4 archive extracts into the installer payload inventory", async () => 
     async function* stream() { yield new Uint8Array(await readFile(output)) }
     await extractArchive({ archive: stream(), stagingRoot: stage, fs, clock: { nowMs: Date.now }, limits: { maxEntries: 64, maxTotalBytes: 268435456, maxFileBytes: 134217728, timeoutMs: 30000 } })
     const manifest = JSON.parse(new TextDecoder().decode(await fs.readFile(join(stage, "manifest.json"))))
-    await inspectPayload(stage, manifest, { manifest: {}, platform: "darwin", arch: "arm64", executingVersion: "0.1.0", fs })
+    await inspectPayload(stage, manifest, { manifest: {}, platform: "darwin", arch: "arm64", executingVersion: VERSION, fs })
   } finally { await rm(root, { recursive: true, force: true }) }
 })

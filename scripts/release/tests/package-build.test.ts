@@ -58,8 +58,8 @@ test("package build accepts only the canonical release contract and exact four-a
   const fixture = await fixtureRoot()
   try {
     const invalid = [
-      { name: "wrong version", mutate: (manifest: Record<string, any>) => { manifest.version = "0.1.1"; manifest.tag = "v0.1.1"; for (const asset of Object.values(manifest.assets) as Array<Record<string, string>>) { asset.asset = asset.asset.replace("v0.1.0", "v0.1.1"); asset.url = asset.url.replace("/v0.1.0/", "/v0.1.1/").replace("v0.1.0-", "v0.1.1-") } } },
-      { name: "wrong tag", mutate: (manifest: Record<string, any>) => { manifest.tag = "v0.1.1" } },
+      { name: "wrong version", mutate: (manifest: Record<string, any>) => { manifest.version = "0.1.0"; manifest.tag = "v0.1.0"; for (const asset of Object.values(manifest.assets) as Array<Record<string, string>>) { asset.asset = asset.asset.replace("v0.1.1", "v0.1.0"); asset.url = asset.url.replace("/v0.1.1/", "/v0.1.0/").replace("v0.1.1-", "v0.1.0-") } } },
+      { name: "wrong tag", mutate: (manifest: Record<string, any>) => { manifest.tag = "v0.1.0" } },
       { name: "wrong inventory", mutate: (manifest: Record<string, any>) => { delete manifest.assets["linux-x64"] } },
       { name: "wrong URL", mutate: (manifest: Record<string, any>) => { manifest.assets["darwin-arm64"].url = "https://example.test/release.tar.gz" } },
       { name: "wrong hash", mutate: (manifest: Record<string, any>) => { manifest.assets["darwin-arm64"].sha256 = "z".repeat(64) } },
@@ -84,8 +84,8 @@ test("package build atomically publishes exact outputs, embeds every release ide
     await buildPackages({ root: fixture, releaseManifestPath: expected.path, requireChange: true })
     expect(await readFile(join(fixture, outputPaths[0]!))).toEqual(expected.bytes)
     const cli = await readFile(join(fixture, outputPaths[1]!), "utf8")
-    expect(cli).toContain("0.1.0")
-    expect(cli).toContain("v0.1.0")
+    expect(cli).toContain("0.1.1")
+    expect(cli).toContain("v0.1.1")
     for (const asset of Object.values(expected.value.assets) as Array<{ asset: string; url: string; sha256: string }>) {
       expect(cli).toContain(asset.asset)
       expect(cli).toContain(asset.url)

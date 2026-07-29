@@ -33,7 +33,7 @@ async function packCli(nodeBin: string, npmCli: string) {
   return { output, tarball: join(output, (JSON.parse(stdout) as Array<{ filename: string }>)[0]!.filename) }
 }
 
-async function fixtureManifest(version: "0.1.0" | "0.1.1", selected: ReleaseAssetRecord) {
+async function fixtureManifest(version: "0.1.1" | "0.1.2", selected: ReleaseAssetRecord) {
   const text = await readFile(join(import.meta.dir, "fixtures", version, "manifest-template.json"), "utf8")
   const key = hostKey!.replace("-", "_").toUpperCase()
   return JSON.parse(text.replace(`__${key}_SHA256__`, selected.sha256).replace(`__${key}_SIZE__`, String(selected.size)).replaceAll(/__[A-Z0-9_]+_SHA256__/g, "0".repeat(64)).replaceAll(/__[A-Z0-9_]+_SIZE__/g, "0"))
@@ -239,7 +239,7 @@ test("lifecycle: packed runtime installs, updates, rolls back, and uninstalls on
     await mkdir(join(h.env.XDG_CONFIG_HOME, "opencode"), { recursive: true })
     await writeFile(tmuxTarget, "set -g status off", { mode: 0o640 }); await writeFile(openCodeTarget, "{\"plugin\":[]}\n", { mode: 0o600 })
     await symlink(tmuxTarget, join(h.env.HOME, ".tmux.conf")); await symlink(openCodeTarget, join(h.env.XDG_CONFIG_HOME, "opencode", "opencode.json"))
-    const releases = await Promise.all((["0.1.0", "0.1.1"] as const).map(version => buildFixtureRelease({ version, target: rustTarget(), binary: "pane-dash", root })))
+    const releases = await Promise.all((["0.1.1", "0.1.2"] as const).map(version => buildFixtureRelease({ version, target: rustTarget(), binary: "pane-dash", root })))
     const server = await fixtureServer(releases), guard = installNetworkGuard(server.origin), output: string[] = []
     const managed = join(h.env.XDG_DATA_HOME, "tmux-pane-dash")
     const tmuxBin = await realpath(process.env.TMUX_BIN ?? (() => { throw new Error("TMUX_BIN required") })())
@@ -251,20 +251,20 @@ test("lifecycle: packed runtime installs, updates, rolls back, and uninstalls on
     }
       const homeBefore = await realHomeState(), configBaseline = await lifecycleConfigState(h.env)
     try {
-      const oldDeps = runtimeDependencies({ manifest: await fixtureManifest("0.1.0", releases[0]!), version: "0.1.0", fetch: server.fetch, env: h.env, output })
+      const oldDeps = runtimeDependencies({ manifest: await fixtureManifest("0.1.1", releases[0]!), version: "0.1.1", fetch: server.fetch, env: h.env, output })
       await cli(runtime, ["setup"], oldDeps)
       await harnessTmux(["-f", join(h.env.HOME, ".tmux.conf"), "new-session", "-d", "-s", "doctor", "sleep 600"])
-       const initialDoctor = await cli(runtime, ["doctor", "--json"], oldDeps), initialReport = JSON.parse(output.pop()!)
-       expect(initialDoctor, JSON.stringify(initialReport)).toBe(0)
-       expect(initialReport).toMatchObject({ schemaVersion: 1, healthy: true })
-       expectTmuxServerOk(initialReport)
-      await cli(runtime, ["setup"], oldDeps); expect(server.requestsFor("0.1.0")).toBe(1)
+      const initialDoctor = await cli(runtime, ["doctor", "--json"], oldDeps), initialReport = JSON.parse(output.pop()!)
+      expect(initialDoctor, JSON.stringify(initialReport)).toBe(0)
+      expect(initialReport).toMatchObject({ schemaVersion: 1, healthy: true })
+      expectTmuxServerOk(initialReport)
+      await cli(runtime, ["setup"], oldDeps); expect(server.requestsFor("0.1.1")).toBe(1)
       expect(await fixedPathTmux()).toBe(tmuxBin)
       expect(h.env.TMUX_TMPDIR.startsWith(dirname(h.env.HOME))).toBe(true)
-      const newDeps = runtimeDependencies({ manifest: await fixtureManifest("0.1.1", releases[1]!), version: "0.1.1", fetch: server.fetch, env: h.env, output })
+      const newDeps = runtimeDependencies({ manifest: await fixtureManifest("0.1.2", releases[1]!), version: "0.1.2", fetch: server.fetch, env: h.env, output })
       const oldPopup = await launchBoundPopup(managed, h.env, tmuxBin)
       try {
-        expect(await oldPopup.version()).toBe("0.1.0")
+        expect(await oldPopup.version()).toBe("0.1.1")
 
         const observer = join(fixtureRoot, "deny-net-observer.json"), shim = join(fixtureRoot, "deny-net.cjs")
         await writeFile(shim, `const fs = require("node:fs"), net = require("node:net"), dns = require("node:dns"), attempts = [];
@@ -280,13 +280,13 @@ process.on("exit", () => fs.writeFileSync(process.env.PANE_DASH_DENY_NET_OBSERVE
         expect(observed.stdout).toBe(ordinary.stdout); expect(observedReport).toMatchObject({ schemaVersion: 1, healthy: true }); expectTmuxServerOk(observedReport); expectTmuxServerOk(ordinaryReport); expect(await readFile(observer, "utf8")).toBe("[]")
 
         await cli(runtime, ["update"], newDeps)
-        expect(await oldPopup.alive()).toBe(true); expect(await oldPopup.version()).toBe("0.1.0")
+        expect(await oldPopup.alive()).toBe(true); expect(await oldPopup.version()).toBe("0.1.1")
         const persistedOld = await lstat(oldPopup.resolvedPath)
         expect(`${persistedOld.dev}:${persistedOld.ino}`).toBe(`${oldPopup.dev}:${oldPopup.ino}`)
         const currentResolved = await realpath(join(managed, "current", "bin", "pane-dash")), current = await lstat(currentResolved)
         expect(`${current.dev}:${current.ino}`).not.toBe(`${oldPopup.dev}:${oldPopup.ino}`)
         const newPopup = await launchBoundPopup(managed, h.env, tmuxBin)
-        try { expect(await newPopup.alive()).toBe(true); expect(await newPopup.version()).toBe("0.1.1") } finally { await newPopup.cleanup() }
+        try { expect(await newPopup.alive()).toBe(true); expect(await newPopup.version()).toBe("0.1.2") } finally { await newPopup.cleanup() }
         expect(await cli(runtime, ["doctor", "--json"], newDeps)).toBe(0); const postUpdateReport = JSON.parse(output.pop()!); expect(postUpdateReport).toMatchObject({ schemaVersion: 1, healthy: true }); expectTmuxServerOk(postUpdateReport)
       } finally { await oldPopup.cleanup() }
       await expect(cli(runtime, ["setup"], oldDeps)).rejects.toThrow("E_DOWNGRADE")
@@ -295,9 +295,9 @@ process.on("exit", () => fs.writeFileSync(process.env.PANE_DASH_DENY_NET_OBSERVE
       await cli(runtime, ["update"], newDeps)
 
       const rollbackBaseline = { current: await readlink(join(managed, "current")), configs: await lifecycleConfigState(h.env), ownership: await pathState(join(managed, "state", "ownership.json")), versions: await directoryEntries(join(managed, "versions")) }
-      expect(rollbackBaseline.current).toBe("versions/0.1.1")
+      expect(rollbackBaseline.current).toBe("versions/0.1.2")
       const rollback = { ...oldDeps }
-      Object.defineProperty(rollback, "signal", { get: () => readlinkSync(join(managed, "current")) === "versions/0.1.0" ? "TERM" : undefined })
+      Object.defineProperty(rollback, "signal", { get: () => readlinkSync(join(managed, "current")) === "versions/0.1.1" ? "TERM" : undefined })
       await expect(cli(runtime, ["setup", "--allow-downgrade"], rollback)).rejects.toThrow("E_SIGNAL_TERM")
       expect(await readlink(join(managed, "current"))).toBe(rollbackBaseline.current)
       expect(await lifecycleConfigState(h.env)).toEqual(rollbackBaseline.configs)
@@ -317,14 +317,14 @@ process.on("exit", () => fs.writeFileSync(process.env.PANE_DASH_DENY_NET_OBSERVE
 
       for (const component of ["no-tmux", "no-opencode"] as const) {
         const isolated = await componentEnvironment(fixtureRoot, component)
-        const deps = runtimeDependencies({ manifest: await fixtureManifest("0.1.0", releases[0]!), version: "0.1.0", fetch: server.fetch, env: isolated.env, output })
+        const deps = runtimeDependencies({ manifest: await fixtureManifest("0.1.1", releases[0]!), version: "0.1.1", fetch: server.fetch, env: isolated.env, output })
         await cli(runtime, component === "no-tmux" ? ["setup", "--no-tmux"] : ["setup", "--no-opencode"], deps)
         const ownership = JSON.parse(await readFile(join(isolated.env.XDG_DATA_HOME, "tmux-pane-dash", "state", "ownership.json"), "utf8"))
         const enabled = component === "no-tmux" ? "opencode" : "tmux", disabled = component === "no-tmux" ? "tmux" : "opencode"
         expect(ownership.components[disabled]).toBeNull()
         expect(Object.keys(ownership.components[enabled]).sort()).toEqual(["baselineBackup", "logicalPath", "marker", "packageEntries", "resolvedPath"])
         expect(await lifecycleConfigState(isolated.env)).not.toEqual(isolated.baseline)
-        expect(await readFile(component === "no-tmux" ? isolated.opencode : isolated.tmux, "utf8")).toContain(component === "no-tmux" ? "@xiopt/pane-dash-opencode@0.1.0" : "tmux-pane-dash")
+        expect(await readFile(component === "no-tmux" ? isolated.opencode : isolated.tmux, "utf8")).toContain(component === "no-tmux" ? "@xiopt/pane-dash-opencode@0.1.1" : "tmux-pane-dash")
         expect(component === "no-tmux" ? await configState(isolated.tmux) : await configState(isolated.opencode)).toEqual(component === "no-tmux" ? isolated.baseline.tmux : isolated.baseline.opencode)
         await cli(runtime, ["uninstall"], deps)
         expect(await lifecycleConfigState(isolated.env)).toEqual(isolated.baseline)
@@ -332,31 +332,31 @@ process.on("exit", () => fs.writeFileSync(process.env.PANE_DASH_DENY_NET_OBSERVE
 
       const migration = await componentEnvironment(fixtureRoot, "migration"), legacyRoot = join(fixtureRoot, "legacy", "tmux-pane-dash", "opencode-plugin"), legacyTarget = join(legacyRoot, "pane-dash.ts"), legacyLink = join(migration.env.XDG_CONFIG_HOME, "opencode", "plugin", "pane-dash.ts")
       await mkdir(legacyRoot, { recursive: true }); await writeFile(legacyTarget, "export const legacy = true\n"); await mkdir(dirname(legacyLink), { recursive: true }); await symlink(legacyTarget, legacyLink)
-      const migrationDeps = runtimeDependencies({ manifest: await fixtureManifest("0.1.0", releases[0]!), version: "0.1.0", fetch: server.fetch, env: migration.env, output })
+      const migrationDeps = runtimeDependencies({ manifest: await fixtureManifest("0.1.1", releases[0]!), version: "0.1.1", fetch: server.fetch, env: migration.env, output })
       await cli(runtime, ["setup", "--no-tmux", "--migrate"], migrationDeps)
       expect(await pathState(legacyLink)).toEqual({ present: false }); expect(await readFile(legacyTarget, "utf8")).toBe("export const legacy = true\n")
       const migratedOwnership = JSON.parse(await readFile(join(migration.env.XDG_DATA_HOME, "tmux-pane-dash", "state", "ownership.json"), "utf8"))
       expect(migratedOwnership.migrations).toEqual([{ from: legacyLink, to: legacyTarget, sha256: "" }])
-      expect(await readFile(migration.opencode, "utf8")).toContain("@xiopt/pane-dash-opencode@0.1.0")
+      expect(await readFile(migration.opencode, "utf8")).toContain("@xiopt/pane-dash-opencode@0.1.1")
       await assertNoTransactionJournals(join(migration.env.XDG_DATA_HOME, "tmux-pane-dash"))
       await cli(runtime, ["uninstall"], migrationDeps)
       expect(await lifecycleConfigState(migration.env)).toEqual(migration.baseline)
 
       const conflict = await componentEnvironment(fixtureRoot, "migration-conflict"), conflictLink = join(conflict.env.XDG_CONFIG_HOME, "opencode", "plugin", "pane-dash.ts"), conflictOther = join(conflict.env.XDG_CONFIG_HOME, "opencode", "plugins", "pane-dash.ts"), conflictManaged = join(conflict.env.XDG_DATA_HOME, "tmux-pane-dash")
       await mkdir(dirname(conflictLink), { recursive: true }); await mkdir(dirname(conflictOther), { recursive: true }); await symlink(legacyTarget, conflictLink); await symlink(legacyTarget, conflictOther)
-      const conflictBefore = { links: [await readlink(conflictLink), await readlink(conflictOther)], configs: await lifecycleConfigState(conflict.env), managed: await pathState(conflictManaged), requests: server.requestsFor("0.1.0") }
-      const conflictDeps = runtimeDependencies({ manifest: await fixtureManifest("0.1.0", releases[0]!), version: "0.1.0", fetch: server.fetch, env: conflict.env, output })
+      const conflictBefore = { links: [await readlink(conflictLink), await readlink(conflictOther)], configs: await lifecycleConfigState(conflict.env), managed: await pathState(conflictManaged), requests: server.requestsFor("0.1.1") }
+      const conflictDeps = runtimeDependencies({ manifest: await fixtureManifest("0.1.1", releases[0]!), version: "0.1.1", fetch: server.fetch, env: conflict.env, output })
       await expect(cli(runtime, ["setup", "--no-tmux", "--migrate"], conflictDeps)).rejects.toThrow("E_CONFIG_CONFLICT")
       expect([await readlink(conflictLink), await readlink(conflictOther)]).toEqual(conflictBefore.links)
       expect(await lifecycleConfigState(conflict.env)).toEqual(conflictBefore.configs)
       expect(await pathState(conflictManaged)).toEqual(conflictBefore.managed)
-      expect(server.requestsFor("0.1.0")).toBe(conflictBefore.requests)
+      expect(server.requestsFor("0.1.1")).toBe(conflictBefore.requests)
       await assertNoTransactionJournals(conflictManaged)
 
       expect(await lifecycleConfigState(h.env)).toEqual(configBaseline)
       expect(await realHomeState()).toEqual(homeBefore)
       expect(await fixedPathTmux()).toBe(tmuxBin); expect(h.env.TMUX_TMPDIR.startsWith(dirname(h.env.HOME))).toBe(true)
-      expect(h.sentinel.requests).toEqual([]); expect(server.requestsFor("0.1.0") + server.requestsFor("0.1.1")).toBeGreaterThan(0)
+      expect(h.sentinel.requests).toEqual([]); expect(server.requestsFor("0.1.1") + server.requestsFor("0.1.2")).toBeGreaterThan(0)
       console.log("production-bin-no-override=PASS setup doctor reuse update old-popup new-popup doctor uninstall: PASS public-network-requests=0 real-home-writes=0 default-tmux-uses=0")
     } finally { await harnessTmux(["kill-server"]).catch(() => undefined); guard(); await server.close() }
   } finally { await rm(fixtureRoot, { recursive: true, force: true }); await h.cleanup(); await rm(packed.output, { recursive: true, force: true }) }

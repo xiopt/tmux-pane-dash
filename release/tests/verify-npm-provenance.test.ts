@@ -20,15 +20,15 @@ const handoff = {
   schemaVersion: 1,
   tagCommit: "0123456789abcdef0123456789abcdef01234567",
   npm: {
-    "@xiopt/pane-dash-opencode": { filename: "xiopt-pane-dash-opencode-0.1.0.tgz", integrity: packageIntegrity },
-    "@xiopt/tmux-pane-dash": { filename: "xiopt-tmux-pane-dash-0.1.0.tgz", integrity: packageIntegrity },
+    "@xiopt/pane-dash-opencode": { filename: "xiopt-pane-dash-opencode-0.1.1.tgz", integrity: packageIntegrity },
+    "@xiopt/tmux-pane-dash": { filename: "xiopt-tmux-pane-dash-0.1.1.tgz", integrity: packageIntegrity },
   },
   verifier: { filename: "verify-npm-provenance.mjs", sha256: "a".repeat(64), size: 10 },
   trustedPublishers: {
     "@xiopt/pane-dash-opencode": { repository: "xiopt/tmux-pane-dash", workflow: "release.yml", environment: "npm-production", allowedAction: "npm publish" },
     "@xiopt/tmux-pane-dash": { repository: "xiopt/tmux-pane-dash", workflow: "release.yml", environment: "npm-production", allowedAction: "npm publish" },
   },
-  releaseAssets: Object.fromEntries(["tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz", "tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz", "release-manifest.json", "SHA256SUMS"].map((name) => [name, "b".repeat(64)])),
+  releaseAssets: Object.fromEntries(["tmux-pane-dash-v0.1.1-aarch64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.1-x86_64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.1-aarch64-unknown-linux-musl.tar.gz", "tmux-pane-dash-v0.1.1-x86_64-unknown-linux-musl.tar.gz", "release-manifest.json", "SHA256SUMS"].map((name) => [name, "b".repeat(64)])),
 } as const
 
 function validBundleFor(certificateRawBytes?: string): Record<string, unknown> {
@@ -39,6 +39,9 @@ function validBundleFor(certificateRawBytes?: string): Record<string, unknown> {
 }
 
 const validBundle = validBundleFor()
+
+// The committed Sigstore bundle is signed historical v0.1.0 evidence; keep its
+// payload/ref intact and exercise current-release gating through the CLI path.
 
 async function sigstoreDependencies(bundle: unknown) {
   const cache = join(tmpdir(), `task14-tuf-${process.pid}-${Math.random().toString(16).slice(2)}`)
@@ -129,9 +132,9 @@ test("environment parser accepts only strict scalar job environments", () => {
   ]) expect(() => extractJobEnvironment(malformed, "draft-release")).toThrow()
 })
 
-const approval = { schemaVersion: 1, runId: 42, expectedSha: handoff.tagCommit, environment: { id: 99, name: "npm-production" }, approver: "reviewer", currentUserCanApprove: true, requestSha256: "c".repeat(64), response: { httpStatus: 200, runId: 42, environmentId: 99, deploymentId: 123, environment: "npm-production", sha: handoff.tagCommit, ref: "refs/tags/v0.1.0", approved: true } } as const
+const approval = { schemaVersion: 1, runId: 42, expectedSha: handoff.tagCommit, environment: { id: 99, name: "npm-production" }, approver: "reviewer", currentUserCanApprove: true, requestSha256: "c".repeat(64), response: { httpStatus: 200, runId: 42, environmentId: 99, deploymentId: 123, environment: "npm-production", sha: handoff.tagCommit, ref: "refs/tags/v0.1.1", approved: true } } as const
 const deployments = [{
-  url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123", id: 123, node_id: "MDExOkRlcGxveW1lbnQxMjM=", sha: handoff.tagCommit, ref: "v0.1.0", task: "deploy", payload: {}, original_environment: "npm-production", environment: "npm-production", description: null, creator: {}, created_at: "2026-07-27T00:00:00Z", updated_at: "2026-07-27T00:00:00Z", statuses_url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123/statuses", repository_url: "https://api.github.com/repos/xiopt/tmux-pane-dash", transient_environment: false, production_environment: true, performed_via_github_app: null,
+  url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123", id: 123, node_id: "MDExOkRlcGxveW1lbnQxMjM=", sha: handoff.tagCommit, ref: "v0.1.1", task: "deploy", payload: {}, original_environment: "npm-production", environment: "npm-production", description: null, creator: {}, created_at: "2026-07-27T00:00:00Z", updated_at: "2026-07-27T00:00:00Z", statuses_url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123/statuses", repository_url: "https://api.github.com/repos/xiopt/tmux-pane-dash", transient_environment: false, production_environment: true, performed_via_github_app: null,
 }]
 const statuses = [{ id: 456, state: "success", deployment_id: 123, environment_url: "https://github.com/xiopt/tmux-pane-dash/deployments/123" }]
 const jobs = { jobs: [{ id: 789, name: "npm-production", status: "completed", conclusion: "success", head_sha: handoff.tagCommit }] }
@@ -146,7 +149,7 @@ test("environment proof correlates all workflow bindings, sanitized approval, de
     { approvalEvidence: { ...approval, response: { ...approval.response, deploymentId: 124 } } },
     { deployments: [{ ...deployments[0], sha: "e".repeat(40) }] },
     { deployments: [{ ...deployments[0], ref: "refs/tags/v0.1.0" }] },
-    { deployments: [{ ...deployments[0], ref: "v0.1.1" }] },
+    { deployments: [{ ...deployments[0], ref: "v0.1.0" }] },
     { deployments: [deployments[0], deployments[0]] },
     { deployments: [{ ...deployments[0], environment: "release-promotion" }] },
     { deploymentStatuses: [{ ...statuses[0], state: "failure" }] },

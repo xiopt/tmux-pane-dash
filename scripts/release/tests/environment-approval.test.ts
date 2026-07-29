@@ -6,7 +6,7 @@ import { approvePendingDeployment, capturePendingDeployment, type ApprovalDepend
 
 const pendingPath = "/repos/xiopt/tmux-pane-dash/actions/runs/42/pending_deployments"
 const pending = [{ environment: { id: 99, name: "npm-production" }, wait_timer: 0, reviewers: [], current_user_can_approve: true }]
-const deployment = { url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123", id: 123, node_id: "D_kw", sha: "0123456789abcdef0123456789abcdef01234567", ref: "v0.1.0", task: "deploy", payload: {}, original_environment: "npm-production", environment: "npm-production", description: null, creator: { login: "github-actions[bot]" }, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", statuses_url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123/statuses", repository_url: "https://api.github.com/repos/xiopt/tmux-pane-dash", transient_environment: false, production_environment: true, performed_via_github_app: null }
+const deployment = { url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123", id: 123, node_id: "D_kw", sha: "0123456789abcdef0123456789abcdef01234567", ref: "v0.1.1", task: "deploy", payload: {}, original_environment: "npm-production", environment: "npm-production", description: null, creator: { login: "github-actions[bot]" }, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", statuses_url: "https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/123/statuses", repository_url: "https://api.github.com/repos/xiopt/tmux-pane-dash", transient_environment: false, production_environment: true, performed_via_github_app: null }
 const included = (status: number, body: unknown) => `HTTP/2 ${status}\r\ncontent-type: application/json\r\n\r\n${JSON.stringify(body)}\n`
 
 const setup = async () => {
@@ -30,7 +30,7 @@ const setup = async () => {
   return { evidenceDir, calls, deps, get postCount() { return postCount } }
 }
 
-const input = (evidenceDir: string) => ({ runId: 42, expectedSha: "0123456789abcdef0123456789abcdef01234567", environment: "npm-production" as const, evidenceDir, comment: "approve v0.1.0" })
+const input = (evidenceDir: string) => ({ runId: 42, expectedSha: "0123456789abcdef0123456789abcdef01234567", environment: "npm-production" as const, evidenceDir, comment: "approve v0.1.1" })
 
 test("capture uses exact pending-deployment and current-user calls and sanitizes evidence", async () => {
   const fixture = await setup()
@@ -48,7 +48,7 @@ test("approval re-captures, hashes canonical request, makes one exact POST, and 
   await capturePendingDeployment(input(fixture.evidenceDir), fixture.deps)
   const result = await approvePendingDeployment(input(fixture.evidenceDir), fixture.deps)
   expect(fixture.postCount).toBe(1)
-  expect(result).toMatchObject({ response: { httpStatus: 200, runId: 42, environmentId: 99, deploymentId: 123, environment: "npm-production", sha: input(fixture.evidenceDir).expectedSha, ref: "refs/tags/v0.1.0", approved: true } })
+  expect(result).toMatchObject({ response: { httpStatus: 200, runId: 42, environmentId: 99, deploymentId: 123, environment: "npm-production", sha: input(fixture.evidenceDir).expectedSha, ref: "refs/tags/v0.1.1", approved: true } })
   expect(fixture.calls.at(-1)).toEqual(["api", "--include", "--method", "POST", pendingPath, "--input", join(fixture.evidenceDir, "approval-request.json")])
   expect(await readdir(fixture.evidenceDir)).not.toContain("approval-request.json")
   expect(await readdir(fixture.evidenceDir)).toEqual(expect.arrayContaining(["approval-request.sha256", "approval-response.json", "approval-evidence.json"]))

@@ -23,6 +23,8 @@ function targetKey(value: string): TargetKey {
   return value as TargetKey
 }
 
+// Local fixtures use the host binary plus three deterministic synthetic targets;
+// production workflows build all four targets and require a changed package build.
 async function buildFixtureRelease(output: string, tagCommit: string): Promise<void> {
   const sourceEpoch = await epoch(tagCommit); await mkdir(output, { recursive: true }); const assets: VerifiedAsset[] = []
   for (const [key, target] of Object.entries(TARGETS)) {

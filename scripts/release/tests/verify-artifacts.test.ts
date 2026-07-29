@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { canonicalJson, sha256 } from "../canonical-json"
-import { TAG_COMMIT, TARGETS } from "../contracts"
+import { TAG, TAG_COMMIT, TARGETS } from "../contracts"
 import { assertPackedNodeBundle, verifyPackages, verifyReleaseDirectory } from "../verify-artifacts"
 
 const decoder = new TextDecoder()
@@ -142,14 +142,14 @@ test("verifier rejects a release tag that no longer resolves to the expected com
 case "$*" in
   'rev-parse d47a37a^{commit}') printf '%s\\n' expected-release-commit ;;
   'show -s --format=%ct expected-release-commit') printf '%s\\n' ${epoch} ;;
-  'rev-parse --verify --quiet refs/tags/v0.1.0') printf '%s\\n' release-tag-ref ;;
-  'rev-parse v0.1.0^{commit}') printf '%s\\n' moved-release-tag ;;
+  'rev-parse --verify --quiet refs/tags/v0.1.1') printf '%s\\n' release-tag-ref ;;
+  'rev-parse v0.1.1^{commit}') printf '%s\\n' moved-release-tag ;;
   *) exit 1 ;;
 esac
 `)
     await chmod(git, 0o755)
     process.env.PATH = `${bin}:${previousPath}`
-    await expect(verifyReleaseDirectory(root)).rejects.toThrow("tag v0.1.0 does not resolve to supplied tag commit")
+    await expect(verifyReleaseDirectory(root)).rejects.toThrow(`tag ${TAG} does not resolve to supplied tag commit`)
   } finally {
     process.env.PATH = previousPath
     await rm(root, { recursive: true, force: true })

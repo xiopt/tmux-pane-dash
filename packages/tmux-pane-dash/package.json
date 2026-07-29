@@ -1,6 +1,6 @@
 {
   "name": "@xiopt/tmux-pane-dash",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Immutable installer for tmux-pane-dash",
   "type": "module",
   "engines": { "node": ">=20" },
