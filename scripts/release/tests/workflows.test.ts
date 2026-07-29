@@ -4,6 +4,8 @@ import { join } from "node:path"
 
 const root = process.cwd()
 const workflow = (name: string) => readFile(join(root, ".github", "workflows", name), "utf8")
+const trustedPublisherExpected = '{"packages":{"@xiopt/pane-dash-opencode":{"allowedAction":"npm publish","environment":"npm-production","repository":"xiopt/tmux-pane-dash","workflow":"release.yml"},"@xiopt/tmux-pane-dash":{"allowedAction":"npm publish","environment":"npm-production","repository":"xiopt/tmux-pane-dash","workflow":"release.yml"}},"schemaVersion":1}'
+const trustedPublisherExpectedEnvLine = `  NPM_TRUSTED_PUBLISHER_EXPECTED: '${trustedPublisherExpected}'`
 const job = (text: string, name: string): string => {
   const match = new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [A-Za-z0-9_-]+:|(?![\\s\\S]))`, "m").exec(text)
   if (!match) throw new Error(`missing workflow job ${name}`)
@@ -136,6 +138,39 @@ const stepCommands = (step: ParsedStep): string[] => (step.run ?? "").split("\n"
 const hasGhCommand = (step: ParsedStep): boolean => stepCommands(step).some((line) => /\bgh\s+(?:api|release|run|attestation)\b/.test(line))
 const jobHasGhAuth = (job: ParsedJob): boolean => job.env.GH_TOKEN === "${{ github.token }}" || job.steps.some((step) => step.env.GH_TOKEN === "${{ github.token }}")
 
+function trustedPublisherBindingMatches(actual: string | undefined, expected: string | undefined): boolean {
+  return typeof actual === "string" && typeof expected === "string" && actual.length > 0 && actual === expected
+}
+
+function assertTrustedPublisherContract(text: string): void {
+  const parsed = parseWorkflow(text)
+  const expectedKeys = Object.keys(JSON.parse(trustedPublisherExpected) as Record<string, unknown>)
+  if (JSON.stringify(expectedKeys) !== JSON.stringify(["packages", "schemaVersion"])) throw new Error("trusted publisher expected JSON is not canonically ordered")
+  const expectedPackages = (JSON.parse(trustedPublisherExpected) as { packages: Record<string, Record<string, string>> }).packages
+  if (JSON.stringify(Object.keys(expectedPackages)) !== JSON.stringify(["@xiopt/pane-dash-opencode", "@xiopt/tmux-pane-dash"])) throw new Error("trusted publisher packages are not canonically ordered")
+  for (const packageName of Object.keys(expectedPackages)) {
+    if (JSON.stringify(Object.keys(expectedPackages[packageName]!)) !== JSON.stringify(["allowedAction", "environment", "repository", "workflow"])) throw new Error("trusted publisher coordinates are not canonically ordered")
+  }
+
+  if ((text.match(/^  NPM_TRUSTED_PUBLISHER_EXPECTED:.*$/gm) ?? []).length !== 1 || text.split("\n").filter((line) => line === trustedPublisherExpectedEnvLine).length !== 1) {
+    throw new Error("trusted publisher expected binding must be defined once on one workflow-level env line")
+  }
+  if (!text.includes(`env:\n${trustedPublisherExpectedEnvLine}\n`) || text.indexOf("env:\n") > text.indexOf("jobs:\n")) throw new Error("trusted publisher expected binding must be workflow-level env")
+
+  const requiredLine = 'test -n "${NPM_TRUSTED_PUBLISHER_BINDING:?NPM_TRUSTED_PUBLISHER_BINDING is required}"'
+  const compareLine = 'test "$NPM_TRUSTED_PUBLISHER_BINDING" = "$NPM_TRUSTED_PUBLISHER_EXPECTED"'
+  const bareComparison = 'test "$NPM_TRUSTED_PUBLISHER_BINDING" = "npm publish"'
+  for (const name of ["assemble-verified", "npm-production"]) {
+    const parsedJob = parsed.jobs[name]
+    if (!parsedJob || parsedJob.env.NPM_TRUSTED_PUBLISHER_BINDING !== "${{ vars.NPM_TRUSTED_PUBLISHER_BINDING }}") throw new Error(`${name} must source the trusted publisher binding variable`)
+    const checks = parsedJob.steps.filter((step) => (step.run ?? "").includes(compareLine))
+    if (checks.length !== 1) throw new Error(`${name} must compare the trusted publisher binding exactly once`)
+    const run = checks[0]!.run ?? ""
+    if (!run.includes(requiredLine)) throw new Error(`${name} must fail closed when the trusted publisher binding is missing`)
+    if (run.includes("NPM_TRUSTED_PUBLISHER_BINDING:-") || run.includes(bareComparison)) throw new Error(`${name} must not use a trusted publisher fallback or bare action comparison`)
+  }
+}
+
 function assertGhAuthentication(workflow: ParsedWorkflow, text: string): void {
   if (/\b(?:NPM_TOKEN|NODE_AUTH_TOKEN|GITHUB_TOKEN)\b/.test(text)) throw new Error("workflow contains a forbidden credential")
   for (const job of Object.values(workflow.jobs)) {
@@ -206,6 +241,7 @@ function assertTmuxProvisioning(workflow: ParsedWorkflow, workflowName: string):
 }
 
 const wrappedBatsCommand = "tests/release/with-rust.sh -- scripts/release/clean-room.sh -- bats tests"
+const releaseRustToolchainInstall = "rustup toolchain install 1.96.1 --profile minimal --component rustfmt --no-self-update"
 
 const isBatsProvision = (step: ParsedStep): boolean => {
   const run = step.run ?? ""
@@ -216,14 +252,18 @@ const isBatsProvision = (step: ParsedStep): boolean => {
     run.includes('[[ "$bats_version" =~ ^Bats[[:space:]]+([1-9][0-9]*)\\. ]]')
 }
 
-function assertBatsProvisioning(workflow: ParsedWorkflow): void {
-  const rust = workflow.jobs["rust"]
-  if (!rust) throw new Error("rust job is missing")
+function assertBatsProvisioning(workflow: ParsedWorkflow, jobName = "rust", requiredRustInstall?: string): void {
+  const rust = workflow.jobs[jobName]
+  if (!rust) throw new Error(`${jobName} job is missing`)
   const provision = rust.steps.findIndex(isBatsProvision)
   const bats = rust.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === wrappedBatsCommand))
-  if (bats < 0) throw new Error("rust job must run Bats through with-rust and clean-room")
-  if (provision < 0) throw new Error("rust job must provision distro Bats at /usr/bin")
-  if (provision >= bats) throw new Error("rust job must provision Bats before the wrapped Bats command")
+  if (bats < 0) throw new Error(`${jobName} job must run Bats through with-rust and clean-room`)
+  if (provision < 0) throw new Error(`${jobName} job must provision distro Bats at /usr/bin`)
+  if (provision >= bats) throw new Error(`${jobName} job must provision Bats before the wrapped Bats command`)
+  if (!hasToolProvision(rust, bats)) throw new Error(`${jobName} Bats must retain the prior TMUX_BIN and BUN_BOOTSTRAP provisioning`)
+  if (requiredRustInstall && (rust.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === requiredRustInstall)) < 0 || rust.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === requiredRustInstall)) >= bats)) {
+    throw new Error(`${jobName} Bats must follow its pinned Rust prerequisite`)
+  }
 }
 
 const rustToolchainInstall = "rustup toolchain install 1.96.1 --profile minimal --component clippy --component rustfmt --no-self-update"
@@ -294,9 +334,9 @@ function assertPackedE2EGraph(workflow: ParsedWorkflow): void {
   }
 }
 
-function assertCiPackedE2EToolchain(workflow: ParsedWorkflow): void {
-  const job = workflow.jobs["packed-e2e"]
-  if (!job) throw new Error("packed-e2e is missing")
+function assertPackedE2EToolchain(workflow: ParsedWorkflow, jobName = "packed-e2e"): void {
+  const job = workflow.jobs[jobName]
+  if (!job) throw new Error(`${jobName} is missing`)
   const target = "x86_64-unknown-linux-musl"
   const provisionIndex = job.steps.findIndex((step) => {
     const run = step.run ?? ""
@@ -309,7 +349,7 @@ function assertCiPackedE2EToolchain(workflow: ParsedWorkflow): void {
       run.includes('test "$CARGO_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/cargo"') &&
       run.includes('[[ "$CARGO" == "$PANE_DASH_ISOLATED_RUST_ROOT"/rustup/toolchains/1.96.1-*/bin/cargo ]]')
   })
-  if (provisionIndex < 0) throw new Error("packed-e2e must provision musl-tools and its isolated Rust target")
+  if (provisionIndex < 0) throw new Error(`${jobName} must provision musl-tools and its isolated Rust target`)
   const provisionRun = job.steps[provisionIndex]!.run ?? ""
   const provisionMarkers = [
     "sudo apt-get update",
@@ -328,13 +368,13 @@ function assertCiPackedE2EToolchain(workflow: ParsedWorkflow): void {
     previous = position
   }
   const packedIndex = job.steps.findIndex((step) => (step.run ?? "").includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts"))
-  if (packedIndex < 0) throw new Error("packed-e2e fixture command is missing")
-  if (provisionIndex >= packedIndex) throw new Error("packed-e2e must provision its isolated musl target before the fixture")
+  if (packedIndex < 0) throw new Error(`${jobName} fixture command is missing`)
+  if (provisionIndex >= packedIndex) throw new Error(`${jobName} must provision its isolated musl target before the fixture`)
 }
 
-function assertCiPackedE2ETmuxBinding(workflow: ParsedWorkflow): void {
-  const packed = workflow.jobs["packed-e2e"]
-  if (!packed) throw new Error("packed-e2e is missing")
+function assertPackedE2ETmuxBinding(workflow: ParsedWorkflow, jobName = "packed-e2e"): void {
+  const packed = workflow.jobs[jobName]
+  if (!packed) throw new Error(`${jobName} is missing`)
   const binding = (step: ParsedStep): boolean => {
     const run = step.run ?? ""
     return run.includes('test -x "${TMUX_BIN:?TMUX_BIN is required}"') &&
@@ -347,13 +387,23 @@ function assertCiPackedE2ETmuxBinding(workflow: ParsedWorkflow): void {
       run.includes('test "$(/usr/local/bin/tmux -V)" = "tmux 3.6a"')
   }
   const bindingIndex = packed.steps.findIndex(binding)
-  if (bindingIndex < 0) throw new Error("packed-e2e must bind its verified tmux binary into /usr/local/bin")
-  if (workflow.jobs && Object.values(workflow.jobs).some(job => job.name !== "packed-e2e" && job.steps.some(binding))) {
-    throw new Error("the fixed tmux binding must be limited to packed-e2e")
+  if (bindingIndex < 0) throw new Error(`${jobName} must bind its verified tmux binary into /usr/local/bin`)
+  if (workflow.jobs && Object.values(workflow.jobs).some(job => job.name !== jobName && job.steps.some(binding))) {
+    throw new Error(`the fixed tmux binding must be limited to ${jobName}`)
   }
   const packedIndex = packed.steps.findIndex((step) => (step.run ?? "").includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts"))
-  if (packedIndex < 0) throw new Error("packed-e2e fixture command is missing")
-  if (bindingIndex >= packedIndex) throw new Error("packed-e2e must bind tmux before the fixture")
+  if (packedIndex < 0) throw new Error(`${jobName} fixture command is missing`)
+  if (bindingIndex >= packedIndex) throw new Error(`${jobName} must bind tmux before the fixture`)
+}
+
+function assertPackedE2EPrerequisiteOrder(workflow: ParsedWorkflow, jobName = "packed-e2e"): void {
+  const packed = workflow.jobs[jobName]
+  if (!packed) throw new Error(`${jobName} is missing`)
+  const bindingIndex = packed.steps.findIndex((step) => (step.run ?? "").includes('sudo ln -sfn -- "$TMUX_BIN" /usr/local/bin/tmux'))
+  const muslIndex = packed.steps.findIndex((step) => (step.run ?? "").includes('tests/release/with-rust.sh -- "$RUSTUP_BOOTSTRAP" target add x86_64-unknown-linux-musl --toolchain 1.96.1'))
+  const packedIndex = packed.steps.findIndex((step) => (step.run ?? "").includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts"))
+  if (bindingIndex < 0 || muslIndex < 0 || packedIndex < 0) throw new Error(`${jobName} packed E2E prerequisites are incomplete`)
+  if (!(bindingIndex < muslIndex && muslIndex < packedIndex)) throw new Error(`${jobName} must order tmux binding, musl provisioning, and packed E2E in sequence`)
 }
 
 function assertOpenCodeProvisioning(workflow: ParsedWorkflow): void {
@@ -438,7 +488,7 @@ const ciCliMuslBuildCommands = [
   "sudo apt-get update",
   "sudo apt-get install -y musl-tools",
   ciCliMuslCargoBuild,
-  "mkdir bin",
+  "mkdir -p bin",
   `install -m0755 pane-dash/target/${ciCliMuslTarget}/release/pane-dash bin/pane-dash`,
   "test -x bin/pane-dash",
   'test "$(bin/pane-dash --version)" = "pane-dash 0.1.0"',
@@ -517,13 +567,21 @@ function assertWorkflowGraph(text: string, workflowName: string): void {
   if (workflowName === "ci.yml") {
     assertCiCliNpaIsolation(workflow)
     assertCiCliMuslFixture(workflow)
-    assertCiPackedE2EToolchain(workflow)
-    assertCiPackedE2ETmuxBinding(workflow)
+    assertPackedE2EToolchain(workflow)
+    assertPackedE2ETmuxBinding(workflow)
+    assertPackedE2EPrerequisiteOrder(workflow)
     assertOpenCodeProvisioning(workflow)
     assertBatsProvisioning(workflow)
     assertRustLiveBinaryBuild(workflow)
   }
-  if (workflowName === "release.yml") assertPromotionGraph(workflow)
+  if (workflowName === "release.yml") {
+    assertTrustedPublisherContract(text)
+    assertBatsProvisioning(workflow, "build-test", releaseRustToolchainInstall)
+    assertPackedE2EToolchain(workflow, "validate-draft")
+    assertPackedE2ETmuxBinding(workflow, "validate-draft")
+    assertPackedE2EPrerequisiteOrder(workflow, "validate-draft")
+    assertPromotionGraph(workflow)
+  }
 }
 
 test("CI is read-only, ordered, and runs all four target commands plus isolated contracts", async () => {
@@ -583,6 +641,19 @@ test("Rust and four-target process-spawning tests reject missing or parallel com
   expect(() => assertFourTargetTestSerialization(fourTargets.replace(target, target.replace(" -- --test-threads=1", "")))).toThrow(/exact serial commands/)
 })
 
+test("release active and target Rust tests reject missing or parallel commands", async () => {
+  const text = await workflow("release.yml")
+  const activeBody = job(text, "build-test")
+  const targetBody = job(text, "build-four-targets")
+  const active = `${cargoTestPrefix} -- --test-threads=1`
+  const target = `${cargoTestPrefix} --target "\${RUST_TARGET}" -- --test-threads=1`
+
+  expect(() => assertSerialCargoTestCommands(activeBody, [active], "release active process-spawning tests")).not.toThrow()
+  expect(() => assertSerialCargoTestCommands(activeBody.replace(active, cargoTestPrefix), [active], "release active process-spawning tests")).toThrow(/exact serial commands/)
+  expect(() => assertSerialCargoTestCommands(targetBody, [target], "release target process-spawning tests")).not.toThrow()
+  expect(() => assertSerialCargoTestCommands(targetBody.replace(target, target.replace(" -- --test-threads=1", "")), [target], "release target process-spawning tests")).toThrow(/exact serial commands/)
+})
+
 test("Rust builds the live-test binary after its gates and rejects missing, reordered, or bare cargo builds", async () => {
   const text = await workflow("ci.yml")
   const parsed = parseWorkflow(text)
@@ -634,6 +705,8 @@ test("ci-cli builds the pinned musl fixture before Node20 release tests and reje
   })
 
   expect(() => assertCiCliMuslFixture(parsed)).not.toThrow()
+  expect(fixtureRun).toContain("mkdir -p bin")
+  expect(() => assertCiCliMuslFixture(withFixtureRun(fixtureRun.replace("mkdir -p bin", "mkdir bin")))).toThrow(/exact pinned musl/)
   expect(() => assertCiCliMuslFixture(withFixtureRun(fixtureRun.replace("sudo apt-get update\n", "")))).toThrow(/exact pinned musl/)
   expect(() => assertCiCliMuslFixture(withFixtureRun(fixtureRun.replace(buildCommand, "make build")))).toThrow(/plain make/)
   expect(() => assertCiCliMuslFixture(withFixtureRun(fixtureRun.replace(buildCommand, "cargo build --release --locked --manifest-path pane-dash/Cargo.toml")))).toThrow(/default GNU/)
@@ -648,29 +721,57 @@ test("ci-cli builds the pinned musl fixture before Node20 release tests and reje
 test("packed E2E provisions musl in the isolated Rust toolchain before its fixture", async () => {
   const text = await workflow("ci.yml")
   const parsed = parseWorkflow(text)
-  expect(() => assertCiPackedE2EToolchain(parsed)).not.toThrow()
+  expect(() => assertPackedE2EToolchain(parsed)).not.toThrow()
 
   const packed = parsed.jobs["packed-e2e"]!
   const provisionIndex = packed.steps.findIndex((step) => (step.run ?? "").includes('"$RUSTUP_BOOTSTRAP" target add x86_64-unknown-linux-musl --toolchain 1.96.1'))
   const broken = packed.steps.map((step, index) => index === provisionIndex ? { ...step, run: (step.run ?? "").replace('test "$RUSTUP_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup"', "") } : step)
-  expect(() => assertCiPackedE2EToolchain({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: broken } } })).toThrow(/isolated Rust target/)
+  expect(() => assertPackedE2EToolchain({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: broken } } })).toThrow(/isolated Rust target/)
 })
 
 test("packed E2E binds the verified tmux into the doctor PATH before its fixture", async () => {
   const text = await workflow("ci.yml")
   const parsed = parseWorkflow(text)
-  expect(() => assertCiPackedE2ETmuxBinding(parsed)).not.toThrow()
+  expect(() => assertPackedE2ETmuxBinding(parsed)).not.toThrow()
 
   const packed = parsed.jobs["packed-e2e"]!
   const bindingIndex = packed.steps.findIndex((step) => (step.run ?? "").includes("sudo ln -sfn -- \"$TMUX_BIN\" /usr/local/bin/tmux"))
   const fixtureIndex = packed.steps.findIndex((step) => (step.run ?? "").includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts"))
   const withoutBinding = packed.steps.filter((_, index) => index !== bindingIndex)
-  expect(() => assertCiPackedE2ETmuxBinding({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: withoutBinding } } })).toThrow(/bind its verified tmux/)
+  expect(() => assertPackedE2ETmuxBinding({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: withoutBinding } } })).toThrow(/bind its verified tmux/)
 
   const reordered = [...packed.steps]
   const bindingStep = reordered.splice(bindingIndex, 1)[0]!
   reordered.splice(fixtureIndex, 0, bindingStep)
-  expect(() => assertCiPackedE2ETmuxBinding({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: reordered } } })).toThrow(/before the fixture/)
+  expect(() => assertPackedE2ETmuxBinding({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: reordered } } })).toThrow(/before the fixture/)
+})
+
+test("release validate-draft uses the exact tmux and isolated musl prerequisites before packed E2E", async () => {
+  const text = await workflow("release.yml")
+  const parsed = parseWorkflow(text)
+  const validation = parsed.jobs["validate-draft"]
+  if (!validation) throw new Error("validate-draft job is missing")
+  expect(() => assertPackedE2ETmuxBinding(parsed, "validate-draft")).not.toThrow()
+  expect(() => assertPackedE2EToolchain(parsed, "validate-draft")).not.toThrow()
+  expect(() => assertPackedE2EPrerequisiteOrder(parsed, "validate-draft")).not.toThrow()
+
+  const bindingIndex = validation.steps.findIndex((step) => (step.run ?? "").includes("sudo ln -sfn -- \"$TMUX_BIN\" /usr/local/bin/tmux"))
+  const muslIndex = validation.steps.findIndex((step) => (step.run ?? "").includes('tests/release/with-rust.sh -- "$RUSTUP_BOOTSTRAP" target add x86_64-unknown-linux-musl --toolchain 1.96.1'))
+  const packedIndex = validation.steps.findIndex((step) => (step.run ?? "").includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts"))
+  expect(bindingIndex).toBeLessThan(muslIndex)
+  expect(muslIndex).toBeLessThan(packedIndex)
+
+  const withoutBinding = validation.steps.filter((_, index) => index !== bindingIndex)
+  expect(() => assertPackedE2ETmuxBinding({ ...parsed, jobs: { ...parsed.jobs, "validate-draft": { ...validation, steps: withoutBinding } } }, "validate-draft")).toThrow(/bind its verified tmux/)
+
+  const muslRun = validation.steps[muslIndex]!.run ?? ""
+  const withoutMuslTools = validation.steps.map((step, index) => index === muslIndex ? { ...step, run: muslRun.replace("sudo apt-get install -y musl-tools\n", "") } : step)
+  expect(() => assertPackedE2EToolchain({ ...parsed, jobs: { ...parsed.jobs, "validate-draft": { ...validation, steps: withoutMuslTools } } }, "validate-draft")).toThrow(/musl-tools/)
+
+  const reordered = [...validation.steps]
+  const bindingStep = reordered.splice(bindingIndex, 1)[0]!
+  reordered.splice(muslIndex, 0, bindingStep)
+  expect(() => assertPackedE2EPrerequisiteOrder({ ...parsed, jobs: { ...parsed.jobs, "validate-draft": { ...validation, steps: reordered } } }, "validate-draft")).toThrow(/sequence/)
 })
 
 test("OpenCode compatibility runs only its targeted postinstalls before integrity and version checks", async () => {
@@ -784,6 +885,37 @@ test("release graph has exact least-privilege jobs, environments, handoff, and t
   expect(text).toContain("release-manifest.json")
   expect(text).toContain("SHA256SUMS")
   console.log("promotion-permissions=contents:write,actions:read,deployments:read npm-permissions=unchanged")
+})
+
+test("release trusted publisher checks require one canonical exact binding without fallbacks", async () => {
+  const text = await workflow("release.yml")
+  const requiredLine = 'test -n "${NPM_TRUSTED_PUBLISHER_BINDING:?NPM_TRUSTED_PUBLISHER_BINDING is required}"'
+  const compareLine = 'test "$NPM_TRUSTED_PUBLISHER_BINDING" = "$NPM_TRUSTED_PUBLISHER_EXPECTED"'
+  expect(() => assertTrustedPublisherContract(text)).not.toThrow()
+  expect(trustedPublisherBindingMatches(trustedPublisherExpected, trustedPublisherExpected)).toBe(true)
+
+  const binding = JSON.parse(trustedPublisherExpected) as { packages: Record<string, Record<string, string>>; schemaVersion: number }
+  const candidate = (mutate: (value: typeof binding) => void): string => {
+    const copy = structuredClone(binding)
+    mutate(copy)
+    return JSON.stringify(copy)
+  }
+  for (const value of [
+    "{malformed",
+    undefined,
+    candidate((value) => { (value as Record<string, unknown>).extra = true }),
+    candidate((value) => { value.packages["@xiopt/pane-dash-opencode"]!.allowedAction = "npm publish && npm install" }),
+    candidate((value) => { value.packages["@xiopt/pane-dash-opencode"]!.repository = "attacker/repository" }),
+    candidate((value) => { value.packages["@xiopt/pane-dash-opencode"]!.workflow = "other.yml" }),
+    candidate((value) => { value.packages["@xiopt/pane-dash-opencode"]!.environment = "unprotected" }),
+    candidate((value) => { value.packages["@xiopt/pane-dash-opencode"]!.allowedAction = "npm install" }),
+  ]) expect(trustedPublisherBindingMatches(value, trustedPublisherExpected)).toBe(false)
+
+  const malformedExpected = text.replace(trustedPublisherExpectedEnvLine, `  NPM_TRUSTED_PUBLISHER_EXPECTED: '{malformed'`)
+  expect(() => assertTrustedPublisherContract(malformedExpected)).toThrow(/canonically|defined once/)
+  expect(() => assertTrustedPublisherContract(text.replace(`${requiredLine}\n`, ""))).toThrow(/fail closed/)
+  expect(() => assertTrustedPublisherContract(text.replace(compareLine, 'test "$NPM_TRUSTED_PUBLISHER_BINDING" = "npm publish"'))).toThrow(/compare|bare action/)
+  expect(() => assertTrustedPublisherContract(text.replace(requiredLine, 'test -n "${NPM_TRUSTED_PUBLISHER_BINDING:-npm publish}"'))).toThrow(/fail closed|fallback/)
 })
 
 test("release validation derives identity from the checked-in version and protected tag graph", async () => {
@@ -989,6 +1121,32 @@ test("Rust Bats requires ordered distro provisioning and the wrapped command", a
     const bareInvocation = rust.steps.map((step, index) => index === batsIndex ? { ...step, run: (step.run ?? "").replace(wrappedBatsCommand, command) } : step)
     expect(() => assertBatsProvisioning(withRustSteps(bareInvocation))).toThrow(/with-rust/)
   }
+})
+
+test("release Bats keeps tmux, Rust, distro provisioning, and isolation ordered", async () => {
+  const text = await workflow("release.yml")
+  const parsed = parseWorkflow(text)
+  const build = parsed.jobs["build-test"]
+  if (!build) throw new Error("build-test job is missing")
+  const provisionIndex = build.steps.findIndex(isBatsProvision)
+  const batsIndex = build.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === wrappedBatsCommand))
+  if (provisionIndex < 0 || batsIndex < 0) throw new Error("release workflow is missing the Bats steps")
+  expect(() => assertBatsProvisioning(parsed, "build-test", releaseRustToolchainInstall)).not.toThrow()
+
+  const withBuildSteps = (steps: ParsedStep[]): ParsedWorkflow => ({
+    ...parsed,
+    jobs: { ...parsed.jobs, "build-test": { ...build, steps } },
+  })
+  expect(() => assertBatsProvisioning(withBuildSteps(build.steps.filter((_, index) => index !== provisionIndex)), "build-test", releaseRustToolchainInstall)).toThrow(/provision/)
+  expect(() => assertBatsProvisioning(withBuildSteps(build.steps.map((step, index) => index === batsIndex ? { ...step, run: (step.run ?? "").replace(wrappedBatsCommand, "bats tests") } : step)), "build-test", releaseRustToolchainInstall)).toThrow(/with-rust/)
+
+  const withoutTmux = build.steps.filter((step) => !(step.run ?? "").includes("scripts/release/ci-tmux.sh"))
+  expect(() => assertBatsProvisioning(withBuildSteps(withoutTmux), "build-test", releaseRustToolchainInstall)).toThrow(/TMUX_BIN/)
+
+  const reorderedSteps = [...build.steps]
+  const provisionStep = reorderedSteps.splice(provisionIndex, 1)[0]!
+  reorderedSteps.splice(batsIndex, 0, provisionStep)
+  expect(() => assertBatsProvisioning(withBuildSteps(reorderedSteps), "build-test", releaseRustToolchainInstall)).toThrow(/before/)
 })
 
 test("workflow graph rejects a bare packed E2E command", async () => {

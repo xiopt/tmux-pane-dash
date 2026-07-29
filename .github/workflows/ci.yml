@@ -100,7 +100,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
           cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target x86_64-unknown-linux-musl
-          mkdir bin
+          mkdir -p bin
           install -m0755 pane-dash/target/x86_64-unknown-linux-musl/release/pane-dash bin/pane-dash
           test -x bin/pane-dash
           test "$(bin/pane-dash --version)" = "pane-dash 0.1.0"
