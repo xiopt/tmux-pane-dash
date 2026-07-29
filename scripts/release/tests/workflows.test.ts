@@ -17,6 +17,26 @@ const runnerForTarget = (body: string, target: string): string => {
   return match[1]
 }
 
+function assertPackageAssemblyOrder(body: string): void {
+  const markers = [
+    "bun scripts/release/build.ts --assemble",
+    "bun scripts/release/package-build.ts --release-manifest \"$release_dir/release-manifest.json\" --require-change",
+    "tests/release/with-node20.sh -- bun scripts/release/verify-artifacts.ts --packages --release-manifest \"$release_dir/release-manifest.json\"",
+    "npm pack --workspace packages/tmux-pane-dash --workspace opencode-plugin --pack-destination \"$npm_dir\"",
+  ]
+  let previous = body.indexOf("bun install --frozen-lockfile")
+  if (previous < 0) throw new Error("assemble-verified must install locked dependencies")
+  for (const marker of markers) {
+    const position = body.indexOf(marker)
+    if (position < 0 || position <= previous) throw new Error(`assemble-verified package step is missing or out of order: ${marker}`)
+    previous = position
+  }
+  const upload = body.indexOf("name: npm-packages", previous)
+  if (upload < 0 || upload <= previous) throw new Error("npm package upload is missing or out of order")
+  if (body.includes("with-npa.sh")) throw new Error("package verification does not require the NPA wrapper")
+  if (/git (?:status|diff|clean)|source[_-](?:package|manifest)|buildSourceArchive/.test(body.slice(previous))) throw new Error("package handoff must not depend on later tree or source-archive checks")
+}
+
 const setupNode = (body: string, version: string) => {
   expect(body).toContain("uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0")
   expect(body).toContain(`node-version: \"${version}\"`)
@@ -1017,6 +1037,18 @@ test("draft mutation is non-clobbering and draft validation binds all six assets
   expect(validation).toContain("verify-artifacts.ts")
   expect(validation).toContain("architecture")
   expect(validation).toContain("version")
+})
+
+test("assemble-verified stages the assembled manifest before expected package verification and pack", async () => {
+  const body = job(await workflow("release.yml"), "assemble-verified")
+  const stage = "bun scripts/release/package-build.ts --release-manifest \"$release_dir/release-manifest.json\" --require-change"
+  const verify = "tests/release/with-node20.sh -- bun scripts/release/verify-artifacts.ts --packages --release-manifest \"$release_dir/release-manifest.json\""
+  const pack = "npm pack --workspace packages/tmux-pane-dash --workspace opencode-plugin --pack-destination \"$npm_dir\""
+  expect(() => assertPackageAssemblyOrder(body)).not.toThrow()
+  expect(() => assertPackageAssemblyOrder(body.replace(`${stage}\n`, ""))).toThrow(/missing or out of order/)
+  const reordered = body.replace(stage, "__stage__").replace(verify, stage).replace("__stage__", verify)
+  expect(() => assertPackageAssemblyOrder(reordered)).toThrow(/missing or out of order/)
+  expect(() => assertPackageAssemblyOrder(body.replace(pack, "npm pack"))).toThrow(/missing or out of order/)
 })
 
 test("npm production audits signatures without fallback bindings and verifies publication order", async () => {

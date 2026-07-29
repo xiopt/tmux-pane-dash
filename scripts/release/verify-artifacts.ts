@@ -3,15 +3,37 @@ import { tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 import { gunzipSync } from "node:zlib"
-import { ARCHIVE_PAYLOAD, CLI_PACKAGE_FILES, RELEASE_ASSETS, TAG, TAG_COMMIT, TARGETS } from "./contracts"
+import { ARCHIVE_PAYLOAD, CLI_PACKAGE_FILES, RELEASE_ASSETS, TAG, TAG_COMMIT, TARGETS, VERSION } from "./contracts"
 import { canonicalJson, sha256 } from "./canonical-json"
 import { inspectArchive } from "./archive"
 import { inspectBinary } from "./inspect-binary"
+import type { ReleaseManifest } from "../../packages/tmux-pane-dash/src/contracts"
+import { parseReleaseManifest } from "../../packages/tmux-pane-dash/src/manifest"
 
 const decoder = new TextDecoder()
 const parseJson = (bytes: Uint8Array) => JSON.parse(decoder.decode(bytes)) as Record<string, unknown>
 const hasExactKeys = (value: unknown, keys: readonly string[]) => typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
 const overrideName = "(?:INSTALL_ROOT|ROOT_DIR|LATEST|ENDPOINT|CHECKSUM)"
+
+function expectedPackageManifest(bytes: Uint8Array): { bytes: Uint8Array; manifest: ReleaseManifest } {
+  const value = parseJson(bytes)
+  let manifest: ReleaseManifest
+  try {
+    manifest = parseReleaseManifest(value)
+  } catch {
+    throw new Error("invalid expected release manifest")
+  }
+  if (!Buffer.from(bytes).equals(Buffer.from(canonicalJson(value))) || manifest.version !== VERSION || manifest.tag !== TAG || Object.keys(manifest.assets).length !== 4) {
+    throw new Error("invalid expected release manifest")
+  }
+  return { bytes, manifest }
+}
+
+function assertManifestIdentities(bundle: string, manifest: ReleaseManifest): void {
+  for (const identity of [manifest.version, manifest.tag, ...Object.values(manifest.assets).flatMap(asset => [asset.asset, asset.url, asset.sha256])]) {
+    if (!bundle.includes(identity)) throw new Error(`packed CLI is missing release identity: ${identity}`)
+  }
+}
 
 /** Reject packaged override mechanisms, not harmless implementation identifiers. */
 export function assertPackedNodeBundle(bundle: string): void {
@@ -98,12 +120,14 @@ export async function verifyReleaseDirectory(path: string, expectedEpoch?: numbe
   if (decoder.decode(sums) !== checksumLines.sort((a, b) => Buffer.from(a.asset).compare(Buffer.from(b.asset))).map(({ line }) => line).join("\n") + "\n") throw new Error("invalid SHA256SUMS")
 }
 
-export async function verifyPackages(root: string): Promise<void> {
+export async function verifyPackages(root: string, expectedManifestPath?: string): Promise<void> {
   const packageRoot = join(root, "packages", "tmux-pane-dash")
+  const expected = expectedManifestPath ? expectedPackageManifest(await readFile(expectedManifestPath)) : undefined
   const pkg = parseJson(await readFile(join(packageRoot, "package.json")))
   const files = ["dist/cli.js", "dist/runtime.js", "generated/release-manifest.json", "README.md", "LICENSE"]
   const packageKeys = ["name", "version", "description", "type", "engines", "bin", "files", "repository", "homepage", "bugs", "license", "publishConfig"]
   if (!hasExactKeys(pkg, packageKeys) || pkg.name !== "@xiopt/tmux-pane-dash" || pkg.version !== "0.1.0" || pkg.description !== "Immutable installer for tmux-pane-dash" || pkg.type !== "module" || JSON.stringify(pkg.engines) !== JSON.stringify({ node: ">=20" }) || JSON.stringify(pkg.bin) !== JSON.stringify({ "tmux-pane-dash": "dist/cli.js" }) || JSON.stringify(pkg.files) !== JSON.stringify(files) || JSON.stringify(pkg.repository) !== JSON.stringify({ type: "git", url: "git+https://github.com/xiopt/tmux-pane-dash.git" }) || pkg.homepage !== "https://github.com/xiopt/tmux-pane-dash#readme" || JSON.stringify(pkg.bugs) !== JSON.stringify({ url: "https://github.com/xiopt/tmux-pane-dash/issues" }) || pkg.license !== "MIT" || JSON.stringify(pkg.publishConfig) !== JSON.stringify({ access: "public" }) || Object.hasOwn(pkg, "exports") || ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "bundledDependencies", "gypfile", "os", "cpu", "binary", "preinstall", "install", "postinstall", "prepare", "prepublish", "prepublishOnly", "prepack", "postpack"].some((key) => Object.hasOwn(pkg, key))) throw new Error("invalid CLI package metadata")
+  if (expected && !Buffer.from(await readFile(join(packageRoot, "generated", "release-manifest.json"))).equals(Buffer.from(expected.bytes))) throw new Error("source generated release manifest differs from expected")
   const node = process.env.NODE_20_BIN, npm = process.env.NPM_20_CLI
   if (!node || !npm) throw new Error("CLI package check requires with-node20")
   const output = await mkdtemp(join(tmpdir(), "pane-dash-cli-pack-"))
@@ -125,8 +149,10 @@ export async function verifyPackages(root: string): Promise<void> {
     const packedRoot = join(extracted, "package")
     const packedMetadata = parseJson(await readFile(join(packedRoot, "package.json")))
     if (JSON.stringify(packedMetadata) !== JSON.stringify(pkg)) throw new Error("packed package metadata differs")
+    if (expected && !Buffer.from(await readFile(join(packedRoot, "generated", "release-manifest.json"))).equals(Buffer.from(expected.bytes))) throw new Error("packed generated release manifest differs from expected")
     const [cli, runtime] = await Promise.all([readFile(join(packedRoot, "dist", "cli.js"), "utf8"), readFile(join(packedRoot, "dist", "runtime.js"), "utf8")])
     for (const bundle of [cli, runtime]) assertPackedNodeBundle(bundle)
+    if (expected) assertManifestIdentities(cli, expected.manifest)
     if ((cli.match(/\.argv/g) ?? []).length !== 1 || !/\.argv\.slice\(2\)/.test(cli) || /\.argv/.test(runtime)) throw new Error("packed Node artifact has an invalid argv override")
     const noCommand = await command([node, join(packedRoot, "dist", "cli.js")], { ...process.env, PATH: "/usr/bin:/bin" })
     if (noCommand.code !== 2 || noCommand.stdout !== "" || !noCommand.stderr.startsWith("E_USAGE:") || noCommand.stderr.length > 241) throw new Error("packed CLI does not return bounded E_USAGE")
@@ -136,12 +162,17 @@ export async function verifyPackages(root: string): Promise<void> {
 }
 
 if (import.meta.main) {
-  const [argument, ...flags] = process.argv.slice(2)
-  if (!argument || (flags.length !== 0 && (flags.length !== 2 || flags[0] !== "--tag-commit" || !flags[1]))) throw new Error("usage: verify-artifacts.ts DIRECTORY [--tag-commit COMMIT] | --packages")
-  const tagCommit = flags.length === 2 ? flags[1] : undefined
-  if (argument === "--packages") {
-    await verifyPackages(process.cwd()); console.log("packages=1 inventory=exact PASS")
+  const args = process.argv.slice(2), usageMessage = "usage: verify-artifacts.ts DIRECTORY [--tag-commit COMMIT] | --packages [--release-manifest PATH]"
+  if (args[0] === "--packages") {
+    if (args.length === 1) {
+      await verifyPackages(process.cwd()); console.log("packages=1 inventory=exact PASS")
+    } else if (args.length === 3 && args[1] === "--release-manifest" && args[2] && !args[2]!.startsWith("--")) {
+      await verifyPackages(process.cwd(), args[2]); console.log("packages=1 inventory=exact expected-manifest=PASS")
+    } else throw new Error(usageMessage)
   } else {
+    const [argument, ...flags] = args
+    if (!argument || argument.startsWith("--") || (flags.length !== 0 && (flags.length !== 2 || flags[0] !== "--tag-commit" || !flags[1] || flags[1]!.startsWith("--")))) throw new Error(usageMessage)
+    const tagCommit = flags.length === 2 ? flags[1] : undefined
     await verifyReleaseDirectory(argument, tagCommit ? await tagEpoch(tagCommit) : undefined); console.log("archives=4 assets=6 inventories=exact reproducible=PASS")
   }
 }
