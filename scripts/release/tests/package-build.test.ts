@@ -3,7 +3,7 @@ import { cp, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { canonicalJson } from "../canonical-json"
-import { buildPackages, parsePackageBuildArgs } from "../package-build"
+import { buildPackages, createReleaseManifestPlugin, parsePackageBuildArgs } from "../package-build"
 import { verifyPackages } from "../verify-artifacts"
 
 const root = process.cwd()
@@ -20,7 +20,7 @@ async function copy(source: string, destination: string): Promise<void> {
 }
 
 async function fixtureRoot(): Promise<string> {
-  const fixture = await mkdtemp(join(tmpdir(), "tmux-pane-dash-package-build-test-"))
+  const fixture = await mkdtemp(join(tmpdir(), "tmux-pane-dash-package-fixture-"))
   await copy(join(root, "package.json"), join(fixture, "package.json"))
   await copy(join(root, "packages/tmux-pane-dash/src"), join(fixture, "packages/tmux-pane-dash/src"))
   for (const path of ["package.json", "README.md", "LICENSE", "generated/release-manifest.json", "dist/cli.js", "dist/runtime.js"]) {
@@ -94,8 +94,8 @@ test("package build atomically publishes exact outputs, embeds every release ide
     const directBuild = await mkdtemp(join(tmpdir(), "tmux-pane-dash-direct-build-test-"))
     try {
       for (const [entry, filename] of [["cli.ts", "cli.js"], ["runtime.ts", "runtime.js"]] as const) {
-        const child = Bun.spawn([process.execPath, "build", join("packages/tmux-pane-dash/src", entry), "--outfile", join(directBuild, filename), "--target=node", "--format=esm"], { cwd: fixture, stdout: "pipe", stderr: "pipe" })
-        expect(await child.exited, filename).toBe(0)
+        const direct = await Bun.build({ entrypoints: [join(fixture, "packages/tmux-pane-dash/src", entry)], outdir: directBuild, naming: filename, target: "node", format: "esm", plugins: [createReleaseManifestPlugin(join(fixture, "packages/tmux-pane-dash/generated/release-manifest.json"), expected.bytes)] })
+        expect(direct.success, filename).toBe(true)
         expect(await readFile(join(directBuild, filename))).toEqual(await readFile(join(fixture, "packages/tmux-pane-dash/dist", filename)))
       }
     } finally {
@@ -118,6 +118,42 @@ test("package build leaves all committed outputs unchanged and cleans temporary 
     await writeFile(join(fixture, "opencode-plugin/pane-dash.ts"), "export const broken = ;\n")
     await expect(buildPackages({ root: fixture, releaseManifestPath: expected.path })).rejects.toThrow()
     expect(await snapshots(fixture)).toEqual(before)
+    await assertNoTemporaryOutputs(fixture)
+  } finally {
+    await rm(fixture, { recursive: true, force: true })
+  }
+})
+
+async function runPackageBuildCli(fixture: string, manifestPath: string, temporaryRoot: string): Promise<void> {
+  const child = Bun.spawn([process.execPath, join(root, "scripts/release/package-build.ts"), "--release-manifest", manifestPath], { cwd: fixture, env: { ...process.env, TMPDIR: temporaryRoot }, stdout: "pipe", stderr: "pipe" })
+  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+  if (code !== 0) throw new Error(`package-build CLI failed: ${stdout}${stderr}`)
+}
+
+test("package bundles are byte-stable across temporary roots and the manifest plugin cannot shadow other JSON", async () => {
+  const fixture = await fixtureRoot()
+  const sharedTemporaryRoot = join(fixture, "shared-temporary-root")
+  try {
+    const expected = await expectedManifest(fixture)
+    const manifestPath = join(fixture, "packages/tmux-pane-dash/generated/release-manifest.json")
+    let onLoad: ((args: { path: string }) => { contents: Uint8Array; loader: "json" } | undefined) | undefined
+    createReleaseManifestPlugin(manifestPath, expected.bytes).setup({ onLoad: (_options, callback) => { onLoad = callback } })
+    if (!onLoad) throw new Error("manifest plugin did not register onLoad")
+    expect(onLoad({ path: manifestPath })?.contents).toEqual(expected.bytes)
+    expect(onLoad({ path: join(fixture, "packages/tmux-pane-dash/generated/other.json") })).toBeUndefined()
+    expect(onLoad({ path: join(fixture, "other.json") })).toBeUndefined()
+
+    await mkdir(sharedTemporaryRoot, { recursive: true })
+    await runPackageBuildCli(fixture, expected.path, "/tmp")
+    const first = await snapshots(fixture)
+    await runPackageBuildCli(fixture, expected.path, sharedTemporaryRoot)
+    expect(await snapshots(fixture)).toEqual(first)
+    for (const path of outputPaths.slice(1)) {
+      const text = await readFile(join(fixture, path), "utf8")
+      expect(text).not.toContain("cli-source")
+      expect(text).not.toContain("tmux-pane-dash-package-build-")
+      expect(text).not.toContain(sharedTemporaryRoot)
+    }
     await assertNoTemporaryOutputs(fixture)
   } finally {
     await rm(fixture, { recursive: true, force: true })

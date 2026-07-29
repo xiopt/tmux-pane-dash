@@ -1,6 +1,6 @@
-import { cp, chmod, mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { basename, dirname, join } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import type { ReleaseManifest } from "../../packages/tmux-pane-dash/src/contracts"
 import { parseReleaseManifest } from "../../packages/tmux-pane-dash/src/manifest"
 import { canonicalJson } from "./canonical-json"
@@ -8,7 +8,6 @@ import { assertPackedNodeBundle } from "./verify-artifacts"
 import { TAG, VERSION } from "./contracts"
 
 const decoder = new TextDecoder()
-const encoder = new TextEncoder()
 
 export type PackageBuildInput = {
   root: string
@@ -22,6 +21,15 @@ export type PackageBuildArgs = {
 }
 
 type BuildTarget = "bun" | "node"
+
+type ManifestPluginBuilder = {
+  onLoad(options: { filter: RegExp }, callback: (args: { path: string }) => { contents: Uint8Array; loader: "json" } | undefined): void
+}
+
+type ReleaseManifestPlugin = {
+  name: string
+  setup(build: ManifestPluginBuilder): void
+}
 
 type BuiltFile = {
   target: string
@@ -88,7 +96,17 @@ async function readReleaseManifest(path: string): Promise<{ bytes: Uint8Array; m
   return { bytes, manifest }
 }
 
-async function buildBundle(input: { entrypoint: string; outdir: string; filename: string; target: BuildTarget; format?: "esm" }): Promise<Uint8Array> {
+export function createReleaseManifestPlugin(manifestPath: string, bytes: Uint8Array): ReleaseManifestPlugin {
+  const withoutMacPrivatePrefix = (path: string) => path.startsWith("/private/") ? path.slice("/private".length) : path
+  return {
+    name: "verified-release-manifest",
+    setup(build) {
+      build.onLoad({ filter: /[\\/]generated[\\/]release-manifest\.json$/ }, ({ path }) => withoutMacPrivatePrefix(path) === withoutMacPrivatePrefix(manifestPath) ? { contents: bytes, loader: "json" } : undefined)
+    },
+  }
+}
+
+async function buildBundle(input: { entrypoint: string; outdir: string; filename: string; target: BuildTarget; format?: "esm"; plugins?: ReleaseManifestPlugin[] }): Promise<Uint8Array> {
   await mkdir(input.outdir, { recursive: true })
   const result = await Bun.build({
     entrypoints: [input.entrypoint],
@@ -96,6 +114,7 @@ async function buildBundle(input: { entrypoint: string; outdir: string; filename
     naming: input.filename,
     target: input.target,
     ...(input.format ? { format: input.format } : {}),
+    ...(input.plugins ? { plugins: input.plugins } : {}),
   })
   if (!result.success || result.logs.length > 0) throw new Error(`${input.filename} bundle failed: ${result.logs.map(String).join("\n")}`)
   const output = join(input.outdir, input.filename)
@@ -110,14 +129,9 @@ function assertManifestIdentities(bundle: string, manifest: ReleaseManifest): vo
   }
 }
 
-function normalizeNodeBundle(bytes: Uint8Array, buildRoots: readonly string[]): Uint8Array {
-  let text = decoder.decode(bytes)
-  for (const root of buildRoots) {
-    const relativeRoot = root.startsWith("/") ? root.slice(1) : root
-    for (let depth = 256; depth >= 0; depth -= 1) text = text.replaceAll(`${"../".repeat(depth)}${relativeRoot}/cli-source/`, "packages/tmux-pane-dash/")
-    text = text.replaceAll(`${root}/cli-source/`, "packages/tmux-pane-dash/")
-  }
-  return encoder.encode(text)
+function assertNoBuildResidue(bundle: string, buildRoot: string, label: string): void {
+  const marker = ["cli-source", "tmux-pane-dash-package-build-", buildRoot].find(value => bundle.includes(value))
+  if (marker) throw new Error(`${label} bundle contains temporary build residue: ${marker}`)
 }
 
 async function snapshot(path: string): Promise<FileSnapshot> {
@@ -186,21 +200,21 @@ async function publishAtomically(files: readonly BuiltFile[], requireChange: boo
 
 export async function buildPackages(input: PackageBuildInput): Promise<void> {
   const release = await readReleaseManifest(input.releaseManifestPath)
-  const packageRoot = join(input.root, "packages", "tmux-pane-dash")
+  const root = resolve(input.root)
+  const packageRoot = join(root, "packages", "tmux-pane-dash")
   const buildRoot = await mkdtemp(join(tmpdir(), "tmux-pane-dash-package-build-"))
   try {
-    const canonicalBuildRoot = await realpath(buildRoot)
-    const copiedSource = join(buildRoot, "cli-source", "src")
-    await cp(join(packageRoot, "src"), copiedSource, { recursive: true })
-    await mkdir(join(buildRoot, "cli-source", "generated"), { recursive: true })
-    await writeFile(join(buildRoot, "cli-source", "generated", "release-manifest.json"), release.bytes, { mode: 0o644 })
-
+    const manifestPath = join(packageRoot, "generated", "release-manifest.json")
+    const manifestPlugin = createReleaseManifestPlugin(manifestPath, release.bytes)
     const nodeBundleDirectory = join(buildRoot, "node")
-    const cli = normalizeNodeBundle(await buildBundle({ entrypoint: join(copiedSource, "cli.ts"), outdir: nodeBundleDirectory, filename: "cli.js", target: "node", format: "esm" }), [canonicalBuildRoot, buildRoot])
-    const runtime = normalizeNodeBundle(await buildBundle({ entrypoint: join(copiedSource, "runtime.ts"), outdir: nodeBundleDirectory, filename: "runtime.js", target: "node", format: "esm" }), [canonicalBuildRoot, buildRoot])
-    const opencode = await buildBundle({ entrypoint: join(input.root, "opencode-plugin", "pane-dash.ts"), outdir: join(buildRoot, "opencode"), filename: "index.js", target: "bun" })
+    const cli = await buildBundle({ entrypoint: join(packageRoot, "src", "cli.ts"), outdir: nodeBundleDirectory, filename: "cli.js", target: "node", format: "esm", plugins: [manifestPlugin] })
+    const runtime = await buildBundle({ entrypoint: join(packageRoot, "src", "runtime.ts"), outdir: nodeBundleDirectory, filename: "runtime.js", target: "node", format: "esm", plugins: [manifestPlugin] })
+    const opencode = await buildBundle({ entrypoint: join(root, "opencode-plugin", "pane-dash.ts"), outdir: join(buildRoot, "opencode"), filename: "index.js", target: "bun" })
 
     const cliText = decoder.decode(cli), runtimeText = decoder.decode(runtime)
+    assertNoBuildResidue(cliText, buildRoot, "CLI")
+    assertNoBuildResidue(runtimeText, buildRoot, "runtime")
+    assertNoBuildResidue(decoder.decode(opencode), buildRoot, "OpenCode")
     assertPackedNodeBundle(cliText)
     assertPackedNodeBundle(runtimeText)
     assertManifestIdentities(cliText, release.manifest)
@@ -209,7 +223,7 @@ export async function buildPackages(input: PackageBuildInput): Promise<void> {
       { target: join(packageRoot, "generated", "release-manifest.json"), bytes: release.bytes },
       { target: join(packageRoot, "dist", "cli.js"), bytes: cli },
       { target: join(packageRoot, "dist", "runtime.js"), bytes: runtime },
-      { target: join(input.root, "opencode-plugin", "dist", "index.js"), bytes: opencode },
+      { target: join(root, "opencode-plugin", "dist", "index.js"), bytes: opencode },
     ], input.requireChange === true)
   } finally {
     await rm(buildRoot, { recursive: true, force: true })
