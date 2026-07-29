@@ -8,7 +8,7 @@ import { join, relative, resolve } from "node:path"
 import { startLocalRegistry, type LocalPackage } from "../../scripts/release/local-registry"
 import { resolveCompatibilityRows } from "./helpers/real-opencode"
 
-const SPEC = "@xiopt/pane-dash-opencode@0.1.0"
+const SPEC = "@xiopt/pane-dash-opencode@0.1.1"
 const INITIALIZATION_COMMAND = ["run", "--command", "noop", "--print-logs", "--log-level", "DEBUG"] as const
 const OPTIONS = ["@pane_dash_status", "@pane_dash_status_since", "@pane_dash_heartbeat", "@pane_dash_title", "@pane_dash_model"] as const
 const root = resolve(import.meta.dir, "../..")
@@ -34,7 +34,7 @@ async function pack(directory: string, destination: string): Promise<LocalPackag
   const tarball = await readFile(join(destination, metadata.filename))
   return {
     name: JSON.parse(await readFile(join(directory, "package.json"), "utf8")).name,
-    version: "0.1.0",
+    version: "0.1.1",
     tarball,
     integrity: `sha512-${createHash("sha512").update(tarball).digest("base64")}`,
   }
@@ -43,7 +43,7 @@ async function pack(directory: string, destination: string): Promise<LocalPackag
 async function assertPackedPlugin(scratch: string): Promise<LocalPackage> {
   const packageRoot = join(root, "opencode-plugin")
   const plugin = await pack(packageRoot, scratch)
-  const entries = (await command(["tar", "-tzf", join(scratch, `xiopt-pane-dash-opencode-0.1.0.tgz`)], root)).stdout.trim().split("\n").sort()
+  const entries = (await command(["tar", "-tzf", join(scratch, `xiopt-pane-dash-opencode-0.1.1.tgz`)], root)).stdout.trim().split("\n").sort()
   expect(entries).toEqual(["package/LICENSE", "package/README.md", "package/dist/index.js", "package/package.json"])
   return plugin
 }
@@ -67,7 +67,7 @@ function parserProof(): void {
   const npa = require("npm-package-arg") as (value: string) => { name: string; rawSpec: string }
   const parsed = npa(SPEC)
   expect(parsed.name).toBe("@xiopt/pane-dash-opencode")
-  expect(parsed.rawSpec).toBe("0.1.0")
+  expect(parsed.rawSpec).toBe("0.1.1")
 }
 
 async function option(tmux: string, socket: string, target: string, name: string): Promise<string> {

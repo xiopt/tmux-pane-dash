@@ -1,6 +1,6 @@
 import { verify } from "sigstore"
 import { readFile } from "node:fs/promises"
-import { TAG } from "../scripts/release/contracts"
+import { RELEASE_ASSETS, TAG, VERSION } from "../scripts/release/contracts"
 
 const REF = `refs/tags/${TAG}` as const
 
@@ -35,7 +35,7 @@ export interface ExpectedNpmProvenance {
   integrity: string
   repository: "xiopt/tmux-pane-dash"
   workflow: ".github/workflows/release.yml"
-  ref: typeof REF
+  ref: string
   commit: string
 }
 
@@ -116,7 +116,9 @@ type Bundle = JsonRecord
 const REPOSITORY = "xiopt/tmux-pane-dash"
 const WORKFLOW = ".github/workflows/release.yml"
 const EXPECTED_ISSUER = "https://token.actions.githubusercontent.com"
-const EXPECTED_IDENTITY = `^https://github\\.com/xiopt/tmux-pane-dash/\\.github/workflows/release\\.yml@${REF.replaceAll(".", "\\.")}$`
+function certificateIdentity(ref: string): string {
+  return `^https://github\\.com/xiopt/tmux-pane-dash/\\.github/workflows/release\\.yml@${ref.replaceAll(".", "\\.")}$`
+}
 const ENVIRONMENTS = new Set<ProtectedEnvironment>(["github-draft", "npm-production", "release-promotion"])
 const JOBS = new Set(["draft-release", "npm-production", "promote-release"] as const)
 const DEPLOYMENT_KEYS = new Set([
@@ -124,14 +126,7 @@ const DEPLOYMENT_KEYS = new Set([
   "description", "creator", "created_at", "updated_at", "statuses_url", "repository_url",
   "transient_environment", "production_environment", "performed_via_github_app",
 ])
-const RELEASE_ASSET_NAMES = [
-  "tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz",
-  "tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz",
-  "tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz",
-  "tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz",
-  "release-manifest.json",
-  "SHA256SUMS",
-] as const
+const RELEASE_ASSET_NAMES = RELEASE_ASSETS
 
 function fail(message: string): never {
   throw new Error(`provenance: ${message}`)
@@ -168,7 +163,7 @@ function sha512HexFromIntegrity(integrity: string): string {
 }
 
 function packagePurl(packageName: string, version: string): string {
-  if (!/^@xiopt\/(?:pane-dash-opencode|tmux-pane-dash)$/.test(packageName) || version !== "0.1.0") fail("package identity is outside the release")
+  if (!/^@xiopt\/(?:pane-dash-opencode|tmux-pane-dash)$/.test(packageName) || !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(version)) fail("package identity is outside the release")
   return `pkg:npm/${packageName.replace(/^@/, "%40")}@${version}`
 }
 
@@ -269,9 +264,10 @@ function statementPredicate(statement: JsonRecord, expected: ExpectedNpmProvenan
   if (sourceDigest.sha1 !== expected.commit) fail("provenance commit does not match")
 }
 
+// Keep the pure verifier semver/ref-dynamic for historical signed evidence; the production CLI pins VERSION before release I/O.
 /** Verify one npm provenance bundle and then inspect only its verified payload. */
 export async function verifyNpmProvenance(expected: ExpectedNpmProvenance, deps: ProvenanceDependencies): Promise<void> {
-  if (expected.repository !== REPOSITORY || expected.workflow !== WORKFLOW || expected.ref !== REF || !/^[0-9a-f]{40}$/.test(expected.commit)) fail("expected provenance identity is invalid")
+  if (expected.repository !== REPOSITORY || expected.workflow !== WORKFLOW || !/^refs\/tags\/v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(expected.ref) || expected.ref !== `refs/tags/v${expected.version}` || !/^[0-9a-f]{40}$/.test(expected.commit)) fail("expected provenance identity is invalid")
   const metadata = await deps.fetchJson(provenanceUrl(expected.packageName))
   let bundle: Bundle
   const found = extractBundle(metadata)
@@ -285,7 +281,7 @@ export async function verifyNpmProvenance(expected: ExpectedNpmProvenance, deps:
   validateBundleShape(bundle)
   await verify(bundle as never, {
     certificateIssuer: EXPECTED_ISSUER,
-    certificateIdentityURI: EXPECTED_IDENTITY,
+    certificateIdentityURI: certificateIdentity(expected.ref),
     certificateOIDs: {
       ["1.3.6.1.4.1.57264.1.3"]: expected.commit,
       ["1.3.6.1.4.1.57264.1.5"]: expected.repository,
@@ -387,7 +383,7 @@ function validateHandoff(handoff: VerifiedHandoff): void {
   for (const name of ["@xiopt/pane-dash-opencode", "@xiopt/tmux-pane-dash"]) {
     const item = record(npm[name], `handoff npm ${name}`)
     exactKeys(item, ["filename", "integrity"], `handoff npm ${name}`)
-    const expectedFilename = name === "@xiopt/pane-dash-opencode" ? "xiopt-pane-dash-opencode-0.1.0.tgz" : "xiopt-tmux-pane-dash-0.1.0.tgz"
+    const expectedFilename = name === "@xiopt/pane-dash-opencode" ? `xiopt-pane-dash-opencode-${VERSION}.tgz` : `xiopt-tmux-pane-dash-${VERSION}.tgz`
     if (item.filename !== expectedFilename || typeof item.integrity !== "string") fail("handoff npm inventory is invalid")
     sha512HexFromIntegrity(item.integrity)
   }
@@ -423,6 +419,7 @@ async function verifyProvenanceCli(args: readonly string[]): Promise<void> {
   const repository = cliValue(args, "--repository")
   const workflow = cliValue(args, "--workflow")
   const ref = cliValue(args, "--ref")
+  if (version !== VERSION) fail("invalid provenance CLI contract")
   if (args.length !== 12 || repository !== REPOSITORY || workflow !== WORKFLOW || ref !== REF) fail("invalid provenance CLI contract")
   const handoff = await readJsonFile(handoffPath) as VerifiedHandoff
   validateHandoff(handoff)

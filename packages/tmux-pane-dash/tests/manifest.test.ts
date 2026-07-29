@@ -53,7 +53,7 @@ test("generated package manifest is a canonical immutable four-target manifest",
   expect(bytes).toEqual(Buffer.from(canonicalJson(value)))
   expect(bytes.includes("\r")).toBeFalse()
   expect(Object.keys(value)).toEqual(["assets", "repository", "schemaVersion", "tag", "version"])
-  expect(value).toMatchObject({ schemaVersion: 1, repository: "xiopt/tmux-pane-dash", version: "0.1.0", tag: "v0.1.0" })
+  expect(value).toMatchObject({ schemaVersion: 1, repository: "xiopt/tmux-pane-dash", version: "0.1.1", tag: "v0.1.1" })
   expect(Object.keys(value.assets)).toEqual(Object.keys(targets))
   for (const [key, target] of Object.entries(targets)) {
     const record = value.assets[key]
@@ -61,7 +61,7 @@ test("generated package manifest is a canonical immutable four-target manifest",
     expect(Object.keys(record)).toEqual(["asset", "sha256", "size", "target", "url"])
     expect(record.target).toBe(target)
     expect(record.asset).toBe(asset)
-    expect(record.url).toBe(`https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/${asset}`)
+    expect(record.url).toBe(`https://github.com/xiopt/tmux-pane-dash/releases/download/v${value.version}/${asset}`)
     expect(record.sha256).toMatch(/^[a-f0-9]{64}$/)
     expect(record.sha256).not.toMatch(/^(.)\1{63}$/)
     expect(record.size).toBeGreaterThan(0)

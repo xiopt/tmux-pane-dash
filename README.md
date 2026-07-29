@@ -18,6 +18,9 @@ the dashboard is still useful for tagged panes without it.
 Node.js is not needed for TPM or manual source builds. OpenCode is only needed
 for companion status; the dashboard itself does not require it.
 
+The current npm installer supports macOS arm64 only. TPM and manual builds are
+still available on other supported tmux platforms.
+
 ## Install with npx
 
 The npm CLI installs and manages the dashboard for the current user. The setup
@@ -39,7 +42,7 @@ npx @xiopt/tmux-pane-dash@latest setup --migrate
 `--allow-downgrade` is for deliberately invoking an older package version:
 
 ```sh
-npx @xiopt/tmux-pane-dash@0.1.0 setup --allow-downgrade
+npx @xiopt/tmux-pane-dash@0.1.1 setup --allow-downgrade
 ```
 
 Use the latest package explicitly for routine maintenance:
@@ -111,7 +114,7 @@ startup does not run a package-manager operation or access the network.
 ## OpenCode integration
 
 OpenCode integration is optional. The npm setup command adds the exact package
-entry `@xiopt/pane-dash-opencode@0.1.0` to the selected global OpenCode config;
+entry `@xiopt/pane-dash-opencode@0.1.1` to the selected global OpenCode config;
 use `--no-opencode` to skip it. The companion package requires OpenCode >=1.17.20.
 It does not edit a project-local OpenCode configuration file.
 

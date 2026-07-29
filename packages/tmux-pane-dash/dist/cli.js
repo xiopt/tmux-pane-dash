@@ -576,7 +576,7 @@ function insertPlugin(text, plugin, desired) {
   return `${text.slice(0, entry.end)}${insertion}${text.slice(entry.end)}`;
 }
 function planOpenCodeEdit(input) {
-  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.0", text = decoder.decode(input.bytes), plugin = rootPlugin(text);
+  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.1", text = decoder.decode(input.bytes), plugin = rootPlugin(text);
   if (plugin) {
     const managed = plugin.entries.filter((entry) => validPaneDash(entry.value));
     const desiredEntries = managed.filter((entry) => entry.value === desired);
@@ -1554,12 +1554,21 @@ async function acquireRelease(context) {
     if (!isValidatedCorruption(error))
       throw error;
   }
-  const archive = `${context.stagingRoot}.download.tar.gz`;
   await fs.rm(context.stagingRoot);
   await fs.mkdir(context.stagingRoot);
   try {
-    await downloadAsset(record, archive, { ...context.deps, fs }, manifest.tag);
-    const bytes = await fs.readFile(archive);
+    const bundled = context.deps.embeddedArchive ? await context.deps.embeddedArchive(record) : undefined;
+    if (context.deps.embeddedArchive && !bundled)
+      throw new CliError("E_PLATFORM", "this package supports macOS arm64 only");
+    const archive = `${context.stagingRoot}.download.tar.gz`;
+    const bytes = bundled ?? await (async () => {
+      await downloadAsset(record, archive, { ...context.deps, fs }, manifest.tag);
+      try {
+        return await fs.readFile(archive);
+      } finally {
+        await fs.rm(archive);
+      }
+    })();
     async function* stream() {
       yield bytes;
     }
@@ -1569,8 +1578,6 @@ async function acquireRelease(context) {
   } catch (error) {
     await fs.rm(context.stagingRoot);
     throw error;
-  } finally {
-    await fs.rm(archive);
   }
 }
 var MAX, signals, emptyHeaders, archiveLimits;
@@ -2233,16 +2240,17 @@ var init_runtime = __esm(() => {
 import process3 from "node:process";
 // packages/tmux-pane-dash/generated/release-manifest.json
 var release_manifest_default = {
-  assets: { "darwin-arm64": { asset: "tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz", sha256: "dce292f658e6265354a2491d92a2de6fd2f3bfd88f84be980cb20d3506b0c99c", size: 880264, target: "aarch64-apple-darwin", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-aarch64-apple-darwin.tar.gz" }, "darwin-x64": { asset: "tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz", sha256: "02505027b8ec72851517c1b4c212058e257db4a5291f2a7be335dd1537617c69", size: 9263, target: "x86_64-apple-darwin", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-x86_64-apple-darwin.tar.gz" }, "linux-arm64": { asset: "tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz", sha256: "35f36307dead44f99b713b043473b498ac6593bd00d718e2b125133faee435e4", size: 9265, target: "aarch64-unknown-linux-musl", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-aarch64-unknown-linux-musl.tar.gz" }, "linux-x64": { asset: "tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz", sha256: "50a53833c1339cb7d2f6aee609e81b4b0385c129244ae51752de10c37418e1b4", size: 9268, target: "x86_64-unknown-linux-musl", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.0/tmux-pane-dash-v0.1.0-x86_64-unknown-linux-musl.tar.gz" } },
+  assets: { "darwin-arm64": { asset: "tmux-pane-dash-v0.1.1-aarch64-apple-darwin.tar.gz", sha256: "71bf9200237ef1c8a59a1c9d143a3be14cde1832ce4c1530a948bad9b9395841", size: 878832, target: "aarch64-apple-darwin", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.1/tmux-pane-dash-v0.1.1-aarch64-apple-darwin.tar.gz" }, "darwin-x64": { asset: "tmux-pane-dash-v0.1.1-x86_64-apple-darwin.tar.gz", sha256: "8f1047af0b4a8210938b36f879924c732b58d2e55fa323d2b8556d4c7315d76b", size: 7009, target: "x86_64-apple-darwin", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.1/tmux-pane-dash-v0.1.1-x86_64-apple-darwin.tar.gz" }, "linux-arm64": { asset: "tmux-pane-dash-v0.1.1-aarch64-unknown-linux-musl.tar.gz", sha256: "ee254311171c788115a8eb22fea8fbc9e4bec29640e87c2505717c2bce88438a", size: 7010, target: "aarch64-unknown-linux-musl", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.1/tmux-pane-dash-v0.1.1-aarch64-unknown-linux-musl.tar.gz" }, "linux-x64": { asset: "tmux-pane-dash-v0.1.1-x86_64-unknown-linux-musl.tar.gz", sha256: "edcc0da83b5933ad9adf4c8e51719889691c5666bbae2ecb3f1869ad3104b341", size: 7008, target: "x86_64-unknown-linux-musl", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.1/tmux-pane-dash-v0.1.1-x86_64-unknown-linux-musl.tar.gz" } },
   repository: "xiopt/tmux-pane-dash",
   schemaVersion: 1,
-  tag: "v0.1.0",
-  version: "0.1.0"
+  tag: "v0.1.1",
+  version: "0.1.1"
 };
 
 // packages/tmux-pane-dash/src/dependencies.ts
 import { spawn } from "node:child_process";
 import { lstat as lstat4, readFile as readFile4, readdir as readdir3, readlink as readlink3 } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import process2 from "node:process";
 
 // packages/tmux-pane-dash/src/lock.ts
@@ -2345,6 +2353,7 @@ async function acquireLock(command, deps) {
 }
 
 // packages/tmux-pane-dash/src/dependencies.ts
+init_errors();
 init_fs();
 function nodeDependencies() {
   const child = (path, args, options) => new Promise((resolve3, reject) => {
@@ -2389,9 +2398,14 @@ function nodeDependencies() {
     readdir: readdir3,
     readlink: readlink3
   };
-  const deps = { manifest: release_manifest_default, platform: process2.platform, arch: process2.arch, executingVersion: release_manifest_default.version, fs: nodeFsOps(), doctorFs, doctorOutput: (text) => process2.stdout.write(text), nowMs: Date.now, fetch: async (url, init) => {
-    const response = await globalThis.fetch(url, init);
-    return { status: response.status, headers: response.headers, body: response.body ?? undefined };
+  const deps = { manifest: release_manifest_default, platform: process2.platform, arch: process2.arch, executingVersion: release_manifest_default.version, fs: nodeFsOps(), doctorFs, doctorOutput: (text) => process2.stdout.write(text), nowMs: Date.now, embeddedArchive: async (record) => {
+    if (process2.platform !== "darwin" || process2.arch !== "arm64" || record.target !== "aarch64-apple-darwin")
+      return;
+    try {
+      return new Uint8Array(await readFile4(fileURLToPath(new URL(`../payload/${record.asset}`, import.meta.url))));
+    } catch {
+      throw new CliError("E_PAYLOAD", "bundled macOS archive is unavailable");
+    }
   }, spawn: child, env, pid: () => process2.pid, uid: () => process2.getuid?.() ?? 0, isPidAlive: (pid) => {
     try {
       process2.kill(pid, 0);

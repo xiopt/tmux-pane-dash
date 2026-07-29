@@ -18,7 +18,7 @@ SH
 #!/bin/sh
 printf 'npm %s\n' "$*" >> "$SMOKE_LOG"
 case "$*" in
-  *@xiopt/tmux-pane-dash@0.1.0*setup*|*@xiopt/tmux-pane-dash@0.1.0*doctor*|*@xiopt/tmux-pane-dash@0.1.0*uninstall*|*@xiopt/tmux-pane-dash@latest*update*) exit 0 ;;
+  *@xiopt/tmux-pane-dash@0.1.1*setup*|*@xiopt/tmux-pane-dash@0.1.1*doctor*|*@xiopt/tmux-pane-dash@0.1.1*uninstall*|*@xiopt/tmux-pane-dash@latest*update*) exit 0 ;;
   *) exit 64 ;;
 esac
 SH
@@ -31,11 +31,11 @@ SH
   [ "$status" -eq 0 ]
   [ "$(grep -c '^npm ' "$log")" -eq 5 ]
   mapfile -t calls < <(grep '^npm ' "$log")
-  [[ "${calls[0]}" == *@xiopt/tmux-pane-dash@0.1.0*"-- tmux-pane-dash setup"* ]]
-  [[ "${calls[1]}" == *@xiopt/tmux-pane-dash@0.1.0*"-- tmux-pane-dash doctor"* ]]
-  [[ "${calls[2]}" == *@xiopt/tmux-pane-dash@0.1.0*"-- tmux-pane-dash setup"* ]]
+  [[ "${calls[0]}" == *@xiopt/tmux-pane-dash@0.1.1*"-- tmux-pane-dash setup"* ]]
+  [[ "${calls[1]}" == *@xiopt/tmux-pane-dash@0.1.1*"-- tmux-pane-dash doctor"* ]]
+  [[ "${calls[2]}" == *@xiopt/tmux-pane-dash@0.1.1*"-- tmux-pane-dash setup"* ]]
   [[ "${calls[3]}" == *@xiopt/tmux-pane-dash@latest*"-- tmux-pane-dash update"* ]]
-  [[ "${calls[4]}" == *@xiopt/tmux-pane-dash@0.1.0*"-- tmux-pane-dash uninstall"* ]]
+  [[ "${calls[4]}" == *@xiopt/tmux-pane-dash@0.1.1*"-- tmux-pane-dash uninstall"* ]]
 }
 
 @test "public smoke requires exact wrapper-exported Node 20" {

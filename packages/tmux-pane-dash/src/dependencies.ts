@@ -1,8 +1,10 @@
 import releaseManifest from "../generated/release-manifest.json"
 import { spawn } from "node:child_process"
 import { lstat, readFile, readdir, readlink } from "node:fs/promises"
+import { fileURLToPath } from "node:url"
 import process from "node:process"
 import { acquireLock } from "./lock"
+import { CliError } from "./errors"
 import type { Dependencies } from "./runtime"
 import { nodeFsOps } from "./fs"
 
@@ -20,9 +22,9 @@ export function nodeDependencies(): Dependencies {
     readdir,
     readlink,
   }
-  const deps: Dependencies = { manifest: releaseManifest, platform: process.platform, arch: process.arch, executingVersion: releaseManifest.version, fs: nodeFsOps(), doctorFs, doctorOutput: (text: string) => process.stdout.write(text), nowMs: Date.now, fetch: async (url, init) => {
-    const response = await globalThis.fetch(url, init)
-    return { status: response.status, headers: response.headers, body: response.body ?? undefined }
+  const deps: Dependencies = { manifest: releaseManifest, platform: process.platform, arch: process.arch, executingVersion: releaseManifest.version, fs: nodeFsOps(), doctorFs, doctorOutput: (text: string) => process.stdout.write(text), nowMs: Date.now, embeddedArchive: async (record) => {
+    if (process.platform !== "darwin" || process.arch !== "arm64" || record.target !== "aarch64-apple-darwin") return undefined
+    try { return new Uint8Array(await readFile(fileURLToPath(new URL(`../payload/${record.asset}`, import.meta.url)))) } catch { throw new CliError("E_PAYLOAD", "bundled macOS archive is unavailable") }
   }, spawn: child, env, pid: () => process.pid, uid: () => process.getuid?.() ?? 0, isPidAlive: (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } } }
   deps.lock = command => acquireLock(command, deps)
   return deps

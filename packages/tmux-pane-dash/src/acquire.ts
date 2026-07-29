@@ -127,12 +127,16 @@ export async function acquireRelease(context: AcquireContext): Promise<{ kind: "
     await validatePayload(context.versionDirectory, record, manifest.version, context.deps, fs)
     return { kind: "reused", versionDirectory: context.versionDirectory }
   } catch (error) { if (!isValidatedCorruption(error)) throw error }
-  const archive = `${context.stagingRoot}.download.tar.gz`
   await fs.rm(context.stagingRoot)
   await fs.mkdir(context.stagingRoot)
   try {
-    await downloadAsset(record, archive, { ...context.deps, fs }, manifest.tag)
-    const bytes = await fs.readFile(archive)
+    const bundled = context.deps.embeddedArchive ? await context.deps.embeddedArchive(record) : undefined
+    if (context.deps.embeddedArchive && !bundled) throw new CliError("E_PLATFORM", "this package supports macOS arm64 only")
+    const archive = `${context.stagingRoot}.download.tar.gz`
+    const bytes = bundled ?? await (async () => {
+      await downloadAsset(record, archive, { ...context.deps, fs }, manifest.tag)
+      try { return await fs.readFile(archive) } finally { await fs.rm(archive) }
+    })()
     async function* stream() { yield bytes }
     await extractArchive({ archive: stream(), stagingRoot: context.stagingRoot, fs, clock: { nowMs: context.deps.nowMs ?? Date.now }, limits: context.limits ?? archiveLimits })
     await validatePayload(context.stagingRoot, record, manifest.version, context.deps, fs)
@@ -140,5 +144,5 @@ export async function acquireRelease(context: AcquireContext): Promise<{ kind: "
   } catch (error) {
     await fs.rm(context.stagingRoot)
     throw error
-  } finally { await fs.rm(archive) }
+  }
 }

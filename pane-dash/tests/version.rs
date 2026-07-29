@@ -70,7 +70,7 @@ fn version_is_recognized_before_bench_identity_and_tmux() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"pane-dash 0.1.0\n");
+    assert_eq!(output.stdout, b"pane-dash 0.1.1\n");
     assert!(output.stderr.is_empty());
     assert_eq!(tmux_sentinel_calls(sentinel.path()), 0);
 }

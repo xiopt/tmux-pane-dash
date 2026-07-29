@@ -59,9 +59,25 @@ async function filesNamed(root: string, names: ReadonlySet<string>): Promise<str
   return paths.sort()
 }
 
-async function tagPaths(root: string): Promise<string[]> {
-  const paths: string[] = []
-  async function visit(directory: string) {
+type VersionParts = readonly [bigint, bigint, bigint]
+
+function versionParts(value: string): VersionParts | undefined {
+  const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.exec(value)
+  return match ? [BigInt(match[1]!), BigInt(match[2]!), BigInt(match[3]!)] : undefined
+}
+
+function compareVersions(left: VersionParts, right: VersionParts): -1 | 0 | 1 {
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index]! < right[index]!) return -1
+    if (left[index]! > right[index]!) return 1
+  }
+  return 0
+}
+
+/** Read both Git ref stores: local checkouts may put the same tag in either. */
+async function tagNames(root: string): Promise<string[]> {
+  const tags = new Set<string>()
+  async function visit(directory: string, prefix: string) {
     let entries: Awaited<ReturnType<typeof readdir>>
     try {
       entries = await readdir(directory, { withFileTypes: true })
@@ -70,13 +86,21 @@ async function tagPaths(root: string): Promise<string[]> {
       throw error
     }
     for (const entry of entries) {
+      const name = prefix ? `${prefix}/${entry.name}` : entry.name
       const path = join(directory, entry.name)
-      if (entry.isDirectory()) await visit(path)
-      else if (entry.isFile()) paths.push(path)
+      if (entry.isDirectory()) await visit(path, name)
+      else if (entry.isFile()) tags.add(name)
     }
   }
-  await visit(join(root, ".git", "refs", "tags"))
-  return paths.sort()
+
+  await visit(join(root, ".git", "refs", "tags"), "")
+  const packed = await readText(join(root, ".git", "packed-refs"))
+  for (const line of packed?.split("\n") ?? []) {
+    if (!line || line.startsWith("#") || line.startsWith("^")) continue
+    const match = /^[0-9a-fA-F]{40}\s+refs\/tags\/(.+)$/.exec(line)
+    if (match) tags.add(match[1]!)
+  }
+  return [...tags].sort()
 }
 
 export async function inspectVersions(root: string): Promise<VersionInspection> {
@@ -114,9 +138,15 @@ export async function inspectVersions(root: string): Promise<VersionInspection> 
     if (path.endsWith("release-manifest.json") && manifest.tag !== tag) mismatches.push(`${display}: tag ${String(manifest.tag)} !== ${tag}`)
   }
 
-  for (const path of await tagPaths(root)) {
-    const actualTag = relative(join(root, ".git", "refs", "tags"), path)
-    if (actualTag !== tag) mismatches.push(`.git/refs/tags/${actualTag}: tag ${actualTag} !== ${tag}`)
+  const currentParts = versionParts(version)
+  for (const actualTag of await tagNames(root)) {
+    if (!actualTag.startsWith("v")) continue
+    const taggedParts = versionParts(actualTag.slice(1))
+    if (!taggedParts) {
+      mismatches.push(`tag ${actualTag}: malformed v tag; expected v<major>.<minor>.<patch>`)
+    } else if (currentParts && compareVersions(taggedParts, currentParts) > 0) {
+      mismatches.push(`tag ${actualTag}: future tag is newer than VERSION ${version}`)
+    }
   }
   return { version, tag, mismatches }
 }

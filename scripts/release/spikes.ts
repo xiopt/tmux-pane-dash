@@ -76,7 +76,7 @@ const DOCKER_TIMEOUT_MS = 15 * 60_000
 const SMOKE_TIMEOUT_MS = 45_000
 const OPENCODE_VERSION_TIMEOUT_MS = 5_000
 const OPENCODE_STARTUP_TIMEOUT_MS = 30_000
-const OPENCODE_PLUGIN_SPEC = "@xiopt/pane-dash-opencode@0.1.0"
+const OPENCODE_PLUGIN_SPEC = `@xiopt/pane-dash-opencode@${VERSION}` as const
 const COMMAND_OUTPUT_CAP_BYTES = 1_000_000
 const COMMAND_TERM_GRACE_MS = 300
 const COMMAND_REAP_TIMEOUT_MS = 500
@@ -106,7 +106,7 @@ export function normalizeOpenCodeVersion(output: string): string {
   return match[1]!
 }
 
-export async function observeOpenCodePluginSpec(value: string): Promise<{ readonly name: "@xiopt/pane-dash-opencode"; readonly rawSpec: "0.1.0" }> {
+export async function observeOpenCodePluginSpec(value: string): Promise<{ readonly name: "@xiopt/pane-dash-opencode"; readonly rawSpec: typeof VERSION }> {
   const root = process.env.PANE_DASH_NPA_ROOT
   const tempPrefix = process.env.PANE_DASH_NPA_TMP_PREFIX
   if (!root || !tempPrefix || !isAbsolute(root) || !isAbsolute(tempPrefix)) throw new Error("PANE_DASH_NPA_ROOT must name a validated absolute parser root")
@@ -130,8 +130,8 @@ export async function observeOpenCodePluginSpec(value: string): Promise<{ readon
     if (result.code !== 0) throw new Error(`sandboxed npm-package-arg parser failed (${result.code}): ${result.stderr.trim()}`)
     const parsed: { version?: unknown; module?: unknown; name?: unknown; rawSpec?: unknown } = JSON.parse(result.stdout)
     const modulePath = typeof parsed.module === "string" ? await realpath(parsed.module) : ""
-    if (parsed.version !== "13.0.2" || !modulePath || relative(packageRoot, modulePath).startsWith("..") || parsed.name !== "@xiopt/pane-dash-opencode" || parsed.rawSpec !== "0.1.0") throw new Error("exact scoped package observation required")
-    return { name: parsed.name as "@xiopt/pane-dash-opencode", rawSpec: parsed.rawSpec as "0.1.0" }
+    if (parsed.version !== "13.0.2" || !modulePath || relative(packageRoot, modulePath).startsWith("..") || parsed.name !== "@xiopt/pane-dash-opencode" || parsed.rawSpec !== VERSION) throw new Error("exact scoped package observation required")
+    return { name: parsed.name as "@xiopt/pane-dash-opencode", rawSpec: parsed.rawSpec as typeof VERSION }
   } finally {
     await rm(profilePath, { force: true })
   }
@@ -142,7 +142,7 @@ export function assertOpenCodeRegistryRequests(requests: readonly string[], _ori
     "/@opencode-ai%2fplugin",
     "/@xiopt%2fpane-dash-opencode",
     "/%40opencode-ai%2Fplugin/-/plugin-1.17.20.tgz",
-    "/%40xiopt%2Fpane-dash-opencode/-/pane-dash-opencode-0.1.0.tgz",
+    `/%40xiopt%2Fpane-dash-opencode/-/pane-dash-opencode-${VERSION}.tgz`,
   ])
   for (const request of requests) {
     if (!expected.has(request)) throw new Error(`unexpected local registry request: ${request}`)
@@ -371,9 +371,9 @@ async function packOpenCodePlugin(sourceRoot: string, packageRoot: string): Prom
     // Task 2 owns the repository's publishable legal text. The spike still verifies
     // npm's required package shape without inventing a project-wide license claim.
     writeFile(join(packageRoot, "LICENSE"), "UNLICENSED\n"),
-    writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "@xiopt/pane-dash-opencode", version: "0.1.0", type: "module", main: "./dist/index.js", engines: { opencode: ">=1.17.20" }, exports: { ".": "./dist/index.js", "./server": "./dist/index.js" }, files: ["dist/index.js", "README.md", "LICENSE"] }, null, 2) + "\n"),
+    writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "@xiopt/pane-dash-opencode", version: VERSION, type: "module", main: "./dist/index.js", engines: { opencode: ">=1.17.20" }, exports: { ".": "./dist/index.js", "./server": "./dist/index.js" }, files: ["dist/index.js", "README.md", "LICENSE"] }, null, 2) + "\n"),
   ])
-  return packPackage(packageRoot, "@xiopt/pane-dash-opencode", "0.1.0", "opencode")
+  return packPackage(packageRoot, "@xiopt/pane-dash-opencode", VERSION, "opencode")
 }
 
 async function packCompanionPlugin(root: string): Promise<LocalPackage> {
@@ -389,7 +389,7 @@ type PackageFixture = "opencode" | "companion"
 
 export function assertExactPackageFixture(packageJson: unknown, inventory: readonly string[], fixture: PackageFixture): void {
   const expected = fixture === "opencode"
-    ? { name: "@xiopt/pane-dash-opencode", version: "0.1.0", type: "module", main: "./dist/index.js", engines: { opencode: ">=1.17.20" }, exports: { ".": "./dist/index.js", "./server": "./dist/index.js" }, files: ["dist/index.js", "README.md", "LICENSE"] }
+    ? { name: "@xiopt/pane-dash-opencode", version: VERSION, type: "module", main: "./dist/index.js", engines: { opencode: ">=1.17.20" }, exports: { ".": "./dist/index.js", "./server": "./dist/index.js" }, files: ["dist/index.js", "README.md", "LICENSE"] }
     : { name: "@opencode-ai/plugin", version: "1.17.20", type: "module", exports: { ".": "./index.js" }, files: ["index.js"] }
   const expectedInventory = fixture === "opencode" ? OPENCODE_PACKAGE_FILES : ["package/package.json", "package/index.js"]
   if (JSON.stringify(packageJson) !== JSON.stringify(expected)) throw new Error(`${fixture} package.json is not the exact required fixture`)
