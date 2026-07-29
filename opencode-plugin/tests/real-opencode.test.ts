@@ -6,7 +6,7 @@ import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join, relative, resolve } from "node:path"
 import { startLocalRegistry, type LocalPackage } from "../../scripts/release/local-registry"
-import { resolveCompatibilityRows } from "./helpers/real-opencode"
+import { pinnedSha256ForPlatformArch, resolveCompatibilityRows } from "./helpers/real-opencode"
 
 const SPEC = "@xiopt/pane-dash-opencode@0.1.0"
 const INITIALIZATION_COMMAND = ["run", "--command", "noop", "--print-logs", "--log-level", "DEBUG"] as const
@@ -122,6 +122,12 @@ async function runVariant(row: typeof rows[number], extension: "json" | "jsonc",
 }
 
 test("actual packed plugin loads through the loopback registry in JSON and JSONC", { timeout: 120_000 }, async () => {
+  expect(rows[0]).toEqual({
+    name: "pinned-1.17.20",
+    binary: process.env.OPENCODE_1_17_20_BIN,
+    version: "1.17.20",
+    sha256: pinnedSha256ForPlatformArch(process.platform, process.arch),
+  })
   expect(process.env.NODE_20_BIN).toMatch(/^\//); expect(process.env.NPM_20_CLI).toMatch(/^\//)
   parserProof()
   const scratch = await mkdtemp(join(process.env.TMPDIR || tmpdir(), "pane-dash-plugin-pack-"))

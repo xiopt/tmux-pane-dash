@@ -2,7 +2,12 @@ import { createHash } from "node:crypto"
 import { isAbsolute } from "node:path"
 
 const PINNED_VERSION = "1.17.20"
-const PINNED_SHA256 = "14a4583c9a3685875f011d6dd4dfbd00498893942be0bb1d2c27e30e70144c89"
+export const PINNED_SHA256_BY_PLATFORM_ARCH = {
+  "darwin-arm64": "14a4583c9a3685875f011d6dd4dfbd00498893942be0bb1d2c27e30e70144c89",
+  "linux-x64": "373af49ceba30c1b64e964463a64f8065103f942f240933a955f6c461e1a67f6",
+} as const
+
+type PinnedPlatformArch = keyof typeof PINNED_SHA256_BY_PLATFORM_ARCH
 
 export type CompatibilityRow = {
   readonly name: string
@@ -13,6 +18,12 @@ export type CompatibilityRow = {
 
 type VersionProbe = (binary: string) => Promise<string>
 type BinaryReader = (binary: string) => Promise<Uint8Array>
+
+export function pinnedSha256ForPlatformArch(platform: NodeJS.Platform, arch: NodeJS.Architecture): string {
+  const platformArch = `${platform}-${arch}`
+  if (!Object.hasOwn(PINNED_SHA256_BY_PLATFORM_ARCH, platformArch)) throw new Error(`unsupported OpenCode platform-arch: ${platformArch}`)
+  return PINNED_SHA256_BY_PLATFORM_ARCH[platformArch as PinnedPlatformArch]
+}
 
 function absoluteBinary(name: string, binary: string | undefined): string {
   if (!binary || !isAbsolute(binary)) throw new Error(`${name} must be an absolute executable path`)
@@ -43,11 +54,12 @@ export async function resolveCompatibilityRows(
   versionProbe: VersionProbe,
   readBinary: BinaryReader,
 ): Promise<readonly [CompatibilityRow, CompatibilityRow]> {
+  const expectedPinnedSha256 = pinnedSha256ForPlatformArch(process.platform, process.arch)
   const pinned = absoluteBinary("OPENCODE_1_17_20_BIN", pinnedBinary)
   const pinnedVersion = supportedStableVersion(await versionProbe(pinned))
   if (pinnedVersion !== PINNED_VERSION) throw new Error(`OPENCODE_1_17_20_BIN must report ${PINNED_VERSION}`)
   const pinnedSha256 = createHash("sha256").update(await readBinary(pinned)).digest("hex")
-  if (pinnedSha256 !== PINNED_SHA256) throw new Error("OPENCODE_1_17_20_BIN hash does not match the pinned OpenCode binary")
+  if (pinnedSha256 !== expectedPinnedSha256) throw new Error("OPENCODE_1_17_20_BIN hash does not match the pinned OpenCode binary")
 
   return [
     { name: "pinned-1.17.20", binary: pinned, version: pinnedVersion, sha256: pinnedSha256 },

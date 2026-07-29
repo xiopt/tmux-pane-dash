@@ -332,6 +332,30 @@ function assertCiPackedE2EToolchain(workflow: ParsedWorkflow): void {
   if (provisionIndex >= packedIndex) throw new Error("packed-e2e must provision its isolated musl target before the fixture")
 }
 
+function assertCiPackedE2ETmuxBinding(workflow: ParsedWorkflow): void {
+  const packed = workflow.jobs["packed-e2e"]
+  if (!packed) throw new Error("packed-e2e is missing")
+  const binding = (step: ParsedStep): boolean => {
+    const run = step.run ?? ""
+    return run.includes('test -x "${TMUX_BIN:?TMUX_BIN is required}"') &&
+      run.includes('test "$("$TMUX_BIN" -V)" = "tmux 3.6a"') &&
+      run.includes('tmux_real="$(realpath -- "$TMUX_BIN")"') &&
+      run.includes('test "$("$tmux_real" -V)" = "tmux 3.6a"') &&
+      run.includes('sudo ln -sfn -- "$TMUX_BIN" /usr/local/bin/tmux') &&
+      run.includes("test -L /usr/local/bin/tmux") &&
+      run.includes('test "$(realpath -- /usr/local/bin/tmux)" = "$tmux_real"') &&
+      run.includes('test "$(/usr/local/bin/tmux -V)" = "tmux 3.6a"')
+  }
+  const bindingIndex = packed.steps.findIndex(binding)
+  if (bindingIndex < 0) throw new Error("packed-e2e must bind its verified tmux binary into /usr/local/bin")
+  if (workflow.jobs && Object.values(workflow.jobs).some(job => job.name !== "packed-e2e" && job.steps.some(binding))) {
+    throw new Error("the fixed tmux binding must be limited to packed-e2e")
+  }
+  const packedIndex = packed.steps.findIndex((step) => (step.run ?? "").includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts"))
+  if (packedIndex < 0) throw new Error("packed-e2e fixture command is missing")
+  if (bindingIndex >= packedIndex) throw new Error("packed-e2e must bind tmux before the fixture")
+}
+
 function assertOpenCodeProvisioning(workflow: ParsedWorkflow): void {
   const job = workflow.jobs["opencode-compatibility"]
   if (!job) throw new Error("opencode-compatibility is missing")
@@ -477,6 +501,7 @@ function assertWorkflowGraph(text: string, workflowName: string): void {
     assertCiCliNpaIsolation(workflow)
     assertCiCliMuslFixture(workflow)
     assertCiPackedE2EToolchain(workflow)
+    assertCiPackedE2ETmuxBinding(workflow)
     assertOpenCodeProvisioning(workflow)
     assertBatsProvisioning(workflow)
     assertRustLiveBinaryBuild(workflow)
@@ -612,6 +637,23 @@ test("packed E2E provisions musl in the isolated Rust toolchain before its fixtu
   const provisionIndex = packed.steps.findIndex((step) => (step.run ?? "").includes('"$RUSTUP_BOOTSTRAP" target add x86_64-unknown-linux-musl --toolchain 1.96.1'))
   const broken = packed.steps.map((step, index) => index === provisionIndex ? { ...step, run: (step.run ?? "").replace('test "$RUSTUP_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup"', "") } : step)
   expect(() => assertCiPackedE2EToolchain({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: broken } } })).toThrow(/isolated Rust target/)
+})
+
+test("packed E2E binds the verified tmux into the doctor PATH before its fixture", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  expect(() => assertCiPackedE2ETmuxBinding(parsed)).not.toThrow()
+
+  const packed = parsed.jobs["packed-e2e"]!
+  const bindingIndex = packed.steps.findIndex((step) => (step.run ?? "").includes("sudo ln -sfn -- \"$TMUX_BIN\" /usr/local/bin/tmux"))
+  const fixtureIndex = packed.steps.findIndex((step) => (step.run ?? "").includes("packages/tmux-pane-dash/tests/packed-e2e.test.ts"))
+  const withoutBinding = packed.steps.filter((_, index) => index !== bindingIndex)
+  expect(() => assertCiPackedE2ETmuxBinding({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: withoutBinding } } })).toThrow(/bind its verified tmux/)
+
+  const reordered = [...packed.steps]
+  const bindingStep = reordered.splice(bindingIndex, 1)[0]!
+  reordered.splice(fixtureIndex, 0, bindingStep)
+  expect(() => assertCiPackedE2ETmuxBinding({ ...parsed, jobs: { ...parsed.jobs, "packed-e2e": { ...packed, steps: reordered } } })).toThrow(/before the fixture/)
 })
 
 test("OpenCode compatibility runs only its targeted postinstalls before integrity and version checks", async () => {

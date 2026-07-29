@@ -252,6 +252,19 @@ jobs:
       - run: |
           echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"
           echo "NPM_20_CLI=$(command -v npm)" >> "$GITHUB_ENV"
+      - name: Bind packed E2E tmux to doctor PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "${TMUX_BIN:?TMUX_BIN is required}"
+          test "$("$TMUX_BIN" -V)" = "tmux 3.6a"
+          tmux_real="$(realpath -- "$TMUX_BIN")"
+          test -x "$tmux_real"
+          test "$("$tmux_real" -V)" = "tmux 3.6a"
+          sudo ln -sfn -- "$TMUX_BIN" /usr/local/bin/tmux
+          test -L /usr/local/bin/tmux
+          test "$(realpath -- /usr/local/bin/tmux)" = "$tmux_real"
+          test "$(/usr/local/bin/tmux -V)" = "tmux 3.6a"
       - name: Provision packed E2E musl target
         shell: bash
         run: |
