@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  NPM_TRUSTED_PUBLISHER_EXPECTED: '{"packages":{"@xiopt/pane-dash-opencode":{"allowedAction":"npm publish","environment":"npm-production","repository":"xiopt/tmux-pane-dash","workflow":"release.yml"},"@xiopt/tmux-pane-dash":{"allowedAction":"npm publish","environment":"npm-production","repository":"xiopt/tmux-pane-dash","workflow":"release.yml"}},"schemaVersion":1}'
+
 jobs:
   validate-tag:
     runs-on: ubuntu-24.04
@@ -51,15 +54,27 @@ jobs:
           test -x "$BUN_BOOTSTRAP"
           test "$($BUN_BOOTSTRAP --version)" = "1.3.14"
           printf 'TMUX_BIN=%s\nBUN_BOOTSTRAP=%s\n' "$TMUX_BIN" "$BUN_BOOTSTRAP" >> "$GITHUB_ENV"
+      - name: Provision distro Bats
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y bats
+          test "$(command -v bats)" = "/usr/bin/bats"
+          bats_version=$(/usr/bin/bats --version)
+          test -n "$bats_version"
+          [[ "$bats_version" =~ ^Bats[[:space:]]+([1-9][0-9]*)\. ]] || { printf 'unexpected Bats version: %s\n' "$bats_version" >&2; exit 1; }
       - name: Rust formatting and tests
         run: |
           set -euo pipefail
           rustup toolchain install 1.96.1 --profile minimal --component rustfmt --no-self-update
           export RUSTUP_TOOLCHAIN=1.96.1
           cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check
-          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml
+          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml -- --test-threads=1
       - name: Shell tests
-        run: bats tests
+        run: |
+          set -euo pipefail
+          tests/release/with-rust.sh -- scripts/release/clean-room.sh -- bats tests
 
   build-four-targets:
     needs: build-test
@@ -115,7 +130,7 @@ jobs:
             if command -v apt-get >/dev/null 2>&1; then sudo apt-get update; sudo apt-get install -y musl-tools; fi
           fi
           cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target "${RUST_TARGET}"
-          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${RUST_TARGET}"
+          cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml --target "${RUST_TARGET}" -- --test-threads=1
           BINARY="pane-dash/target/${RUST_TARGET}/release/pane-dash"
           test -x "$BINARY"
           mkdir -p "$RUNNER_TEMP/target-release"
@@ -174,7 +189,7 @@ jobs:
           test ! -e release/dist
           npm pack --workspace packages/tmux-pane-dash --workspace opencode-plugin --pack-destination "$npm_dir"
           test -n "${NPM_TRUSTED_PUBLISHER_BINDING:?NPM_TRUSTED_PUBLISHER_BINDING is required}"
-          test "$NPM_TRUSTED_PUBLISHER_BINDING" = "npm publish"
+          test "$NPM_TRUSTED_PUBLISHER_BINDING" = "$NPM_TRUSTED_PUBLISHER_EXPECTED"
           bun build release/verify-npm-provenance.ts --bundle --target=node --format=esm --outfile="$RUNNER_TEMP/verify-npm-provenance.mjs"
           test -s "$RUNNER_TEMP/verify-npm-provenance.mjs"
           "$NODE_24_BIN" --input-type=module <<'NODE'
@@ -361,6 +376,33 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20.0.0"
+      - name: Bind packed E2E tmux to doctor PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "${TMUX_BIN:?TMUX_BIN is required}"
+          test "$("$TMUX_BIN" -V)" = "tmux 3.6a"
+          tmux_real="$(realpath -- "$TMUX_BIN")"
+          test -x "$tmux_real"
+          test "$("$tmux_real" -V)" = "tmux 3.6a"
+          sudo ln -sfn -- "$TMUX_BIN" /usr/local/bin/tmux
+          test -L /usr/local/bin/tmux
+          test "$(realpath -- /usr/local/bin/tmux)" = "$tmux_real"
+          test "$(/usr/local/bin/tmux -V)" = "tmux 3.6a"
+      - name: Provision packed E2E musl target
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          export RUSTUP_BOOTSTRAP="$(command -v rustup)"
+          test -x "$RUSTUP_BOOTSTRAP"
+          tests/release/with-rust.sh -- "$RUSTUP_BOOTSTRAP" target add x86_64-unknown-linux-musl --toolchain 1.96.1
+          tests/release/with-rust.sh -- bash -ceu '
+            test "$RUSTUP_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/rustup"
+            test "$CARGO_HOME" = "$PANE_DASH_ISOLATED_RUST_ROOT/cargo"
+            [[ "$CARGO" == "$PANE_DASH_ISOLATED_RUST_ROOT"/rustup/toolchains/1.96.1-*/bin/cargo ]]
+          '
       - name: Run packed E2E with exact Node 20 and isolated Rust and tmux
         shell: bash
         run: |
@@ -419,7 +461,7 @@ jobs:
           for (const entry of Object.values(handoff.npm)) { const bytes = readFileSync(join(npm, entry.filename)); if (`sha512-${createHash("sha512").update(bytes).digest("base64")}` !== entry.integrity) throw new Error(`npm handoff hash mismatch: ${entry.filename}`); }
           NODE
            test -n "${NPM_TRUSTED_PUBLISHER_BINDING:?NPM_TRUSTED_PUBLISHER_BINDING is required}"
-           test "$NPM_TRUSTED_PUBLISHER_BINDING" = "npm publish"
+           test "$NPM_TRUSTED_PUBLISHER_BINDING" = "$NPM_TRUSTED_PUBLISHER_EXPECTED"
            npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.0.tgz" --access public --provenance
            npm publish "$RUNNER_TEMP/npm/xiopt-tmux-pane-dash-0.1.0.tgz" --access public --provenance
            audit_dir="$RUNNER_TEMP/npm-audit"
