@@ -336,7 +336,7 @@ process.on("exit", () => fs.writeFileSync(process.env.PANE_DASH_DENY_NET_OBSERVE
       await cli(runtime, ["setup", "--no-tmux", "--migrate"], migrationDeps)
       expect(await pathState(legacyLink)).toEqual({ present: false }); expect(await readFile(legacyTarget, "utf8")).toBe("export const legacy = true\n")
       const migratedOwnership = JSON.parse(await readFile(join(migration.env.XDG_DATA_HOME, "tmux-pane-dash", "state", "ownership.json"), "utf8"))
-      expect(migratedOwnership.migrations).toEqual([{ from: legacyLink, to: legacyTarget, sha256: "" }])
+      expect(migratedOwnership.migrations).toEqual([{ from: legacyLink, to: await realpath(legacyTarget), sha256: "" }])
       expect(await readFile(migration.opencode, "utf8")).toContain("@xiopt/pane-dash-opencode@0.1.1")
       await assertNoTransactionJournals(join(migration.env.XDG_DATA_HOME, "tmux-pane-dash"))
       await cli(runtime, ["uninstall"], migrationDeps)
