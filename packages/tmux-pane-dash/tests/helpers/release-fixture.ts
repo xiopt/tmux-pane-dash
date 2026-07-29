@@ -40,8 +40,8 @@ const staticLinuxBinary = async (binary: string, cwd: string, env: Record<string
 }
 
 /** Builds an archive from an isolated copy of the real Rust crate and verifies its Task 4 shape. */
-export async function buildFixtureRelease(input: { version: "0.1.1" | "0.1.2"; target: string; binary: string; root: string }): Promise<ReleaseAssetRecord> {
-  if (input.version !== "0.1.1" && input.version !== "0.1.2") throw new Error("unsupported fixture version")
+export async function buildFixtureRelease(input: { version: "0.1.2" | "0.1.3"; target: string; binary: string; root: string }): Promise<ReleaseAssetRecord> {
+  if (input.version !== "0.1.2" && input.version !== "0.1.3") throw new Error("unsupported fixture version")
   const target = Object.values(TARGETS).find(candidate => candidate.rustTarget === input.target)
   if (!target) throw new Error("unsupported fixture target")
   const stage = await mkdtemp(join(tmpdir(), "pane-dash-release-fixture-"))

@@ -42,7 +42,7 @@ npx @xiopt/tmux-pane-dash@latest setup --migrate
 `--allow-downgrade` is for deliberately invoking an older package version:
 
 ```sh
-npx @xiopt/tmux-pane-dash@0.1.1 setup --allow-downgrade
+npx @xiopt/tmux-pane-dash@0.1.2 setup --allow-downgrade
 ```
 
 Use the latest package explicitly for routine maintenance:
@@ -114,7 +114,7 @@ startup does not run a package-manager operation or access the network.
 ## OpenCode integration
 
 OpenCode integration is optional. The npm setup command adds the exact package
-entry `@xiopt/pane-dash-opencode@0.1.1` to the selected global OpenCode config;
+entry `@xiopt/pane-dash-opencode@0.1.2` to the selected global OpenCode config;
 use `--no-opencode` to skip it. The companion package requires OpenCode >=1.17.20.
 It does not edit a project-local OpenCode configuration file.
 

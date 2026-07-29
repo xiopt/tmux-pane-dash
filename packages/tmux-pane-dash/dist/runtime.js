@@ -418,7 +418,7 @@ function insertPlugin(text, plugin, desired) {
   return `${text.slice(0, entry.end)}${insertion}${text.slice(entry.end)}`;
 }
 function planOpenCodeEdit(input) {
-  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.1", text = decoder.decode(input.bytes), plugin = rootPlugin(text);
+  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.2", text = decoder.decode(input.bytes), plugin = rootPlugin(text);
   if (plugin) {
     const managed = plugin.entries.filter((entry) => validPaneDash(entry.value));
     const desiredEntries = managed.filter((entry) => entry.value === desired);
@@ -715,10 +715,10 @@ function tmuxVersion(value) {
   const match = /^tmux\s+(\d+)\.(\d+)(?:\.|[a-z]|\s|$)/.exec(value.trim());
   return !!match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 6);
 }
-async function run(deps, path, args) {
+async function run(deps, path, args, maxOutputBytes = 8 * 1024) {
   if (!deps.spawn)
     throw new Error("child execution unavailable");
-  return deps.spawn(path, args, { timeoutMs: 5000, env: childEnv(deps.env?.TMUX_TMPDIR), maxOutputBytes: 8 * 1024 });
+  return deps.spawn(path, args, { timeoutMs: 5000, env: childEnv(deps.env?.TMUX_TMPDIR), maxOutputBytes });
 }
 function tmuxBindings(output) {
   return output.split(`
@@ -848,7 +848,7 @@ async function doctor(deps) {
       checks.push(check("tmux.config", "error", "E_TMUX_CONFIG", clean(error)));
     }
     try {
-      const result = await run(deps, "tmux", ["list-keys", "-T", "prefix"]);
+      const result = await run(deps, "tmux", ["list-keys", "-T", "prefix"], 256 * 1024);
       if (result.code !== 0)
         checks.push(check("tmux.server", "warning", "W_TMUX_SERVER", "tmux server is not running"));
       else {
