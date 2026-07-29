@@ -92,6 +92,18 @@ jobs:
           test -x "$BUN_BOOTSTRAP"
           test "$($BUN_BOOTSTRAP --version)" = "1.3.14"
           printf 'TMUX_BIN=%s\nBUN_BOOTSTRAP=%s\n' "$TMUX_BIN" "$BUN_BOOTSTRAP" >> "$GITHUB_ENV"
+      - run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.1 --profile minimal --no-self-update
+          export RUSTUP_TOOLCHAIN=1.96.1
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target x86_64-unknown-linux-musl
+          mkdir bin
+          install -m0755 pane-dash/target/x86_64-unknown-linux-musl/release/pane-dash bin/pane-dash
+          test -x bin/pane-dash
+          test "$(bin/pane-dash --version)" = "pane-dash 0.1.0"
       - run: node -e 'if (process.version !== "v20.0.0") process.exit(1)'
       - run: |
           echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"

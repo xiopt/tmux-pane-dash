@@ -318,6 +318,55 @@ function assertCiCliNpaIsolation(workflow: ParsedWorkflow): void {
   }
 }
 
+const ciCliMuslTarget = "x86_64-unknown-linux-musl"
+const ciCliMuslToolchainInstall = "rustup toolchain install 1.96.1 --profile minimal --no-self-update"
+const ciCliMuslCargoBuild = `cargo build --release --locked --manifest-path pane-dash/Cargo.toml --target ${ciCliMuslTarget}`
+const ciCliMuslBuildCommands = [
+  "set -euo pipefail",
+  ciCliMuslToolchainInstall,
+  "export RUSTUP_TOOLCHAIN=1.96.1",
+  `rustup target add ${ciCliMuslTarget}`,
+  "sudo apt-get update",
+  "sudo apt-get install -y musl-tools",
+  ciCliMuslCargoBuild,
+  "mkdir bin",
+  `install -m0755 pane-dash/target/${ciCliMuslTarget}/release/pane-dash bin/pane-dash`,
+  "test -x bin/pane-dash",
+  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.0"',
+] as const
+
+function assertCiCliMuslFixture(workflow: ParsedWorkflow): void {
+  const ciCli = workflow.jobs["ci-cli"]
+  if (!ciCli) throw new Error("ci-cli is missing")
+  const provisionIndex = ciCli.steps.findIndex((step) => {
+    const run = step.run ?? ""
+    return run.includes("scripts/release/ci-tmux.sh") && run.includes("export TMUX_BIN") && run.includes("BUN_BOOTSTRAP=") && run.includes("GITHUB_ENV")
+  })
+  if (provisionIndex < 0) throw new Error("ci-cli must provision tmux and Bun before the musl fixture")
+  const fixtureIndex = ciCli.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === ciCliMuslToolchainInstall))
+  if (fixtureIndex < 0) throw new Error("ci-cli musl fixture build is missing")
+  if (fixtureIndex <= provisionIndex) throw new Error("ci-cli musl fixture must follow tmux and Bun provisioning")
+
+  const nodeWrapperIndex = ciCli.steps.findIndex((step) => (step.run ?? "").includes("tests/release/with-node20.sh --"))
+  if (nodeWrapperIndex < 0 || fixtureIndex >= nodeWrapperIndex) throw new Error("ci-cli musl fixture must run before Node20 wrapper tests")
+  const releaseTestsIndex = ciCli.steps.findIndex((step) => (step.run ?? "").includes("scripts/release/tests"))
+  if (releaseTestsIndex < 0 || fixtureIndex >= releaseTestsIndex) throw new Error("ci-cli musl fixture must run before scripts/release tests")
+
+  const commands = stepCommands(ciCli.steps[fixtureIndex]!).map((line) => line.trim())
+  if (commands.some((command) => /^make(?:\s|$)/.test(command))) throw new Error("ci-cli musl fixture must not use plain make")
+  if (commands.some((command) => /^cargo build(?:\s|$)/.test(command) && command !== ciCliMuslCargoBuild)) {
+    throw new Error("ci-cli musl fixture must not use the default GNU cargo target")
+  }
+  const positions = ciCliMuslBuildCommands.map((command) => commands.indexOf(command))
+  if (positions.some((position) => position < 0)) throw new Error("ci-cli must run the exact pinned musl fixture commands")
+  if (!positions.every((position, index) => index === 0 || position > positions[index - 1]!)) {
+    throw new Error("ci-cli musl fixture commands are out of order")
+  }
+  const aptUpdatePosition = positions[4]!
+  const aptInstallPosition = positions[5]!
+  if (aptInstallPosition !== aptUpdatePosition + 1) throw new Error("ci-cli must update apt immediately before installing musl-tools")
+}
+
 function assertSerialCargoTestCommands(body: string, expected: string[], label: string): void {
   const commands = body.split("\n").map((line) => line.trim()).filter((line) => line.startsWith(cargoTestPrefix))
   if (JSON.stringify(commands) !== JSON.stringify(expected)) throw new Error(`${label} must use exact serial commands`)
@@ -358,6 +407,7 @@ function assertWorkflowGraph(text: string, workflowName: string): void {
   assertPackedE2EGraph(workflow)
   if (workflowName === "ci.yml") {
     assertCiCliNpaIsolation(workflow)
+    assertCiCliMuslFixture(workflow)
     assertBatsProvisioning(workflow)
     assertRustLiveBinaryBuild(workflow)
   }
@@ -445,6 +495,42 @@ test("Rust builds the live-test binary after its gates and rejects missing, reor
   expect(() => assertRustLiveBinaryBuild(withGateRun(gateRun.replace(buildBlock, "")))).toThrow(/make build/)
   expect(() => assertRustLiveBinaryBuild(withGateRun(gateRun.replace(buildBlock, "").replace("cargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check", `${buildBlock}\ncargo fmt --all --manifest-path pane-dash/Cargo.toml -- --check`)))).toThrow(/after the Rust gates/)
   expect(() => assertRustLiveBinaryBuild(withGateRun(gateRun.replace("make build", "cargo build --release --locked --manifest-path pane-dash/Cargo.toml")))).toThrow(/make build|bare cargo build/)
+})
+
+test("ci-cli builds the pinned musl fixture before Node20 release tests and rejects host builds", async () => {
+  const text = await workflow("ci.yml")
+  const parsed = parseWorkflow(text)
+  const ciCli = parsed.jobs["ci-cli"]
+  if (!ciCli) throw new Error("ci-cli is missing")
+  const fixtureIndex = ciCli.steps.findIndex((step) => stepCommands(step).some((line) => line.trim() === ciCliMuslToolchainInstall))
+  if (fixtureIndex < 0) throw new Error("fixture workflow is missing the ci-cli musl build step")
+  const fixtureRun = ciCli.steps[fixtureIndex]!.run ?? ""
+  const buildCommand = ciCliMuslCargoBuild
+  const withFixtureRun = (run: string): ParsedWorkflow => ({
+    ...parsed,
+    jobs: {
+      ...parsed.jobs,
+      "ci-cli": {
+        ...ciCli,
+        steps: ciCli.steps.map((step, index) => index === fixtureIndex ? { ...step, run } : step),
+      },
+    },
+  })
+  const withCiCliSteps = (steps: ParsedStep[]): ParsedWorkflow => ({
+    ...parsed,
+    jobs: { ...parsed.jobs, "ci-cli": { ...ciCli, steps } },
+  })
+
+  expect(() => assertCiCliMuslFixture(parsed)).not.toThrow()
+  expect(() => assertCiCliMuslFixture(withFixtureRun(fixtureRun.replace("sudo apt-get update\n", "")))).toThrow(/exact pinned musl/)
+  expect(() => assertCiCliMuslFixture(withFixtureRun(fixtureRun.replace(buildCommand, "make build")))).toThrow(/plain make/)
+  expect(() => assertCiCliMuslFixture(withFixtureRun(fixtureRun.replace(buildCommand, "cargo build --release --locked --manifest-path pane-dash/Cargo.toml")))).toThrow(/default GNU/)
+
+  const nodeWrapperIndex = ciCli.steps.findIndex((step) => (step.run ?? "").includes("tests/release/with-node20.sh --"))
+  const reorderedSteps = [...ciCli.steps]
+  const fixtureStep = reorderedSteps.splice(fixtureIndex, 1)[0]!
+  reorderedSteps.splice(nodeWrapperIndex, 0, fixtureStep)
+  expect(() => assertCiCliMuslFixture(withCiCliSteps(reorderedSteps))).toThrow(/before Node20 wrapper tests/)
 })
 
 test("archive-dry-run is the terminal CI status and reaches the required CI graph", async () => {
