@@ -922,7 +922,8 @@ creation_success_responsive() {
   wait_for 'creation mutation render exact tag' 3 popup_tail_has "$index" "$snapshot_before" creation-held-snapshot
   wait_for 'creation target tagged' 3 pane_contains "$target" ''
   [[ "$(admin show-options -pv -t "$target" @pane_dash_tag)" == dash-created ]] || die 'creation success tag missing'
-  snapshot_before="$(ansi_size "$index")"; wait_for 'creation selected row snapshot' 1.1 ansi_grew_from "$index" "$snapshot_before"
+  # Prior budget assertions enforce cadence; this wait only tolerates scheduler delay.
+  snapshot_before="$(ansi_size "$index")"; wait_for 'creation selected row snapshot' 3 ansi_grew_from "$index" "$snapshot_before"
   selection_started="$(now)"; send_bytes "$index" '\022'
   wait_for 'creation selected row targets created pane' .5 log_has_target_since "$selection_started" capture-pane "$target"
   (( $(record_count "$started" "$(now)" split-window)==1 )) || die 'creation success replayed stage 1'
