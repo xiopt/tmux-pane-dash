@@ -1,5 +1,8 @@
 import { verify } from "sigstore"
 import { readFile } from "node:fs/promises"
+import { TAG } from "../scripts/release/contracts"
+
+const REF = `refs/tags/${TAG}` as const
 
 export interface VerifiedHandoff {
   schemaVersion: 1
@@ -32,7 +35,7 @@ export interface ExpectedNpmProvenance {
   integrity: string
   repository: "xiopt/tmux-pane-dash"
   workflow: ".github/workflows/release.yml"
-  ref: "refs/tags/v0.1.0"
+  ref: typeof REF
   commit: string
 }
 
@@ -63,7 +66,7 @@ export interface ApprovalEvidence {
     deploymentId: number
     environment: ProtectedEnvironment
     sha: string
-    ref: "refs/tags/v0.1.0"
+    ref: typeof REF
     approved: true
   }
 }
@@ -112,9 +115,8 @@ type Bundle = JsonRecord
 
 const REPOSITORY = "xiopt/tmux-pane-dash"
 const WORKFLOW = ".github/workflows/release.yml"
-const REF = "refs/tags/v0.1.0"
 const EXPECTED_ISSUER = "https://token.actions.githubusercontent.com"
-const EXPECTED_IDENTITY = "^https://github\\.com/xiopt/tmux-pane-dash/\\.github/workflows/release\\.yml@refs/tags/v0\\.1\\.0$"
+const EXPECTED_IDENTITY = `^https://github\\.com/xiopt/tmux-pane-dash/\\.github/workflows/release\\.yml@${REF.replaceAll(".", "\\.")}$`
 const ENVIRONMENTS = new Set<ProtectedEnvironment>(["github-draft", "npm-production", "release-promotion"])
 const JOBS = new Set(["draft-release", "npm-production", "promote-release"] as const)
 const DEPLOYMENT_KEYS = new Set([
@@ -480,9 +482,12 @@ function deploymentRecord(value: unknown, expected: EnvironmentProofInput): Json
   const deployment = record(deployments[0], "deployment")
   for (const key of Object.keys(deployment)) if (!DEPLOYMENT_KEYS.has(key)) fail(`deployment has undocumented field ${key}`)
   for (const key of DEPLOYMENT_KEYS) if (!(key in deployment)) fail(`deployment is missing ${key}`)
-  if (deployment.id !== approval.deploymentId || deployment.sha !== expected.expectedCommit || deployment.original_environment !== expected.expectedEnvironment || deployment.environment !== expected.expectedEnvironment || deployment.ref !== REF) fail("deployment does not match approval")
-  if (deployment.repository_url !== "https://api.github.com/repos/xiopt/tmux-pane-dash" || deployment.statuses_url !== `https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/${approval.deploymentId}/statuses`) fail("deployment URLs do not match repository")
-  if (deployment.url !== `https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/${approval.deploymentId}` || deployment.task !== "deploy" || typeof deployment.payload !== "object" || deployment.payload === null || Array.isArray(deployment.payload) || typeof deployment.creator !== "object" || deployment.creator === null || Array.isArray(deployment.creator) || typeof deployment.node_id !== "string" || typeof deployment.description !== "string" || typeof deployment.created_at !== "string" || typeof deployment.updated_at !== "string" || Number.isNaN(Date.parse(deployment.created_at)) || Number.isNaN(Date.parse(deployment.updated_at)) || deployment.transient_environment !== false || deployment.production_environment !== (expected.expectedEnvironment === "npm-production") || (deployment.performed_via_github_app !== null && (typeof deployment.performed_via_github_app !== "object" || Array.isArray(deployment.performed_via_github_app)))) fail("deployment shape is invalid")
+  const id = positiveInteger(deployment.id, "deployment id")
+  const stringKeys = ["node_id", "sha", "ref", "task", "original_environment", "environment", "created_at", "updated_at", "statuses_url", "repository_url"] as const
+  if (stringKeys.some((key) => typeof deployment[key] !== "string" || deployment[key] === "") || (typeof deployment.description !== "string" && deployment.description !== null)) fail("deployment shape is invalid")
+  if (typeof deployment.payload !== "object" || deployment.payload === null || Array.isArray(deployment.payload) || typeof deployment.creator !== "object" || deployment.creator === null || Array.isArray(deployment.creator)) fail("deployment shape is invalid")
+  if (typeof deployment.transient_environment !== "boolean" || typeof deployment.production_environment !== "boolean" || (deployment.performed_via_github_app !== null && (typeof deployment.performed_via_github_app !== "object" || Array.isArray(deployment.performed_via_github_app)))) fail("deployment shape is invalid")
+  if (id !== approval.deploymentId || deployment.sha !== expected.expectedCommit || deployment.ref !== TAG || deployment.original_environment !== expected.expectedEnvironment || deployment.environment !== expected.expectedEnvironment || deployment.task !== "deploy" || deployment.repository_url !== "https://api.github.com/repos/xiopt/tmux-pane-dash" || deployment.statuses_url !== `https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/${id}/statuses` || deployment.url !== `https://api.github.com/repos/xiopt/tmux-pane-dash/deployments/${id}` || Number.isNaN(Date.parse(deployment.created_at as string)) || Number.isNaN(Date.parse(deployment.updated_at as string)) || deployment.transient_environment !== false || deployment.production_environment !== (expected.expectedEnvironment === "npm-production")) fail("deployment does not match approval")
   return deployment
 }
 

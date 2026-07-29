@@ -557,6 +557,14 @@ function assertPromotionGraph(workflow: ParsedWorkflow): void {
   const mutation = job.steps.findIndex((step) => (step.run ?? "").includes("gh release edit"))
   if (proof < 0 || mutation < 0 || proof >= mutation) throw new Error("promotion mutation is not preceded by direct live deployment proof")
   const proofRun = job.steps[proof]!.run ?? ""
+  const canonicalGuard = 'test "$GITHUB_REF" = "refs/tags/$GITHUB_REF_NAME"'
+  const canonicalGuardIndex = proofRun.indexOf(canonicalGuard)
+  const deploymentQueryIndex = proofRun.indexOf("deployments?sha=$GITHUB_SHA")
+  if (canonicalGuardIndex < 0 || canonicalGuardIndex > deploymentQueryIndex) throw new Error("promotion proof must retain the canonical tag guard before its deployment query")
+  if (!proofRun.includes("ref=$GITHUB_REF_NAME")) throw new Error("promotion deployment query must use the short tag ref")
+  if (proofRun.includes("ref=$GITHUB_REF&")) throw new Error("promotion deployment query must not use the canonical Git ref")
+  if (!proofRun.includes("deployment.ref !== process.env.GITHUB_REF_NAME")) throw new Error("promotion proof must compare the live deployment to the short tag ref")
+  if (proofRun.includes("deployment.ref !== process.env.GITHUB_REF ||") || proofRun.includes("/^refs\\/tags\\//.test(deployment.ref)")) throw new Error("promotion proof must not normalize or regex-match deployment refs")
   if (proofRun.includes("conclusion !== \"success\"") || proofRun.includes("approval-response")) throw new Error("promotion uses synthetic completed-job or approval artifact proof")
 }
 
@@ -932,6 +940,23 @@ test("release validation derives identity from the checked-in version and protec
   expect(validation).not.toContain("ci(release): add gated v0.1 delivery pipeline")
   expect(validation).not.toMatch(/git show -s --format=%s/)
   expect(validation).not.toMatch(/test "\$GITHUB_REF_NAME" = "v0\.1\.0"/)
+})
+
+test("promotion proof keeps canonical tag validation separate from short live deployment refs", async () => {
+  const text = await workflow("release.yml")
+  const parsed = parseWorkflow(text)
+  expect(() => assertPromotionGraph(parsed)).not.toThrow()
+  const promote = parsed.jobs["promote-release"]!
+  const proof = promote.steps.find((step) => (step.run ?? "").includes("deployments?sha=$GITHUB_SHA"))?.run ?? ""
+  expect(proof).toContain('test "$GITHUB_REF" = "refs/tags/$GITHUB_REF_NAME"')
+  expect(proof).toContain("ref=$GITHUB_REF_NAME")
+  expect(proof).toContain("deployment.ref !== process.env.GITHUB_REF_NAME")
+  for (const mutation of [
+    text.replace('test "$GITHUB_REF" = "refs/tags/$GITHUB_REF_NAME"', 'test "$GITHUB_REF_NAME" = "v0.1.0"'),
+    text.replace("ref=$GITHUB_REF_NAME", "ref=$GITHUB_REF"),
+    text.replace("deployment.ref !== process.env.GITHUB_REF_NAME", "deployment.ref !== process.env.GITHUB_REF"),
+    text.replace("deployment.ref !== process.env.GITHUB_REF_NAME", "!/^refs\\/tags\\//.test(deployment.ref)"),
+  ]) expect(() => assertPromotionGraph(parseWorkflow(mutation))).toThrow()
 })
 
 test("tag validation compares resolved tag and GitHub commits without requiring the current master tip", async () => {
