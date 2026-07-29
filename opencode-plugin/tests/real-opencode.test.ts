@@ -48,15 +48,15 @@ async function assertPackedPlugin(scratch: string): Promise<LocalPackage> {
   return plugin
 }
 
-async function companion(scratch: string): Promise<LocalPackage> {
-  const directory = join(scratch, "companion")
+async function companion(scratch: string, version: string): Promise<LocalPackage> {
+  const directory = join(scratch, `companion-${version}`)
   await mkdir(directory)
   await Promise.all([
-    writeFile(join(directory, "package.json"), JSON.stringify({ name: "@opencode-ai/plugin", version: "1.17.20", type: "module", exports: { ".": "./index.js" }, files: ["index.js"] })),
+    writeFile(join(directory, "package.json"), JSON.stringify({ name: "@opencode-ai/plugin", version, type: "module", exports: { ".": "./index.js" }, files: ["index.js"] })),
     writeFile(join(directory, "index.js"), "export {}\n"),
   ])
   const packed = await pack(directory, scratch)
-  return { ...packed, version: "1.17.20" }
+  return { ...packed, version }
 }
 
 function parserProof(): void {
@@ -126,8 +126,14 @@ test("actual packed plugin loads through the loopback registry in JSON and JSONC
   parserProof()
   const scratch = await mkdtemp(join(process.env.TMPDIR || tmpdir(), "pane-dash-plugin-pack-"))
   try {
-    const plugin = await assertPackedPlugin(scratch), companionPackage = await companion(scratch)
+    const plugin = await assertPackedPlugin(scratch)
+    const companions = new Map<string, LocalPackage>()
     for (const row of rows) {
+      let companionPackage = companions.get(row.version)
+      if (!companionPackage) {
+        companionPackage = await companion(scratch, row.version)
+        companions.set(row.version, companionPackage)
+      }
       await runVariant(row, "json", plugin, companionPackage); await runVariant(row, "jsonc", plugin, companionPackage)
       console.log(`${row.name} version=${row.version} sha256=${row.sha256} status=PASS cleanup=PASS public-network-requests=0`)
     }
