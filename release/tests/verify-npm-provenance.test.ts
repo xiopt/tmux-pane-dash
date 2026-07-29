@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test"
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { afterAll, expect, test } from "bun:test"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { EnvironmentProofInput } from "../verify-npm-provenance"
@@ -40,6 +40,12 @@ function validBundleFor(certificateRawBytes?: string): Record<string, unknown> {
 
 const validBundle = validBundleFor()
 
+const cliBundleRoot = await mkdtemp(join(process.cwd(), `.provenance-bundle-${process.pid}-`))
+const cliBundleResult = await Bun.build({ entrypoints: [join(process.cwd(), "release/verify-npm-provenance.ts")], outdir: cliBundleRoot, target: "node", format: "esm", naming: "verify-npm-provenance.mjs", sourcemap: "none", minify: false, external: ["sigstore"] })
+if (!cliBundleResult.success) throw new Error("could not build bundled provenance CLI")
+const cliBundle = join(cliBundleRoot, "verify-npm-provenance.mjs")
+afterAll(() => rm(cliBundleRoot, { recursive: true, force: true }))
+
 // The committed Sigstore bundle is signed historical v0.1.0 evidence; keep its
 // payload/ref intact and exercise current-release gating through the CLI path.
 
@@ -75,6 +81,40 @@ test("provenance tests exercise the locked Sigstore verifier rather than a modul
   expect(source).not.toContain("mock.module(\"sigstore\"")
   expect(source).toContain("await verifyNpmProvenance")
   expect(source).toContain("certificateOIDs")
+})
+
+test("bundled provenance CLI pins the current version before handoff and fetch I/O", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), `task14-provenance-cli-${process.pid}-`))
+  try {
+    const preload = join(scratch, "preload.mjs"), fetchLog = join(scratch, "fetch.log"), handoffPath = join(scratch, "handoff.json")
+    await writeFile(preload, [
+      'import { appendFileSync } from "node:fs";',
+      'globalThis.fetch = async () => { appendFileSync(process.env.PROVENANCE_FETCH_LOG, "fetch\\n"); return new Response(JSON.stringify({ versions: {} }), { status: 200 }); };',
+      "",
+    ].join("\n"))
+    await writeFile(fetchLog, "")
+    const common = ["--package", "@xiopt/tmux-pane-dash", "--handoff", handoffPath, "--repository", "xiopt/tmux-pane-dash", "--workflow", ".github/workflows/release.yml", "--ref", "refs/tags/v0.1.1"] as const
+    const run = async (version: string) => {
+      const child = Bun.spawn([process.execPath, "--preload", preload, cliBundle, "--package", common[1], "--version", version, "--handoff", common[3], "--repository", common[5], "--workflow", common[7], "--ref", common[9]], { cwd: process.cwd(), env: { ...process.env, PROVENANCE_FETCH_LOG: fetchLog }, stdout: "pipe", stderr: "pipe" })
+      const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+      return { code, stdout, stderr }
+    }
+
+    for (const version of ["0.1.0", "0.1.2"]) {
+      await writeFile(fetchLog, "")
+      const result = await run(version)
+      expect(result.code).not.toBe(0)
+      expect(result.stderr).toContain("invalid provenance CLI contract")
+      expect(await readFile(fetchLog, "utf8")).toBe("")
+    }
+
+    await writeFile(handoffPath, JSON.stringify(handoff))
+    await writeFile(fetchLog, "")
+    const current = await run("0.1.1")
+    expect(current.code).not.toBe(0)
+    expect(current.stderr).not.toContain("invalid provenance CLI contract")
+    expect(await readFile(fetchLog, "utf8")).toBe("fetch\n")
+  } finally { await rm(scratch, { recursive: true, force: true }) }
 })
 
 test("valid signed DSSE fixture verifies package integrity and exact statement identity", async () => {

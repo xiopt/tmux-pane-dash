@@ -264,6 +264,7 @@ function statementPredicate(statement: JsonRecord, expected: ExpectedNpmProvenan
   if (sourceDigest.sha1 !== expected.commit) fail("provenance commit does not match")
 }
 
+// Keep the pure verifier semver/ref-dynamic for historical signed evidence; the production CLI pins VERSION before release I/O.
 /** Verify one npm provenance bundle and then inspect only its verified payload. */
 export async function verifyNpmProvenance(expected: ExpectedNpmProvenance, deps: ProvenanceDependencies): Promise<void> {
   if (expected.repository !== REPOSITORY || expected.workflow !== WORKFLOW || !/^refs\/tags\/v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(expected.ref) || expected.ref !== `refs/tags/v${expected.version}` || !/^[0-9a-f]{40}$/.test(expected.commit)) fail("expected provenance identity is invalid")
@@ -418,6 +419,7 @@ async function verifyProvenanceCli(args: readonly string[]): Promise<void> {
   const repository = cliValue(args, "--repository")
   const workflow = cliValue(args, "--workflow")
   const ref = cliValue(args, "--ref")
+  if (version !== VERSION) fail("invalid provenance CLI contract")
   if (args.length !== 12 || repository !== REPOSITORY || workflow !== WORKFLOW || ref !== REF) fail("invalid provenance CLI contract")
   const handoff = await readJsonFile(handoffPath) as VerifiedHandoff
   validateHandoff(handoff)
