@@ -53,7 +53,7 @@ async function loadOwnership(fs: DoctorFs, installRoot: string): Promise<Ownersh
 }
 function inRoot(installRoot: string, path: string): boolean { const rel = relative(resolve(installRoot), resolve(path)); return rel !== "" && !rel.startsWith("..") && !rel.includes("/../") }
 function tmuxVersion(value: string): boolean { const match = /^tmux\s+(\d+)\.(\d+)(?:\.|[a-z]|\s|$)/.exec(value.trim()); return !!match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 6) }
-async function run(deps: Dependencies, path: string, args: readonly string[]) { if (!deps.spawn) throw new Error("child execution unavailable"); return deps.spawn(path, args, { timeoutMs: 5_000, env: childEnv(deps.env?.TMUX_TMPDIR), maxOutputBytes: 8 * 1024 }) }
+async function run(deps: Dependencies, path: string, args: readonly string[], maxOutputBytes = 8 * 1024) { if (!deps.spawn) throw new Error("child execution unavailable"); return deps.spawn(path, args, { timeoutMs: 5_000, env: childEnv(deps.env?.TMUX_TMPDIR), maxOutputBytes }) }
 type TmuxBinding = { action: string }
 function tmuxBindings(output: string): TmuxBinding[] {
   return output.split("\n").flatMap(line => {
@@ -125,7 +125,8 @@ export async function doctor(deps: Dependencies): Promise<DoctorReport> {
       checks.push(check("tmux.config", "ok", null, "tmux marker and route match"))
     } catch (error) { checks.push(check("tmux.config", "error", "E_TMUX_CONFIG", clean(error))) }
     try {
-      const result = await run(deps, "tmux", ["list-keys", "-T", "prefix"])
+      // A normal tmux prefix table exceeds the small cap used by version probes.
+      const result = await run(deps, "tmux", ["list-keys", "-T", "prefix"], 256 * 1024)
       if (result.code !== 0) checks.push(check("tmux.server", "warning", "W_TMUX_SERVER", "tmux server is not running"))
        else {
          const current = join(installRoot, "current"), bindings = tmuxBindings(result.stdout)

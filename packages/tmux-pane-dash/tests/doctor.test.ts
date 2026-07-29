@@ -40,7 +40,7 @@ function fixture(fault?: string, tmuxTmpdir?: string) {
   const expectedChildEnv = { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C", ...(tmuxTmpdir?.startsWith("/") ? { TMUX_TMPDIR: tmuxTmpdir } : {}) }
   const deps: Dependencies = { manifest: {}, platform: "linux", arch: "x64", executingVersion: version, env: { XDG_DATA_HOME: "/data", HOME: "/home", CALLER_LEAK: "must-not-reach-tmux", ...(tmuxTmpdir === undefined ? {} : { TMUX_TMPDIR: tmuxTmpdir }) }, doctorFs: fs, fetch: async () => { calls.fetch += 1; throw new Error("fetch") }, lock: async () => { calls.lock += 1; return { token: "", recovered: false, release: async () => {} } }, spawn: async (path, args, options) => {
     calls.child += 1; if (path === "tmux") tmuxEnvironments.push(options.env)
-    expect(options.timeoutMs).toBe(5_000); expect(options.maxOutputBytes).toBe(8 * 1024); expect(options.env).toEqual(expectedChildEnv)
+    expect(options.timeoutMs).toBe(5_000); expect(options.maxOutputBytes).toBe(path === "tmux" && args[0] === "list-keys" ? 256 * 1024 : 8 * 1024); expect(options.env).toEqual(expectedChildEnv)
     if (fault === "binary.version" && path.includes("pane-dash")) return { code: 1, stdout: "bad\n", stderr: "" }
     if (fault === "tmux.version" && args[0] === "-V") return { code: 0, stdout: "tmux 3.5\n", stderr: "" }
     if (args[0] === "-V") return { code: 0, stdout: "tmux 3.6\n", stderr: "" }
