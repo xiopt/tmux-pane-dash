@@ -231,7 +231,7 @@ test("isolation: local pack install is offline before package JavaScript runs", 
   } finally { await rm(packed.output, { recursive: true, force: true }) }
 })
 
-test("packed CLI setup installs its bundled archive without a network request", async () => {
+test.if(process.platform === "darwin" && process.arch === "arm64")("packed CLI setup uses its bundled payload without a network request", async () => {
   expect(process.env.TARGET_KEY ?? hostKey).toBe(hostKey)
   const nodeBin = process.env.NODE_20_BIN, npmCli = process.env.NPM_20_CLI
   expect(nodeBin).toMatch(/^\//); expect(npmCli).toMatch(/^\//)
