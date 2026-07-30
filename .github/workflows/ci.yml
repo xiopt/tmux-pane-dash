@@ -116,7 +116,7 @@ jobs:
             PANE_DASH_NODE20_PREPROVIDED=1 NODE_20_BIN="$NODE_20_BIN" NPM_20_CLI="$NPM_20_CLI" \
             tests/release/with-node20.sh -- scripts/release/clean-room.sh -- \
             bun test scripts/release/tests release/tests
-          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test opencode-plugin/tests/normalize.test.ts opencode-plugin/tests/pane-dash.test.ts opencode-plugin/tests/real-opencode-rows.test.ts opencode-plugin/tests/state.test.ts opencode-plugin/tests/writer.test.ts
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- scripts/release/clean-room.sh -- bun test opencode-plugin/tests/notifications.test.ts opencode-plugin/tests/normalize.test.ts opencode-plugin/tests/pane-dash.test.ts opencode-plugin/tests/real-opencode-rows.test.ts opencode-plugin/tests/state.test.ts opencode-plugin/tests/writer.test.ts
 
   four-targets:
     needs: ci-cli

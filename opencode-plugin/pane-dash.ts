@@ -1,6 +1,7 @@
 // OpenCode plugin: publishes agent status to tmux pane options.
 // Install: ln -sf <repo>/opencode-plugin/pane-dash.ts ~/.config/opencode/plugin/
 import { normalize } from "./src/normalize"
+import { createNotificationPublisher, decideNotification, resolveNotificationBinary } from "./src/notifications"
 import { apply, createStore, derive } from "./src/state"
 import { TmuxWriter } from "./src/writer"
 
@@ -18,6 +19,7 @@ export const PaneDash = async () => {
 
   const store = createStore()
   const writer = new TmuxWriter(pane)
+  const notify = createNotificationPublisher(resolveNotificationBinary())
 
   const publish = () => {
     const derived = derive(store)
@@ -50,9 +52,19 @@ export const PaneDash = async () => {
 
   return {
     event: async ({ event }: { event: unknown }) => {
-      for (const normalized of normalize(event as { type?: unknown; properties?: unknown })) {
-        apply(store, normalized)
+      const raw = event as { id?: unknown; type?: unknown; properties?: unknown }
+      const before = derive(store)
+      const normalized = normalize(raw)
+      for (const normalizedEvent of normalized) {
+        apply(store, normalizedEvent)
       }
+      const after = derive(store)
+      notify(decideNotification(raw, {
+        before,
+        after,
+        normalized,
+        activeSessionID: store.activeSessionID,
+      }))
       publish()
     },
   }
