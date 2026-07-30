@@ -218,6 +218,7 @@ mod unix {
             pane: String,
             width: usize,
             focused: bool,
+            acknowledge: bool,
         },
         HookPaneExited {
             pane: String,
@@ -368,6 +369,7 @@ mod unix {
                     Some(client.pane),
                 )),
                 status_width: client.width,
+                acknowledge: false,
             });
             self.active_client = Some(client.client_tty.clone());
             self.tmux.refresh_client_status(&client.client_tty).await?;
@@ -556,7 +558,16 @@ mod unix {
         };
         match hook {
             "focus" => {
-                let values = flags(&args[1..], &["--client", "--pane", "--width", "--focused"])?;
+                let values = flags(
+                    &args[1..],
+                    &[
+                        "--client",
+                        "--pane",
+                        "--width",
+                        "--focused",
+                        "--acknowledge",
+                    ],
+                )?;
                 let client = values
                     .get("--client")
                     .ok_or_else(|| anyhow!("missing --client"))?
@@ -581,11 +592,21 @@ mod unix {
                     "1" => true,
                     _ => bail!("--focused must be 0 or 1"),
                 };
+                let acknowledge = match values
+                    .get("--acknowledge")
+                    .ok_or_else(|| anyhow!("missing --acknowledge"))?
+                    .as_str()
+                {
+                    "0" => false,
+                    "1" => true,
+                    _ => bail!("--acknowledge must be 0 or 1"),
+                };
                 Ok(CliCommand::Client(Request::HookFocus {
                     client,
                     pane,
                     width,
                     focused,
+                    acknowledge,
                 }))
             }
             "pane-exited" => {
@@ -979,7 +1000,8 @@ mod unix {
                     pane,
                     width,
                     focused,
-                } => self.focus(client, pane, width, focused).await,
+                    acknowledge,
+                } => self.focus(client, pane, width, focused, acknowledge).await,
                 Request::HookPaneExited { pane } => self.pane_exited(pane).await,
                 Request::SessionClosed => self.session_closed().await,
                 Request::Select { event_id, client } => self.select(event_id, client).await,
@@ -1030,6 +1052,7 @@ mod unix {
             pane: String,
             width: usize,
             focused: bool,
+            acknowledge: bool,
         ) -> std::result::Result<HandledRequest, RequestFailure> {
             validate_client(&client)
                 .map_err(|error| RequestFailure::malformed(error.to_string()))?;
@@ -1039,14 +1062,9 @@ mod unix {
             let result = self.state.apply(NotificationCommand::UpdateActiveClient {
                 client: Some(active_client),
                 status_width: width,
+                acknowledge,
             });
             self.active_client = Some(client);
-            if result.snapshot.is_empty() {
-                return Ok(HandledRequest {
-                    response: response_for_result(&result),
-                    stop: false,
-                });
-            }
             self.finish_state_change(result, None).await
         }
 

@@ -74,6 +74,10 @@ esac
 case "$select_pane_owned" in
   *'#{q:hook_client}'*|*'#{q:hook_pane}'*) fail "after-select-pane hook retained authoritative-only formats" ;;
 esac
+case "$select_pane_owned" in
+  *'--acknowledge 1'*) ;;
+  *) fail "after-select-pane hook does not acknowledge focused pane notifications" ;;
+esac
 for hook in client-focus-in client-focus-out after-select-window client-session-changed client-resized; do
   hook_lines="$(T show-hooks -g "$hook")"
   hook_line="$(printf '%s\n' "$hook_lines" | grep -F 'notify hook focus --client' || true)"
@@ -97,6 +101,14 @@ for hook in client-focus-in client-focus-out after-select-window client-session-
         *) fail "$hook did not use hook client format" ;;
       esac
       ;;
+  esac
+  case "$hook" in
+    client-focus-out|client-resized) expected_acknowledge=0 ;;
+    *) expected_acknowledge=1 ;;
+  esac
+  case "$hook_line" in
+    *"--acknowledge $expected_acknowledge"*) ;;
+    *) fail "$hook notification acknowledgment mode" ;;
   esac
 done
 pane_exited_hooks="$(T show-hooks -g pane-exited)"

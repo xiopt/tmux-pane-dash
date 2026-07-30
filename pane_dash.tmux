@@ -83,10 +83,11 @@ if [ -f "$binary" ] && [ -x "$binary" ]; then
   tmux set-option -g status 2
   tmux set-option -g 'status-format[1]' '#{E:@pane_dash_notify_status}'
 
-  focus_in_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
-  focus_out_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 0)"
-  select_notify_hook="$(notify_hook_command notify hook focus --client '#{q:client_tty}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
-  client_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
+  focus_in_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1 --acknowledge 1)"
+  focus_out_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 0 --acknowledge 0)"
+  select_notify_hook="$(notify_hook_command notify hook focus --client '#{q:client_tty}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1 --acknowledge 1)"
+  client_session_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1 --acknowledge 1)"
+  client_resize_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1 --acknowledge 0)"
   pane_exited_notify_hook="$(notify_hook_command notify hook pane-exited --pane '#{q:hook_pane}')"
   session_closed_notify_hook="$(notify_hook_command notify hook session-closed)"
   notify_hook_prefix='run-shell -b "TMUX=#{q:socket_path},#{q:pid},0 #{q:@pane_dash_notify_binary} notify hook'
@@ -95,8 +96,8 @@ if [ -f "$binary" ] && [ -x "$binary" ]; then
   install_notify_hook client-focus-out "$notify_hook_prefix focus --client" "$focus_out_notify_hook"
   install_notify_hook after-select-pane "$notify_hook_prefix focus --client" "$select_notify_hook"
   install_notify_hook after-select-window "$notify_hook_prefix focus --client" "$select_notify_hook"
-  install_notify_hook client-session-changed "$notify_hook_prefix focus --client" "$client_notify_hook"
-  install_notify_hook client-resized "$notify_hook_prefix focus --client" "$client_notify_hook"
+  install_notify_hook client-session-changed "$notify_hook_prefix focus --client" "$client_session_notify_hook"
+  install_notify_hook client-resized "$notify_hook_prefix focus --client" "$client_resize_notify_hook"
   install_notify_hook pane-exited "$notify_hook_prefix pane-exited --pane" "$pane_exited_notify_hook"
   install_notify_hook session-closed "$notify_hook_prefix session-closed " "$session_closed_notify_hook"
 

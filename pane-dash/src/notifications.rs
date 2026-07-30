@@ -273,6 +273,7 @@ pub enum NotificationCommand {
     UpdateActiveClient {
         client: Option<ActiveClient>,
         status_width: usize,
+        acknowledge: bool,
     },
     RemoveStalePanes(Vec<PaneId>),
     Click(String),
@@ -317,7 +318,8 @@ impl NotificationState {
             NotificationCommand::UpdateActiveClient {
                 client,
                 status_width,
-            } => self.update_active_client(client, status_width),
+                acknowledge,
+            } => self.update_active_client(client, status_width, acknowledge),
             NotificationCommand::RemoveStalePanes(pane_ids) => self.remove_stale_panes(pane_ids),
             NotificationCommand::Click(token) => self.click(&token),
             NotificationCommand::Select(event_id) => self.select(&event_id),
@@ -439,8 +441,25 @@ impl NotificationState {
         &mut self,
         client: Option<ActiveClient>,
         status_width: usize,
+        acknowledge: bool,
     ) -> (ApplyOutcome, bool, Option<RouteIntent>) {
-        let changed = self.active_client != client || self.status_width != status_width;
+        let acknowledged = if acknowledge {
+            client
+                .as_ref()
+                .filter(|client| client.focused())
+                .and_then(ActiveClient::current_pane)
+                .map(|pane_id| {
+                    let before = self.queue.len();
+                    self.queue
+                        .retain(|notification| &notification.target.pane_id != pane_id);
+                    before != self.queue.len()
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let changed =
+            acknowledged || self.active_client != client || self.status_width != status_width;
         self.active_client = client;
         self.status_width = status_width;
         (ApplyOutcome::ActiveClientUpdated, changed, None)
@@ -1087,11 +1106,52 @@ mod tests {
     }
 
     #[test]
+    fn manual_focus_acknowledges_old_events_and_allows_later_events() {
+        let mut state = NotificationState::new();
+        publish(&mut state, "permission", NotificationKind::Permission, "%1");
+
+        state.apply(NotificationCommand::UpdateActiveClient {
+            client: Some(ActiveClient::new("client", true, Some(PaneId::from("%1")))),
+            status_width: 80,
+            acknowledge: true,
+        });
+        assert!(state.snapshot().is_empty());
+
+        state.apply(NotificationCommand::UpdateActiveClient {
+            client: Some(ActiveClient::new("client", true, Some(PaneId::from("%2")))),
+            status_width: 80,
+            acknowledge: true,
+        });
+        publish(&mut state, "finished", NotificationKind::Finished, "%1");
+        assert_eq!(state.snapshot().items().len(), 1);
+        assert_eq!(state.snapshot().items()[0].event_id.as_str(), "finished");
+    }
+
+    #[test]
+    fn non_acknowledging_updates_and_focus_out_keep_notifications() {
+        let mut state = NotificationState::new();
+        publish(&mut state, "permission", NotificationKind::Permission, "%1");
+
+        state.apply(NotificationCommand::UpdateActiveClient {
+            client: Some(ActiveClient::new("client", true, Some(PaneId::from("%1")))),
+            status_width: 100,
+            acknowledge: false,
+        });
+        state.apply(NotificationCommand::UpdateActiveClient {
+            client: Some(ActiveClient::new("client", false, Some(PaneId::from("%1")))),
+            status_width: 100,
+            acknowledge: true,
+        });
+        assert_eq!(state.snapshot().items().len(), 1);
+    }
+
+    #[test]
     fn active_client_and_status_width_update_as_one_state_change() {
         let mut state = NotificationState::new();
         let result = state.apply(NotificationCommand::UpdateActiveClient {
             client: Some(ActiveClient::new("client", true, Some(PaneId::from("%1")))),
             status_width: 40,
+            acknowledge: false,
         });
         assert_eq!(result.outcome, ApplyOutcome::ActiveClientUpdated);
         assert!(result.changed);
@@ -1099,6 +1159,7 @@ mod tests {
         let repeat = state.apply(NotificationCommand::UpdateActiveClient {
             client: Some(ActiveClient::new("client", true, Some(PaneId::from("%1")))),
             status_width: 40,
+            acknowledge: false,
         });
         assert_eq!(repeat.outcome, ApplyOutcome::ActiveClientUpdated);
         assert!(!repeat.changed);

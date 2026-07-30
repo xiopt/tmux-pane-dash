@@ -699,6 +699,8 @@ fn focus_suppresses_and_pane_exit_cleans_up_over_ipc() {
         "80",
         "--focused",
         "1",
+        "--acknowledge",
+        "0",
     ]);
     assert!(focused.status.success());
 
@@ -733,6 +735,84 @@ fn focus_suppresses_and_pane_exit_cleans_up_over_ipc() {
     assert!(exited.status.success());
     let listed = harness.client(&["notify", "list"]);
     assert!(json(&listed)["snapshot"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn manual_focus_acknowledges_old_events_and_allows_later_events_over_ipc() {
+    let harness = Harness::new(false);
+
+    let permission = harness.client(&[
+        "notify",
+        "publish",
+        "--event-id",
+        "permission",
+        "--kind",
+        "permission",
+        "--message",
+        "approve",
+        "--pane",
+        "%1",
+    ]);
+    assert_eq!(json(&permission)["outcome"], "queued");
+
+    let acknowledged = harness.client(&[
+        "notify",
+        "hook",
+        "focus",
+        "--client",
+        "/dev/ttys001",
+        "--pane",
+        "%1",
+        "--width",
+        "80",
+        "--focused",
+        "1",
+        "--acknowledge",
+        "1",
+    ]);
+    assert!(acknowledged.status.success());
+    assert!(
+        json(&harness.client(&["notify", "list"]))["snapshot"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fs::read_to_string(&harness.status).unwrap(), "");
+
+    let moved_away = harness.client(&[
+        "notify",
+        "hook",
+        "focus",
+        "--client",
+        "/dev/ttys001",
+        "--pane",
+        "%2",
+        "--width",
+        "80",
+        "--focused",
+        "1",
+        "--acknowledge",
+        "1",
+    ]);
+    assert!(moved_away.status.success());
+
+    let finished = harness.client(&[
+        "notify",
+        "publish",
+        "--event-id",
+        "finished",
+        "--kind",
+        "finished",
+        "--message",
+        "done",
+        "--pane",
+        "%1",
+    ]);
+    assert_eq!(json(&finished)["outcome"], "queued");
+    let listed = json(&harness.client(&["notify", "list"]));
+    let snapshot = listed["snapshot"].as_array().unwrap();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0]["event_id"], "finished");
 }
 
 #[test]
