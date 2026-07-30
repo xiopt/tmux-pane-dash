@@ -7,10 +7,10 @@ use crate::model::{PaneId, SessionId, WindowId};
 
 pub const QUEUE_CAPACITY: usize = 64;
 pub const DEDUP_HISTORY_CAPACITY: usize = 256;
-pub const MAX_MESSAGE_WIDTH: usize = 160;
+pub const MAX_MESSAGE_SCALARS: usize = 256;
 pub const DEFAULT_STATUS_WIDTH: usize = 80;
 
-const MAX_EVENT_ID_BYTES: usize = 256;
+const MAX_EVENT_ID_BYTES: usize = 128;
 const VISIBLE_RANGE_PREFIX: &str = "pane-dash-visible-";
 const MORE_RANGE_NAME: &str = "pane-dash-more";
 const ELLIPSIS: &str = "…";
@@ -141,7 +141,10 @@ impl EventId {
         if value.len() > MAX_EVENT_ID_BYTES {
             return Err(NotificationError::EventIdTooLong);
         }
-        if value.chars().any(char::is_control) {
+        if value
+            .bytes()
+            .any(|byte| !(byte.is_ascii_graphic() || byte == b' '))
+        {
             return Err(NotificationError::EventIdContainsControl);
         }
         Ok(Self(value))
@@ -541,7 +544,7 @@ fn notification_text(notification: &Notification) -> String {
 }
 
 fn bound_message(value: &str) -> String {
-    let sanitized: String = value
+    value
         .chars()
         .filter_map(|character| {
             if matches!(character, '\n' | '\r' | '\t' | '\u{2028}' | '\u{2029}') {
@@ -552,8 +555,8 @@ fn bound_message(value: &str) -> String {
                 Some(character)
             }
         })
-        .collect();
-    truncate_to_width(&sanitized, MAX_MESSAGE_WIDTH)
+        .take(MAX_MESSAGE_SCALARS)
+        .collect()
 }
 
 fn truncate_to_width(value: &str, max_width: usize) -> String {
@@ -842,7 +845,7 @@ mod tests {
     #[test]
     fn event_ids_are_validated_and_messages_are_bounded() {
         let mut state = NotificationState::new();
-        for invalid_id in ["", "bad\nnewline"] {
+        for invalid_id in ["", "bad\nnewline", "bad\u{7f}", "é"] {
             let result = state.apply(NotificationCommand::Publish(NotificationEvent::new(
                 NotificationKind::Error,
                 invalid_id,
@@ -852,6 +855,11 @@ mod tests {
             assert!(matches!(result.outcome, ApplyOutcome::Rejected(_)));
             assert!(!result.changed);
         }
+        assert!(EventId::new("x".repeat(MAX_EVENT_ID_BYTES)).is_ok());
+        assert_eq!(
+            EventId::new("x".repeat(MAX_EVENT_ID_BYTES + 1)),
+            Err(NotificationError::EventIdTooLong)
+        );
         let result = state.apply(NotificationCommand::Publish(NotificationEvent::new(
             NotificationKind::Error,
             "x".repeat(MAX_EVENT_ID_BYTES + 1),
@@ -863,16 +871,40 @@ mod tests {
         assert!(state.is_empty());
         assert_eq!(state.remembered_event_count(), 0);
 
-        let long_message = "界".repeat(MAX_MESSAGE_WIDTH);
+        let sanitized_message = "one\ntwo\rthree\tfour\u{1b}five\u{2028}six";
         let result = state.apply(NotificationCommand::Publish(NotificationEvent::new(
             NotificationKind::Finished,
+            "sanitized",
+            sanitized_message,
+            target("%sanitized"),
+        )));
+        assert!(matches!(result.outcome, ApplyOutcome::Published { .. }));
+        assert_eq!(
+            result.snapshot.items()[0].message(),
+            "one two three fourfive six"
+        );
+
+        let long_message = "界".repeat(MAX_MESSAGE_SCALARS + 1);
+        let result = state.apply(NotificationCommand::Publish(NotificationEvent::new(
+            NotificationKind::Error,
             "bounded",
             long_message,
             target("%bounded"),
         )));
         assert!(matches!(result.outcome, ApplyOutcome::Published { .. }));
-        assert!(result.snapshot.items()[0].message().width() <= MAX_MESSAGE_WIDTH);
-        assert!(result.snapshot.items()[0].message().ends_with(ELLIPSIS));
+        let message = result
+            .snapshot
+            .items()
+            .iter()
+            .find(|notification| notification.event_id().as_str() == "bounded")
+            .expect("bounded notification is present")
+            .message();
+        assert_eq!(message, "界".repeat(MAX_MESSAGE_SCALARS));
+        assert_eq!(message.chars().count(), MAX_MESSAGE_SCALARS);
+        assert!(message.width() > 160);
+        let row = state.render_status_row(12);
+        assert!(visible_content(&row).width() <= 12);
+        assert!(row.contains(ELLIPSIS));
     }
 
     #[test]
