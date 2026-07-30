@@ -110,7 +110,7 @@ pub fn is_valid_machine_id(value: &str, prefix: char) -> bool {
 mod unix {
     use super::{
         EventId, NotificationClient, NotificationItem, NotificationSelectOutcome,
-        NotificationTarget,
+        NotificationTarget, is_valid_machine_id,
     };
     use std::collections::HashMap;
     use std::env;
@@ -342,6 +342,78 @@ mod unix {
         tmux: TmuxExec,
         state: NotificationState,
         active_client: Option<String>,
+    }
+
+    struct StartupClient {
+        client_tty: String,
+        activity: u64,
+        pane: PaneId,
+        width: usize,
+    }
+
+    impl NotificationService {
+        async fn initialize(&mut self) -> Result<()> {
+            self.tmux.set_notification_status("").await?;
+
+            let clients = self.tmux.list_notification_clients().await?;
+            let Some(client) = select_startup_client(&clients) else {
+                return Ok(());
+            };
+            let focused =
+                focus_relay_is_active(&self.tmux.notification_focus(&client.client_tty).await?);
+            let _ = self.state.apply(NotificationCommand::UpdateActiveClient {
+                client: Some(ActiveClient::new(
+                    client.client_tty.clone(),
+                    focused,
+                    Some(client.pane),
+                )),
+                status_width: client.width,
+            });
+            self.active_client = Some(client.client_tty.clone());
+            self.tmux.refresh_client_status(&client.client_tty).await?;
+            Ok(())
+        }
+    }
+
+    fn select_startup_client(output: &[u8]) -> Option<StartupClient> {
+        output
+            .split(|byte| *byte == b'\n')
+            .filter_map(parse_startup_client)
+            .max_by(|left, right| {
+                left.activity
+                    .cmp(&right.activity)
+                    .then_with(|| left.client_tty.cmp(&right.client_tty))
+            })
+    }
+
+    fn parse_startup_client(line: &[u8]) -> Option<StartupClient> {
+        let line = std::str::from_utf8(line).ok()?.trim_end_matches('\r');
+        let mut fields = line.split('\x1f');
+        let client_tty = fields.next()?.to_owned();
+        let activity = fields.next()?.parse().ok()?;
+        let pane = fields.next()?;
+        let width = fields.next()?.parse().ok()?;
+        let control_mode = fields.next()?;
+        if fields.next().is_some()
+            || !is_safe_client_tty(&client_tty)
+            || !is_valid_machine_id(pane, '%')
+            || width == 0
+            || control_mode != "0"
+        {
+            return None;
+        }
+        Some(StartupClient {
+            client_tty,
+            activity,
+            pane: PaneId::from(pane),
+            width,
+        })
+    }
+
+    fn focus_relay_is_active(output: &[u8]) -> bool {
+        std::str::from_utf8(output)
+            .ok()
+            .is_some_and(|value| value.trim() == "1")
     }
 
     pub async fn run_cli(args: &[String]) -> Result<()> {
@@ -721,7 +793,11 @@ mod unix {
             state: NotificationState::new(),
             active_client: None,
         };
-        let result = listen(&listener, &mut service).await;
+        let result = async {
+            service.initialize().await?;
+            listen(&listener, &mut service).await
+        }
+        .await;
         remove_socket_if_owned(&socket, owner);
         result
     }

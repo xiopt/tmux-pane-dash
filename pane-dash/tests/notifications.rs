@@ -17,6 +17,9 @@ struct Harness {
     tmux_socket: PathBuf,
     socket: PathBuf,
     no_sessions: PathBuf,
+    clients: PathBuf,
+    focus: PathBuf,
+    status: PathBuf,
     server: Option<Child>,
 }
 
@@ -33,13 +36,40 @@ impl Harness {
         let tmux_socket = dir.path().join("tmux,notification-server");
         let socket = dir.path().join(".pane-dash-notify-4242.sock");
         let no_sessions = dir.path().join("no-sessions");
+        let clients = dir.path().join("clients");
+        let focus = dir.path().join("focus");
+        let status = dir.path().join("status");
         let log = dir.path().join("tmux.log");
         let fake_tmux = dir.path().join("tmux");
         fs::write(
             &fake_tmux,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {log}\nprintf '%s\\n' '---' >> {log}\nif [ \"$1\" = -S ]; then shift 2; fi\ncase \"$1\" in\n  display-message) printf '%s\\037$1\\037@1\\n' \"$4\" ;;\n  list-sessions) if [ -f \"$TMUX_NOTIFY_NO_SESSIONS\" ]; then exit 1; fi; printf '$1\\n' ;;\nesac\n",
+                r#"#!/bin/sh
+printf '%s\n' "$@" >> {log}
+printf '%s\n' '---' >> {log}
+if [ "$1" = -S ]; then shift 2; fi
+case "$1" in
+  display-message) printf '%s\037$1\037@1\n' "$4" ;;
+  list-clients) cat {clients} 2>/dev/null || true ;;
+  list-sessions) if [ -f "$TMUX_NOTIFY_NO_SESSIONS" ]; then exit 1; fi; printf '$1\n' ;;
+  show-option)
+    if [ "$2" = -gqv ]; then
+      case "$3" in
+        @pane_dash_focus_*) cat {focus} 2>/dev/null || true ;;
+      esac
+    fi
+    ;;
+  set-option)
+    if [ "$2" = -g ] && [ "$3" = @pane_dash_notify_status ]; then
+      printf '%s' "$4" > {status}
+    fi
+    ;;
+esac
+"#,
                 log = shell_quote(&log),
+                clients = shell_quote(&clients),
+                focus = shell_quote(&focus),
+                status = shell_quote(&status),
             ),
         )
         .unwrap();
@@ -53,8 +83,23 @@ impl Harness {
             tmux_socket,
             socket,
             no_sessions,
+            clients,
+            focus,
+            status,
             server: None,
         }
+    }
+
+    fn started_with_startup(clients: &str, focus: Option<&str>, status: &str) -> Self {
+        let mut harness = Self::setup(false);
+        fs::write(&harness.clients, clients).unwrap();
+        if let Some(focus) = focus {
+            fs::write(&harness.focus, focus).unwrap();
+        }
+        fs::write(&harness.status, status).unwrap();
+        harness.start_service();
+        harness.wait_for_socket();
+        harness
     }
 
     fn start_service(&mut self) {
@@ -77,6 +122,9 @@ impl Harness {
             .env("PATH", path)
             .env("TMUX_NOTIFY_LOG", self.log_path())
             .env("TMUX_NOTIFY_NO_SESSIONS", &self.no_sessions)
+            .env("TMUX_NOTIFY_CLIENTS", &self.clients)
+            .env("TMUX_NOTIFY_FOCUS", &self.focus)
+            .env("TMUX_NOTIFY_STATUS", &self.status)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -97,6 +145,9 @@ impl Harness {
             .env("PATH", self.command_path())
             .env("TMUX_NOTIFY_LOG", self.log_path())
             .env("TMUX_NOTIFY_NO_SESSIONS", &self.no_sessions)
+            .env("TMUX_NOTIFY_CLIENTS", &self.clients)
+            .env("TMUX_NOTIFY_FOCUS", &self.focus)
+            .env("TMUX_NOTIFY_STATUS", &self.status)
             .output()
             .unwrap()
     }
@@ -124,6 +175,12 @@ impl Harness {
             );
             thread::sleep(Duration::from_millis(5));
         }
+        let ready = self.client(&["notify", "list"]);
+        assert!(
+            ready.status.success(),
+            "notification service did not finish startup: {}",
+            String::from_utf8_lossy(&ready.stderr)
+        );
     }
 
     fn socket_identity(&self) -> (u64, u64) {
@@ -161,6 +218,10 @@ impl Harness {
 
     fn log(&self) -> String {
         fs::read_to_string(self.log_path()).unwrap_or_default()
+    }
+
+    fn command_count(&self, command: &str) -> usize {
+        self.log().matches(&format!("{command}\n")).count()
     }
 }
 
@@ -283,6 +344,7 @@ fn service_socket_is_private_and_same_owner_second_service_exits() {
     let mut harness = Harness::new(false);
     let mode = fs::metadata(&harness.socket).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
+    assert_eq!(harness.command_count("set-option"), 1);
 
     let second = Command::new(env!("CARGO_BIN_EXE_pane-dash"))
         .args([
@@ -304,6 +366,7 @@ fn service_socket_is_private_and_same_owner_second_service_exits() {
         String::from_utf8_lossy(&second.stderr)
     );
     assert!(harness.socket.exists());
+    assert_eq!(harness.command_count("set-option"), 1);
     assert!(
         harness
             .server
@@ -313,6 +376,82 @@ fn service_socket_is_private_and_same_owner_second_service_exits() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn owner_start_clears_stale_status_seeds_focus_and_refreshes_once() {
+    let harness = Harness::started_with_startup(
+        "/dev/ttys001\x1f10\x1f%1\x1f80\x1f0\n/dev/ttys002\x1f20\x1f%2\x1f100\x1f0\n",
+        Some("1"),
+        "stale",
+    );
+    assert_eq!(fs::read_to_string(&harness.status).unwrap(), "");
+    assert_eq!(harness.command_count("set-option"), 1);
+    assert_eq!(harness.command_count("refresh-client"), 1);
+    assert!(harness.log().contains("@pane_dash_focus_/dev/ttys002\n"));
+
+    let published = harness.client(&[
+        "notify",
+        "publish",
+        "--event-id",
+        "startup-focused",
+        "--kind",
+        "question",
+        "--message",
+        "look",
+        "--pane",
+        "%2",
+    ]);
+    assert_eq!(json(&published)["outcome"], "suppressed");
+    let listed = harness.client(&["notify", "list"]);
+    assert_eq!(json(&listed)["snapshot"], Value::Array(Vec::new()));
+}
+
+#[test]
+fn startup_seed_chooses_the_most_recent_normal_client() {
+    let harness = Harness::started_with_startup(
+        "/dev/ttys003\x1f99\x1f%3\x1f80\x1f1\nnot-a-tty\x1f98\x1f%4\x1f80\x1f0\n/dev/ttys002\x1f20\x1f%2\x1f100\x1f0\n/dev/ttys001\x1f20\x1f%1\x1f80\x1f0\n",
+        Some("1"),
+        "",
+    );
+    assert!(harness.log().contains("@pane_dash_focus_/dev/ttys002\n"));
+    assert!(
+        harness
+            .log()
+            .contains("refresh-client\n-S\n-t\n/dev/ttys002\n")
+    );
+
+    let published = harness.client(&[
+        "notify",
+        "publish",
+        "--event-id",
+        "deterministic-startup",
+        "--kind",
+        "question",
+        "--message",
+        "look",
+        "--pane",
+        "%2",
+    ]);
+    assert_eq!(json(&published)["outcome"], "suppressed");
+}
+
+#[test]
+fn startup_without_focus_relay_does_not_suppress() {
+    let harness = Harness::started_with_startup("/dev/ttys001\x1f20\x1f%1\x1f80\x1f0\n", None, "");
+    let published = harness.client(&[
+        "notify",
+        "publish",
+        "--event-id",
+        "unfocused-startup",
+        "--kind",
+        "question",
+        "--message",
+        "look",
+        "--pane",
+        "%1",
+    ]);
+    assert_eq!(json(&published)["outcome"], "queued");
 }
 
 #[test]
@@ -717,8 +856,11 @@ fn paged_list_does_not_replay_items_when_the_cursor_item_is_dismissed() {
 }
 
 #[test]
-fn idle_service_does_not_call_tmux_or_poll() {
+fn startup_seeds_once_and_does_not_poll() {
     let harness = Harness::new(false);
     thread::sleep(Duration::from_millis(150));
-    assert_eq!(harness.log(), "");
+    assert_eq!(harness.command_count("set-option"), 1);
+    assert_eq!(harness.command_count("list-clients"), 1);
+    assert_eq!(harness.command_count("show-option"), 0);
+    assert_eq!(harness.command_count("refresh-client"), 0);
 }
