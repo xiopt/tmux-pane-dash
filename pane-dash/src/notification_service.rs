@@ -211,7 +211,7 @@ mod unix {
             client: String,
         },
         List {
-            after_sequence: Option<u64>,
+            after_cursor: Option<ListCursor>,
         },
         HookFocus {
             client: String,
@@ -248,7 +248,13 @@ mod unix {
         #[serde(skip_serializing_if = "Option::is_none")]
         snapshot: Option<Vec<SnapshotItem>>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        next_after_sequence: Option<u64>,
+        next_cursor: Option<ListCursor>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    struct ListCursor {
+        priority: u8,
+        sequence: u64,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -445,9 +451,7 @@ mod unix {
                 if args.len() != 1 {
                     bail!("notify list takes no arguments")
                 }
-                Ok(CliCommand::Client(Request::List {
-                    after_sequence: None,
-                }))
+                Ok(CliCommand::Client(Request::List { after_cursor: None }))
             }
             "hook" => parse_hook(&args[1..]),
             "select" => {
@@ -658,22 +662,22 @@ mod unix {
     }
 
     async fn list_notifications(path: &Path) -> Result<Response> {
-        let mut after_sequence = None;
+        let mut after_cursor = None;
         let mut snapshot = Vec::new();
         loop {
-            let response = send_request(path, &Request::List { after_sequence }).await?;
+            let response = send_request(path, &Request::List { after_cursor }).await?;
             if !response.ok {
                 return Ok(response);
             }
-            let next_after_sequence = response.next_after_sequence;
+            let next_cursor = response.next_cursor;
             snapshot.extend(response.snapshot.unwrap_or_default());
-            let Some(next) = next_after_sequence else {
+            let Some(next) = next_cursor else {
                 return Ok(Response::success("listed").with_snapshot(snapshot));
             };
-            if Some(next) == after_sequence {
+            if Some(next) == after_cursor {
                 bail!("notification list cursor did not advance")
             }
-            after_sequence = Some(next);
+            after_cursor = Some(next);
         }
     }
 
@@ -900,12 +904,12 @@ mod unix {
                     pane,
                 } => self.publish(event_id, kind, message, pane).await,
                 Request::Click { range, client } => self.click(range, client).await,
-                Request::List { after_sequence } => {
-                    let (snapshot, next_after_sequence) = self.snapshot_items(after_sequence);
+                Request::List { after_cursor } => {
+                    let (snapshot, next_cursor) = self.snapshot_items(after_cursor);
                     Ok(HandledRequest {
                         response: Response::success("listed")
                             .with_snapshot(snapshot)
-                            .with_next_after_sequence(next_after_sequence),
+                            .with_next_cursor(next_cursor),
                         stop: false,
                     })
                 }
@@ -1098,16 +1102,23 @@ mod unix {
             })
         }
 
-        fn snapshot_items(&self, after_sequence: Option<u64>) -> (Vec<SnapshotItem>, Option<u64>) {
+        fn snapshot_items(
+            &self,
+            after_cursor: Option<ListCursor>,
+        ) -> (Vec<SnapshotItem>, Option<ListCursor>) {
             let ordered = self.state.snapshot();
             let items = ordered.items();
-            let start = after_sequence
-                .and_then(|sequence| {
-                    items
-                        .iter()
-                        .position(|notification| notification.sequence() == sequence)
-                })
-                .map_or(0, |index| index + 1);
+            let start = after_cursor.map_or(0, |cursor| {
+                items
+                    .iter()
+                    .position(|notification| {
+                        let priority = notification.kind().priority();
+                        priority < cursor.priority
+                            || (priority == cursor.priority
+                                && notification.sequence() > cursor.sequence)
+                    })
+                    .unwrap_or(items.len())
+            });
             let end = (start + LIST_PAGE_SIZE).min(items.len());
             let page = items[start..end]
                 .iter()
@@ -1121,8 +1132,11 @@ mod unix {
                     pane_id: notification.target().pane_id().0.clone(),
                 })
                 .collect();
-            let next_after_sequence = (end < items.len()).then(|| items[end - 1].sequence());
-            (page, next_after_sequence)
+            let next_cursor = (end < items.len()).then(|| ListCursor {
+                priority: items[end - 1].kind().priority(),
+                sequence: items[end - 1].sequence(),
+            });
+            (page, next_cursor)
         }
     }
 
@@ -1262,7 +1276,7 @@ mod unix {
             removed: None,
             route: None,
             snapshot: None,
-            next_after_sequence: None,
+            next_cursor: None,
         }
     }
 
@@ -1281,7 +1295,7 @@ mod unix {
                 removed: None,
                 route: None,
                 snapshot: None,
-                next_after_sequence: None,
+                next_cursor: None,
             }
         }
 
@@ -1295,8 +1309,8 @@ mod unix {
             self
         }
 
-        fn with_next_after_sequence(mut self, sequence: Option<u64>) -> Self {
-            self.next_after_sequence = sequence;
+        fn with_next_cursor(mut self, cursor: Option<ListCursor>) -> Self {
+            self.next_cursor = cursor;
             self
         }
     }

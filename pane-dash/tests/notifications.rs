@@ -450,13 +450,13 @@ fn paged_list_fetches_all_maximum_notifications_with_bounded_frames() {
         );
     }
 
-    let mut after_sequence = None;
+    let mut after_cursor = Value::Null;
     let mut sequences = Vec::new();
     let mut pages = 0;
     loop {
         let (page, frame_len) = harness.raw_request(json!({
             "op": "list",
-            "after_sequence": after_sequence,
+            "after_cursor": after_cursor.clone(),
         }));
         assert!(frame_len <= 4 * 1024);
         assert_eq!(page["ok"], true);
@@ -467,10 +467,10 @@ fn paged_list_fetches_all_maximum_notifications_with_bounded_frames() {
                 .iter()
                 .map(|item| item["sequence"].as_u64().unwrap()),
         );
-        after_sequence = page["next_after_sequence"].as_u64();
+        after_cursor = page["next_cursor"].clone();
         pages += 1;
         assert!(pages <= 64);
-        if after_sequence.is_none() {
+        if after_cursor.is_null() {
             break;
         }
     }
@@ -630,6 +630,90 @@ fn session_closed_only_stops_after_the_last_session_is_gone() {
         thread::sleep(Duration::from_millis(5));
     }
     assert!(!harness.socket.exists());
+}
+
+/// A cursor item dismissed between pages must not restart paging at the head.
+/// The service resolves the cursor by locating its sort key in the current
+/// snapshot; when it is gone, the next page must still advance past that key.
+#[test]
+fn paged_list_does_not_replay_items_when_the_cursor_item_is_dismissed() {
+    let harness = Harness::new(false);
+    let kinds = [
+        "finished", "error", "finished", "error", "finished", "finished",
+    ];
+    for (index, kind) in kinds.iter().enumerate() {
+        let event_id = format!("page-race-{index}");
+        let output = harness.client(&[
+            "notify",
+            "publish",
+            "--event-id",
+            event_id.as_str(),
+            "--kind",
+            kind,
+            "--message",
+            "message",
+            "--pane",
+            "%1",
+        ]);
+        assert!(output.status.success(), "publish {index} failed");
+    }
+
+    let (first_page, _) = harness.raw_request(json!({ "op": "list", "after_cursor": null }));
+    assert_eq!(first_page["ok"], true);
+    let first_sequences: Vec<u64> = first_page["snapshot"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["sequence"].as_u64().unwrap())
+        .collect();
+    let cursor = first_page["next_cursor"].clone();
+    let cursor_sequence = cursor["sequence"].as_u64().unwrap();
+    assert!(first_sequences.contains(&cursor_sequence));
+
+    // Dismiss exactly the item the cursor points at, then resume paging.
+    let cursor_event_id = first_page["snapshot"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["sequence"].as_u64() == Some(cursor_sequence))
+        .unwrap()["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let dismissed = harness.raw_request(json!({
+        "op": "select",
+        "event_id": cursor_event_id,
+        "client": "/dev/ttys001",
+    }));
+    assert_eq!(dismissed.0["outcome"], "selected");
+
+    let (second_page, _) = harness.raw_request(json!({
+        "op": "list",
+        "after_cursor": cursor,
+    }));
+    assert_eq!(second_page["ok"], true);
+    let second_sequences: Vec<u64> = second_page["snapshot"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["sequence"].as_u64().unwrap())
+        .collect();
+
+    let replayed: Vec<u64> = second_sequences
+        .iter()
+        .copied()
+        .filter(|sequence| first_sequences.contains(sequence))
+        .collect();
+    assert!(
+        replayed.is_empty(),
+        "page after a dismissed cursor replayed already-delivered items {replayed:?}; \
+         first page was {first_sequences:?}, second page was {second_sequences:?}"
+    );
+    assert!(
+        second_sequences.contains(&1),
+        "page after a dismissed priority cursor skipped an older lower-priority item; \
+         second page was {second_sequences:?}"
+    );
 }
 
 #[test]
