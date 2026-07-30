@@ -124,7 +124,7 @@ export async function inspectVersions(root: string): Promise<VersionInspection> 
     if (lockVersion !== version) mismatches.push(`pane-dash/Cargo.lock: pane-dash version ${String(lockVersion)} !== VERSION ${version}`)
   }
 
-  for (const path of ["opencode-plugin/package.json", "packages/tmux-pane-dash/package.json"]) {
+  for (const path of ["packages/tmux-pane-dash/package.json"]) {
     const pkg = await readJson(join(root, path))
     if (pkg !== undefined && pkg.version !== version) mismatches.push(`${path}: version ${String(pkg.version)} !== VERSION ${version}`)
   }

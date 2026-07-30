@@ -41,7 +41,7 @@ async function synchronizedFixture(version = "0.1.0") {
   return root
 }
 
-test("all release identities are exactly synchronized", async () => {
+test("application release identities are exactly synchronized", async () => {
   const result = await inspectVersions(repoFixture())
   expect(result).toEqual({ version: "0.1.2", tag: "v0.1.2", mismatches: [] })
 })
@@ -90,7 +90,7 @@ test("OpenCode package is publishable and dependency-free", async () => {
   const pkg = JSON.parse(await readFile(join(repoFixture(), "opencode-plugin/package.json"), "utf8"))
   expect(pkg).toMatchObject({
     name: "@xiopt/pane-dash-opencode",
-    version: "0.1.2",
+    version: "0.1.3",
     type: "module",
     main: "./dist/index.js",
     engines: { opencode: ">=1.17.20" },

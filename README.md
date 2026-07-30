@@ -114,7 +114,7 @@ startup does not run a package-manager operation or access the network.
 ## OpenCode integration
 
 OpenCode integration is optional. The npm setup command adds the exact package
-entry `@xiopt/pane-dash-opencode@0.1.2` to the selected global OpenCode config;
+entry `@xiopt/pane-dash-opencode@0.1.3` to the selected global OpenCode config;
 use `--no-opencode` to skip it. The companion package requires OpenCode >=1.17.20.
 It does not edit a project-local OpenCode configuration file.
 
