@@ -158,6 +158,9 @@ notification kinds. Other producers can publish directly:
 pane-dash notify publish --event-id <id> --kind <error|permission|question|finished> --message <text> [--pane <%id>]
 ```
 
+The queue capacity is 64 notifications; outcomes `queued`, `duplicate`, and
+`suppressed` exit zero.
+
 `--pane` defaults to `TMUX_PANE`. A missing notification service or a full
 queue returns a nonzero status. If the second row is missing, check that
 `bin/pane-dash` is built and executable, then reload `pane_dash.tmux`; if the
