@@ -15,6 +15,7 @@ use crate::creation::{CreationError, ValidatedCwd};
 use crate::model::PaneId;
 
 pub const SNAPSHOT_FORMAT: &str = "\x1e#{session_id}\x1f#{session_name}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_dead}\x1f#{@pane_dash_status}\x1f#{@pane_dash_status_since}\x1f#{@pane_dash_heartbeat}\x1f#{@pane_dash_title}\x1f#{@pane_dash_model}\x1f#{@pane_dash_tag}\x1f#{@pane_dash_group}";
+pub const NOTIFICATION_TARGET_FORMAT: &str = "#{pane_id}\x1f#{session_id}\x1f#{window_id}";
 
 const STREAM_CHUNK_BYTES: usize = 8 * 1024;
 const READER_CLEANUP_GRACE: Duration = Duration::from_millis(100);
@@ -23,6 +24,7 @@ type StreamCapture = Arc<Mutex<Vec<u8>>>;
 #[derive(Debug, Clone)]
 pub struct TmuxExec {
     bin: PathBuf,
+    socket: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -76,7 +78,17 @@ async fn arbitrate_creation_completion<T>(
 
 impl TmuxExec {
     pub fn new(bin: impl Into<PathBuf>) -> Self {
-        Self { bin: bin.into() }
+        Self {
+            bin: bin.into(),
+            socket: None,
+        }
+    }
+
+    pub fn with_socket(bin: impl Into<PathBuf>, socket: impl Into<PathBuf>) -> Self {
+        Self {
+            bin: bin.into(),
+            socket: Some(socket.into()),
+        }
     }
 
     pub(crate) fn bin(&self) -> &std::path::Path {
@@ -111,6 +123,72 @@ impl TmuxExec {
         ])
         .await
         .context("tmux display pane id")
+    }
+
+    pub async fn resolve_notification_target(
+        &self,
+        pane_id: &PaneId,
+    ) -> Result<(PaneId, crate::model::SessionId, crate::model::WindowId)> {
+        let output = self
+            .run_dynamic(&[
+                "display-message".into(),
+                "-p".into(),
+                "-t".into(),
+                pane_id.0.clone(),
+                NOTIFICATION_TARGET_FORMAT.into(),
+            ])
+            .await
+            .context("tmux resolve notification target")?;
+        let value = String::from_utf8(output).context("tmux returned non-UTF-8 target")?;
+        let value = value.trim_end_matches(['\r', '\n']);
+        let mut fields = value.split('\x1f');
+        let Some(pane) = fields.next().filter(|value| valid_machine_id(value, '%')) else {
+            bail!("tmux returned an invalid notification target")
+        };
+        let Some(session) = fields.next().filter(|value| valid_machine_id(value, '$')) else {
+            bail!("tmux returned an invalid notification target")
+        };
+        let Some(window) = fields.next().filter(|value| valid_machine_id(value, '@')) else {
+            bail!("tmux returned an invalid notification target")
+        };
+        if fields.next().is_some() {
+            bail!("tmux returned an invalid notification target")
+        }
+        Ok((
+            PaneId::from(pane),
+            crate::model::SessionId::from(session),
+            crate::model::WindowId::from(window),
+        ))
+    }
+
+    pub async fn list_sessions(&self) -> Result<Vec<u8>> {
+        self.run(["list-sessions", "-F", "#{session_id}"])
+            .await
+            .context("tmux list sessions")
+    }
+
+    pub async fn set_notification_status(&self, status: &str) -> Result<()> {
+        self.run_dynamic(&[
+            "set-option".into(),
+            "-g".into(),
+            "@pane_dash_notify_status".into(),
+            status.into(),
+        ])
+        .await
+        .context("tmux set @pane_dash_notify_status")?;
+        Ok(())
+    }
+
+    pub async fn refresh_client_status(&self, client_tty: &str) -> Result<()> {
+        self.run_dynamic(&[
+            "refresh-client".into(),
+            "-S".into(),
+            "-c".into(),
+            client_tty.into(),
+        ])
+        .await
+        .context("tmux refresh client status")?;
+        Ok(())
     }
 
     pub async fn send_keys_literal(&self, pane_id: &PaneId, text: String) -> Result<()> {
@@ -150,7 +228,9 @@ impl TmuxExec {
     /// Runs a TOCTOU-sensitive action command without surfacing expected tmux
     /// failures (for example, a pane disappearing between rendering and jump).
     pub async fn run_silent(&self, args: &[String]) -> bool {
-        Command::new(self.bin())
+        let mut command = Command::new(self.bin());
+        self.add_socket(&mut command);
+        command
             .args(args)
             .output()
             .await
@@ -177,6 +257,7 @@ impl TmuxExec {
             cwd.revalidate()?;
         }
         let mut command = Command::new(self.bin());
+        self.add_socket(&mut command);
         command
             .args(args)
             .stdout(Stdio::piped())
@@ -271,10 +352,11 @@ impl TmuxExec {
     }
 
     async fn run<const N: usize>(&self, args: [&str; N]) -> Result<Vec<u8>> {
-        let output = Command::new(self.bin())
-            .env("LC_ALL", "C.UTF-8")
+        let mut command = Command::new(self.bin());
+        command.env("LC_ALL", "C.UTF-8");
+        self.add_socket(&mut command);
+        let output = command
             .args(args)
-            .env("LC_ALL", "C.UTF-8")
             .output()
             .await
             .with_context(|| format!("spawn {}", self.bin().display()))?;
@@ -290,10 +372,11 @@ impl TmuxExec {
     }
 
     async fn run_dynamic(&self, args: &[String]) -> Result<Vec<u8>> {
-        let output = Command::new(self.bin())
-            .env("LC_ALL", "C.UTF-8")
+        let mut command = Command::new(self.bin());
+        command.env("LC_ALL", "C.UTF-8");
+        self.add_socket(&mut command);
+        let output = command
             .args(args)
-            .env("LC_ALL", "C.UTF-8")
             .output()
             .await
             .with_context(|| format!("spawn {}", self.bin().display()))?;
@@ -307,6 +390,18 @@ impl TmuxExec {
         }
         Ok(output.stdout)
     }
+
+    fn add_socket(&self, command: &mut Command) {
+        if let Some(socket) = &self.socket {
+            command.arg("-S").arg(socket);
+        }
+    }
+}
+
+fn valid_machine_id(value: &str, prefix: char) -> bool {
+    value
+        .strip_prefix(prefix)
+        .is_some_and(|tail| !tail.is_empty() && tail.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 async fn read_stream<R>(mut stream: R, capture: StreamCapture) -> io::Result<()>

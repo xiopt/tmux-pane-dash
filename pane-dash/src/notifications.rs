@@ -249,6 +249,8 @@ pub enum ApplyOutcome {
     ClickedVisible { sequence: u64 },
     ClickedMore,
     IgnoredClick,
+    Selected { sequence: u64 },
+    IgnoredSelection,
     ActiveClientUpdated,
     StatusWidthUpdated,
     Rejected(NotificationError),
@@ -267,8 +269,13 @@ pub struct ApplyResult {
 pub enum NotificationCommand {
     Publish(NotificationEvent),
     SetActiveClient(Option<ActiveClient>),
+    UpdateActiveClient {
+        client: Option<ActiveClient>,
+        status_width: usize,
+    },
     RemoveStalePanes(Vec<PaneId>),
     Click(String),
+    Select(String),
     SetStatusWidth(usize),
 }
 
@@ -306,8 +313,13 @@ impl NotificationState {
         let (outcome, changed, route) = match command {
             NotificationCommand::Publish(event) => self.publish(event),
             NotificationCommand::SetActiveClient(client) => self.set_active_client(client),
+            NotificationCommand::UpdateActiveClient {
+                client,
+                status_width,
+            } => self.update_active_client(client, status_width),
             NotificationCommand::RemoveStalePanes(pane_ids) => self.remove_stale_panes(pane_ids),
             NotificationCommand::Click(token) => self.click(&token),
+            NotificationCommand::Select(event_id) => self.select(&event_id),
             NotificationCommand::SetStatusWidth(width) => self.set_status_width(width),
         };
 
@@ -422,6 +434,17 @@ impl NotificationState {
         (ApplyOutcome::ActiveClientUpdated, changed, None)
     }
 
+    fn update_active_client(
+        &mut self,
+        client: Option<ActiveClient>,
+        status_width: usize,
+    ) -> (ApplyOutcome, bool, Option<RouteIntent>) {
+        let changed = self.active_client != client || self.status_width != status_width;
+        self.active_client = client;
+        self.status_width = status_width;
+        (ApplyOutcome::ActiveClientUpdated, changed, None)
+    }
+
     fn remove_stale_panes(
         &mut self,
         pane_ids: Vec<PaneId>,
@@ -472,6 +495,31 @@ impl NotificationState {
             ApplyOutcome::ClickedVisible { sequence },
             true,
             Some(RouteIntent::Pane(target)),
+        )
+    }
+
+    fn select(&mut self, event_id: &str) -> (ApplyOutcome, bool, Option<RouteIntent>) {
+        let event_id = match EventId::new(event_id) {
+            Ok(event_id) => event_id,
+            Err(error) => return (ApplyOutcome::Rejected(error), false, None),
+        };
+        let Some(index) = self
+            .queue
+            .iter()
+            .position(|notification| notification.event_id == event_id)
+        else {
+            return (ApplyOutcome::IgnoredSelection, false, None);
+        };
+        let notification = self
+            .queue
+            .remove(index)
+            .expect("notification index was found in the queue");
+        (
+            ApplyOutcome::Selected {
+                sequence: notification.sequence,
+            },
+            true,
+            Some(RouteIntent::Pane(notification.target)),
         )
     }
 
@@ -992,5 +1040,35 @@ mod tests {
         assert!(narrow.contains("+1 more"));
         assert_eq!(narrow.matches("#[range=user|").count(), 2);
         assert!(visible_content(&narrow).width() <= 12);
+    }
+
+    #[test]
+    fn selection_dismisses_by_event_id_and_routes_to_its_target() {
+        let mut state = NotificationState::new();
+        publish(&mut state, "one", NotificationKind::Finished, "%1");
+        publish(&mut state, "two", NotificationKind::Error, "%2");
+
+        let result = state.apply(NotificationCommand::Select("one".to_owned()));
+        assert_eq!(result.outcome, ApplyOutcome::Selected { sequence: 1 });
+        assert_eq!(result.route, Some(RouteIntent::Pane(target("%1"))));
+        assert_eq!(state.snapshot().items().len(), 1);
+    }
+
+    #[test]
+    fn active_client_and_status_width_update_as_one_state_change() {
+        let mut state = NotificationState::new();
+        let result = state.apply(NotificationCommand::UpdateActiveClient {
+            client: Some(ActiveClient::new("client", true, Some(PaneId::from("%1")))),
+            status_width: 40,
+        });
+        assert_eq!(result.outcome, ApplyOutcome::ActiveClientUpdated);
+        assert!(result.changed);
+
+        let repeat = state.apply(NotificationCommand::UpdateActiveClient {
+            client: Some(ActiveClient::new("client", true, Some(PaneId::from("%1")))),
+            status_width: 40,
+        });
+        assert_eq!(repeat.outcome, ApplyOutcome::ActiveClientUpdated);
+        assert!(!repeat.changed);
     }
 }

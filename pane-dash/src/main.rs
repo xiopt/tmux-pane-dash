@@ -261,7 +261,11 @@ impl Drop for TerminalGuard {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    match parse_args()? {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "notify") {
+        return pane_dash::notification_service::run_cli(&args[1..]).await;
+    }
+    match parse_args_from(args)? {
         StartupArgs::Version => {
             println!("pane-dash {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -1037,10 +1041,6 @@ enum StartupArgs {
         pane_id: String,
         bench_first_frame: bool,
     },
-}
-
-fn parse_args() -> Result<StartupArgs> {
-    parse_args_from(std::env::args().skip(1))
 }
 
 fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<StartupArgs> {
