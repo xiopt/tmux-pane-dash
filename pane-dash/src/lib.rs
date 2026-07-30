@@ -5,6 +5,7 @@ pub mod control;
 pub mod creation;
 pub mod filter;
 pub mod model;
+pub mod notifications;
 pub mod options;
 pub mod palette;
 pub mod preview;
