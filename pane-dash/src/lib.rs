@@ -6,6 +6,7 @@ pub mod creation;
 pub mod filter;
 pub mod model;
 pub mod notification_service;
+pub mod notification_ui;
 pub mod notifications;
 pub mod options;
 pub mod palette;

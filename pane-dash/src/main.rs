@@ -18,6 +18,7 @@ use pane_dash::config::load_ui_config;
 use pane_dash::control::{ControlEvent, ControlHandle, is_safe_client_tty};
 use pane_dash::creation::{CreateRequest, CreationId, CreationProgress, run_creation};
 use pane_dash::model::{Model, ModelConfig};
+use pane_dash::notification_ui;
 use pane_dash::options::parse_show_options;
 use pane_dash::preview::parse_preview;
 use pane_dash::snapshot::parse;
@@ -270,6 +271,7 @@ async fn main() -> Result<()> {
             println!("pane-dash {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        StartupArgs::NotificationList { client_tty, .. } => notification_ui::run(client_tty).await,
         StartupArgs::Run {
             client_tty,
             session_id,
@@ -1035,6 +1037,11 @@ where
 #[derive(Debug, PartialEq, Eq)]
 enum StartupArgs {
     Version,
+    NotificationList {
+        client_tty: String,
+        session_id: String,
+        pane_id: String,
+    },
     Run {
         client_tty: String,
         session_id: String,
@@ -1045,6 +1052,28 @@ enum StartupArgs {
 
 fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<StartupArgs> {
     let args: Vec<_> = args.into_iter().collect();
+    if args.first().is_some_and(|arg| arg == "--notification-list") {
+        if args.len() != 4 {
+            anyhow::bail!("expected --notification-list client_tty session_id pane_id");
+        }
+        let client_tty = args[1].clone();
+        if !is_safe_client_tty(&client_tty) {
+            anyhow::bail!("invalid client tty");
+        }
+        let session_id = args[2].clone();
+        if !pane_dash::notification_service::is_valid_machine_id(&session_id, '$') {
+            anyhow::bail!("invalid session ID");
+        }
+        let pane_id = args[3].clone();
+        if !pane_dash::notification_service::is_valid_machine_id(&pane_id, '%') {
+            anyhow::bail!("invalid pane ID");
+        }
+        return Ok(StartupArgs::NotificationList {
+            client_tty,
+            session_id,
+            pane_id,
+        });
+    }
     if args.first().is_some_and(|arg| arg == "--version") {
         if args.len() == 1 {
             return Ok(StartupArgs::Version);
@@ -2378,6 +2407,45 @@ mod tests {
                 bench_first_frame: false,
             }
         );
+    }
+
+    #[test]
+    fn parses_notification_list_before_dashboard_arguments() {
+        assert_eq!(
+            parse_args_from([
+                "--notification-list".to_owned(),
+                "/dev/ttys001".to_owned(),
+                "$7".to_owned(),
+                "%3".to_owned(),
+            ])
+            .unwrap(),
+            StartupArgs::NotificationList {
+                client_tty: "/dev/ttys001".to_owned(),
+                session_id: "$7".to_owned(),
+                pane_id: "%3".to_owned(),
+            }
+        );
+        assert!(
+            parse_args_from([
+                "--notification-list".to_owned(),
+                "/dev/ttys001".to_owned(),
+                "$7".to_owned(),
+                "%3".to_owned(),
+                "--bench-first-frame".to_owned(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_notification_list_identity_arguments() {
+        for args in [
+            ["--notification-list", "/dev/tty:1", "$7", "%3"],
+            ["--notification-list", "/dev/ttys001", "session", "%3"],
+            ["--notification-list", "/dev/ttys001", "$7", "%pane"],
+        ] {
+            assert!(parse_args_from(args.map(str::to_owned)).is_err());
+        }
     }
 
     #[test]

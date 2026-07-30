@@ -324,6 +324,35 @@ notification_run_shell() {
   done
   admin run-shell -b "$command"
 }
+notification_list_pids() {
+  local pid command
+  while read -r pid command; do
+    [[ "$command" == "$BIN --notification-list "* ]] || continue
+    printf '%s\n' "$pid"
+  done < <(ps -axo pid=,command=)
+}
+new_notification_list_process() {
+  local before="$1" pid
+  while read -r pid; do
+    grep -Fqx "$pid" <<< "$before" || {
+      NEW_NOTIFICATION_LIST_PID="$pid"
+      return 0
+    }
+  done < <(notification_list_pids)
+  return 1
+}
+notification_open_list_popup() {
+  local index="$1" session_id="$2" pane_id="$3" tty="$4" before server_pid command popup_pid
+  before="$(notification_list_pids)"
+  server_pid="$(admin display-message -p '#{pid}')"
+  command="TMUX=$(pd_posix_shell_quote "$SOCKET,$server_pid,0") $(pd_posix_shell_quote "$BIN") notify click --range pane-dash-more --client $(pd_posix_shell_quote "$tty") >/dev/null 2>&1 && $(pd_posix_shell_quote "$ROOT/scripts/open.sh") --notification-list $(pd_posix_shell_quote "$BIN") $(pd_posix_shell_quote "$tty") $(pd_posix_shell_quote "$session_id") $(pd_posix_shell_quote "$pane_id")"
+  admin run-shell -b "$command"
+  wait_for 'notification list popup process' 3 new_notification_list_process "$before"
+  popup_pid="$NEW_NOTIFICATION_LIST_PID"
+  pane_dash_process "$popup_pid" || die "notification list popup process is not pane-dash: $popup_pid"
+  POPUP_CONTROLS[index]=''
+  POPUP_PIDS[index]="$popup_pid"
+}
 notification_status() { admin show-options -gv @pane_dash_notify_status 2>/dev/null || true; }
 notification_status_contains() { [[ "$(notification_status)" == *"$1"* ]]; }
 notification_list_count() {
@@ -336,8 +365,9 @@ notification_list_has_event() {
     '$value = decode_json(<STDIN>); print scalar grep { $_->{event_id} eq $ARGV[0] } @{$value->{snapshot} // []}' "$event")" == "$expected" ]]
 }
 notification_scenario() {
-  local session session_id origin target exit_target tty status
+  local session session_id origin target exit_target tty status list_tag list_offset list_popup_pid list_control list_exited
   session="notify-$RANDOM-$RANDOM"
+  list_tag="notification-list-$RANDOM$RANDOM"
   admin new-session -d -s "$session" -x 120 -y 40 'exec cat'
   session_id="$(admin display-message -p -t "$session:0.0" '#{session_id}')"
   origin="$(admin display-message -p -t "$session:0.0" '#{pane_id}')"
@@ -355,7 +385,7 @@ notification_scenario() {
   notify_client "$origin" publish --event-id finished-oldest --kind finished --message oldest-finished --pane "$target" >/dev/null
   notify_client "$origin" publish --event-id error-oldest --kind error --message oldest-error --pane "$target" >/dev/null
   notify_client "$origin" publish --event-id error-newer --kind error --message newer-error --pane "$exit_target" >/dev/null
-  notify_client "$origin" publish --event-id question-newer --kind question --message newer-question --pane "$target" >/dev/null
+  notify_client "$origin" publish --event-id question-newer --kind question --message "newer-question-$list_tag" --pane "$target" >/dev/null
   wait_for 'priority and oldest notification status' 3 notification_status_contains 'pane-dash-visible-2'
   notification_status_contains 'error: oldest-error' || die 'visible notification was not the oldest highest-priority item'
   notification_status_contains 'pane-dash-more' || die 'notification more range missing'
@@ -374,12 +404,30 @@ notification_scenario() {
   notification_list_has_event "$origin" error-newer 1 || die 'newer notification disappeared with clicked item'
   notification_list_has_event "$origin" question-newer 1 || die 'question notification disappeared with clicked item'
 
+  # Exercise the installed +N branch and the real notification-list popup. The
+  # unique message plus transcript byte offset keeps this assertion causal.
+  list_offset="$(ansi_size 0)"
+  notification_open_list_popup 0 "$session_id" "$origin" "$tty"
+  list_popup_pid="${POPUP_PIDS[0]}"; list_control="${POPUP_CONTROLS[0]}"
+  wait_for 'notification list popup first frame' 3 ansi_tail_has 0 "$((list_offset + 1))" "$list_tag"
+  send_bytes 0 j; send_bytes 0 '\r'
+  wait_for 'notification list selection routes client' 3 client_is "$tty" "$session_id" "$target"
+  wait_for 'notification list popup exits after selection' 3 popup_closed 0
+  [[ -z "$list_control" ]] || ! control_present "$list_control" || die 'notification list control survived selection'
+  ! pane_dash_process "$list_popup_pid" || die 'notification list pane-dash process survived selection'
+  list_exited="$(now)"
+  assert_no_popup_runtime_after_exit 'notification-list' "$list_popup_pid" "$list_exited"
+  [[ "$(notification_list_count "$origin")" == 2 ]] || die 'notification list selection count'
+  notification_list_has_event "$origin" question-newer 0 || die 'selected notification remained queued'
+  notification_list_has_event "$origin" error-newer 1 || die 'unselected error notification disappeared'
+  notification_list_has_event "$origin" finished-oldest 1 || die 'unselected finished notification disappeared'
+
   notify_client "$target" hook focus --client "$tty" --pane "$target" --width 120 --focused 1 >/dev/null
   status="$(notify_client "$target" publish --event-id focused-target --kind question --message suppressed --pane "$target")"
   [[ "$status" == *'"outcome":"suppressed"'* ]] || die "focused routed target was not suppressed: $status"
 
   notify_client "$origin" publish --event-id exited-target --kind permission --message gone --pane "$exit_target" >/dev/null
-  [[ "$(notification_list_count "$origin")" == 4 ]] || die 'pane-exit setup count'
+  [[ "$(notification_list_count "$origin")" == 3 ]] || die 'pane-exit setup count'
   admin send-keys -t "$exit_target" C-d
   wait_for 'exited pane closes' 3 target_gone "$exit_target"
   wait_for 'pane-exited notification cleanup' 3 notification_list_has_event "$origin" exited-target 0
@@ -388,7 +436,7 @@ notification_scenario() {
   admin kill-session -a -t "$session"
   admin kill-session -t "$session"
   wait_for 'notification service teardown' 3 notification_service_gone
-  printf 'notifications origin=%s target=%s click=visible-2 pane-exit=clean service=gone\n' "$origin" "$target"
+  printf 'notifications origin=%s target=%s click=visible-2 list=j+enter route=dismissed pane-exit=clean service=gone\n' "$origin" "$target"
 }
 control_parent_pid() {
   local control="$1" parent

@@ -1,8 +1,117 @@
+use crate::notifications::{EventId, NotificationKind, NotificationTarget};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationItem {
+    event_id: EventId,
+    kind: NotificationKind,
+    message: String,
+    target: NotificationTarget,
+}
+
+impl NotificationItem {
+    pub(crate) fn new(
+        event_id: EventId,
+        kind: NotificationKind,
+        message: impl Into<String>,
+        target: NotificationTarget,
+    ) -> Self {
+        Self {
+            event_id,
+            kind,
+            message: message.into(),
+            target,
+        }
+    }
+
+    pub fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+
+    pub fn kind(&self) -> NotificationKind {
+        self.kind
+    }
+
+    pub fn kind_label(&self) -> &'static str {
+        match self.kind {
+            NotificationKind::Error => "error",
+            NotificationKind::Permission => "permission",
+            NotificationKind::Question => "question",
+            NotificationKind::Finished => "finished",
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn target(&self) -> &NotificationTarget {
+        &self.target
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationSelectOutcome {
+    Routed,
+    Stale,
+}
+
+#[derive(Debug, Clone)]
+pub struct NotificationClient {
+    #[cfg(unix)]
+    socket: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl NotificationClient {
+    pub fn from_environment() -> anyhow::Result<Self> {
+        unix::client_from_environment()
+    }
+
+    pub async fn list(&self) -> anyhow::Result<Vec<NotificationItem>> {
+        unix::list_client(self).await
+    }
+
+    pub async fn select(
+        &self,
+        event_id: &EventId,
+        clicking_client: &str,
+    ) -> anyhow::Result<NotificationSelectOutcome> {
+        unix::select_client(self, event_id, clicking_client).await
+    }
+}
+
 #[cfg(not(unix))]
-use anyhow::{Result, bail};
+impl NotificationClient {
+    pub fn from_environment() -> anyhow::Result<Self> {
+        anyhow::bail!("notification service requires Unix sockets")
+    }
+
+    pub async fn list(&self) -> anyhow::Result<Vec<NotificationItem>> {
+        anyhow::bail!("notification service requires Unix sockets")
+    }
+
+    pub async fn select(
+        &self,
+        _event_id: &EventId,
+        _clicking_client: &str,
+    ) -> anyhow::Result<NotificationSelectOutcome> {
+        anyhow::bail!("notification service requires Unix sockets")
+    }
+}
+
+/// Returns whether a tmux machine ID has the expected prefix and numeric body.
+pub fn is_valid_machine_id(value: &str, prefix: char) -> bool {
+    value
+        .strip_prefix(prefix)
+        .is_some_and(|tail| !tail.is_empty() && tail.bytes().all(|byte| byte.is_ascii_digit()))
+}
 
 #[cfg(unix)]
 mod unix {
+    use super::{
+        EventId, NotificationClient, NotificationItem, NotificationSelectOutcome,
+        NotificationTarget,
+    };
     use std::collections::HashMap;
     use std::env;
     use std::fs;
@@ -34,6 +143,56 @@ mod unix {
     const CLIENT_RETRY: Duration = Duration::from_millis(100);
     const CLIENT_RETRY_STEP: Duration = Duration::from_millis(5);
     const OWNER_RELEASE_TIMEOUT: Duration = Duration::from_millis(500);
+
+    pub(super) fn client_from_environment() -> Result<NotificationClient> {
+        Ok(NotificationClient {
+            socket: client_socket_path()?,
+        })
+    }
+
+    pub(super) async fn list_client(client: &NotificationClient) -> Result<Vec<NotificationItem>> {
+        let response = list_notifications(&client.socket).await?;
+        if !response.ok {
+            bail!("{}", response_error(&response));
+        }
+        response
+            .snapshot
+            .unwrap_or_default()
+            .into_iter()
+            .map(SnapshotItem::into_notification_item)
+            .collect()
+    }
+
+    pub(super) async fn select_client(
+        client: &NotificationClient,
+        event_id: &EventId,
+        clicking_client: &str,
+    ) -> Result<NotificationSelectOutcome> {
+        validate_client(clicking_client).map_err(|error| anyhow!(error.to_string()))?;
+        let response = send_request(
+            &client.socket,
+            &Request::Select {
+                event_id: event_id.as_str().to_owned(),
+                client: clicking_client.to_owned(),
+            },
+        )
+        .await?;
+        if !response.ok {
+            bail!("{}", response_error(&response));
+        }
+        match response.outcome.as_deref() {
+            Some("selected")
+                if response
+                    .route
+                    .as_ref()
+                    .is_some_and(|route| route.kind == "pane") =>
+            {
+                Ok(NotificationSelectOutcome::Routed)
+            }
+            Some("ignored") => Ok(NotificationSelectOutcome::Stale),
+            _ => bail!("notification service returned an unexpected selection response"),
+        }
+    }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(tag = "op", rename_all = "snake_case")]
@@ -112,6 +271,24 @@ mod unix {
         session_id: String,
         window_id: String,
         pane_id: String,
+    }
+
+    impl SnapshotItem {
+        fn into_notification_item(self) -> Result<NotificationItem> {
+            let event_id =
+                EventId::try_from(self.event_id).map_err(|error| anyhow!(error.to_string()))?;
+            let kind = parse_kind_value(&self.kind).map_err(|error| anyhow!(error.message))?;
+            Ok(NotificationItem::new(
+                event_id,
+                kind,
+                self.message,
+                NotificationTarget::new(
+                    self.session_id,
+                    self.window_id,
+                    PaneId::from(self.pane_id),
+                ),
+            ))
+        }
     }
 
     #[derive(Debug)]
@@ -403,7 +580,7 @@ mod unix {
     }
 
     fn validate_pane(value: &str) -> Result<()> {
-        if valid_machine_id(value, '%') {
+        if crate::notification_service::is_valid_machine_id(value, '%') {
             Ok(())
         } else {
             bail!("invalid pane ID")
@@ -438,12 +615,6 @@ mod unix {
             bail!("invalid notification range")
         }
         Ok(())
-    }
-
-    fn valid_machine_id(value: &str, prefix: char) -> bool {
-        value
-            .strip_prefix(prefix)
-            .is_some_and(|tail| !tail.is_empty() && tail.bytes().all(|byte| byte.is_ascii_digit()))
     }
 
     fn client_socket_path() -> Result<PathBuf> {
@@ -504,6 +675,17 @@ mod unix {
             }
             after_sequence = Some(next);
         }
+    }
+
+    fn response_error(response: &Response) -> anyhow::Error {
+        anyhow!(
+            "{}: {}",
+            response.outcome.as_deref().unwrap_or("request_failed"),
+            response
+                .error
+                .as_deref()
+                .unwrap_or("notification request failed")
+        )
     }
 
     async fn connect_with_retry(path: &Path) -> Result<UnixStream> {
