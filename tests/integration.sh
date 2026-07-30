@@ -115,6 +115,12 @@ select_pane_hooks_second="$(T show-hooks -g after-select-pane)"
   || fail "plugin replaced user terminal feature"
 [ "$(printf '%s\n' "$terminal_features" | grep -Fxc '*:focus')" = "1" ] \
   || fail "plugin focus terminal feature count"
+mouse_binding="$(T list-keys -T root | grep 'MouseDown1Status ' || true)"
+case "$mouse_binding" in
+  *'"{ run-shell'*|*'"{ if-shell'*) fail "status mouse binding wraps an executable branch in an invalid command group" ;;
+esac
+T if-shell -F 1 'run-shell -b "true"' 'if-shell -F 0 { run-shell -b "false" } { run-shell -b "true" }' \
+  || fail "status mouse branch grammar is not executable"
 pass "plugin focus setup preserves same-index entries and is idempotent"
 
 # 2. pane options: set, read via display-message format, unset

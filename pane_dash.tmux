@@ -105,9 +105,9 @@ if [ -f "$binary" ] && [ -x "$binary" ]; then
   open_script="$(shell_quote "$DIR/scripts/open.sh")"
   visible_click_command="run-shell -b \"TMUX=#{q:socket_path},#{q:pid},0 #{q:@pane_dash_notify_binary} notify click --range #{q:mouse_status_range} --client #{q:client_tty} >/dev/null 2>&1\""
   more_click_command="run-shell -b \"TMUX=#{q:socket_path},#{q:pid},0 #{q:@pane_dash_notify_binary} notify click --range #{q:mouse_status_range} --client #{q:client_tty} >/dev/null 2>&1 && $open_script --notification-list #{q:@pane_dash_notify_binary} #{q:client_tty} #{q:session_id} #{q:pane_id}\""
-  more_click_branch="{ if-shell -F \"$more_click_condition\" { $more_click_command } { switch-client -t = } }"
+  more_click_branch="if-shell -F \"$more_click_condition\" { $more_click_command } { switch-client -t = }"
   tmux bind-key -T root MouseDown1Status if-shell -F "$visible_click_condition" \
-    "{ $visible_click_command }" "$more_click_branch"
+    "$visible_click_command" "$more_click_branch"
 
   tmux bind-key "$dash_key" run-shell \
     "$(shell_quote "$DIR/scripts/open.sh") $(shell_quote "$binary") '#{client_tty}' '#{session_id}' '#{pane_id}'"
