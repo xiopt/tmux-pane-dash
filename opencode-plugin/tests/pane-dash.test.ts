@@ -8,8 +8,8 @@ test("sanitize strips control characters and caps option values at 120 character
 })
 
 test("recognizes only the exact OpenCode serve subcommand", () => {
-  expect(isServeInvocation(["/opt/homebrew/bin/opencode", "serve"])).toBe(true)
-  expect(isServeInvocation(["/opt/homebrew/bin/opencode"])).toBe(false)
-  expect(isServeInvocation(["/opt/homebrew/bin/opencode", "serve-now"])).toBe(false)
-  expect(isServeInvocation(["/opt/homebrew/bin/opencode", "/tmp/serve"])).toBe(false)
+  expect(isServeInvocation(["/opt/homebrew/bin/opencode", "/$bunfs/root/opencode", "serve"])).toBe(true)
+  expect(isServeInvocation(["/opt/homebrew/bin/opencode", "/$bunfs/root/opencode"])).toBe(false)
+  expect(isServeInvocation(["/opt/homebrew/bin/opencode", "/$bunfs/root/opencode", "serve-now"])).toBe(false)
+  expect(isServeInvocation(["/opt/homebrew/bin/opencode", "/$bunfs/root/opencode", "/tmp/serve"])).toBe(false)
 })

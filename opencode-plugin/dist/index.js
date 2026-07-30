@@ -69,7 +69,7 @@ function normalize(raw) {
 
 // opencode-plugin/src/mode.ts
 function isServeInvocation(argv) {
-  return argv[1] === "serve";
+  return argv[2] === "serve";
 }
 
 // opencode-plugin/src/sanitize.ts

@@ -90,7 +90,7 @@ test("OpenCode package is publishable and dependency-free", async () => {
   const pkg = JSON.parse(await readFile(join(repoFixture(), "opencode-plugin/package.json"), "utf8"))
   expect(pkg).toMatchObject({
     name: "@xiopt/pane-dash-opencode",
-    version: "0.1.3",
+    version: "0.1.4",
     type: "module",
     main: "./dist/index.js",
     engines: { opencode: ">=1.17.20" },
