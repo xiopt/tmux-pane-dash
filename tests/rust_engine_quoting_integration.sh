@@ -37,6 +37,9 @@ start_clients() { # socket
 write_recorder() { # binary log executed-marker
   cat > "$1" <<EOF
 #!/usr/bin/env bash
+if [[ "\${1:-}" == notify ]]; then
+  exit 0
+fi
 printf '%s\\n' "\$@" > "$2"
 touch "$3"
 exit 42

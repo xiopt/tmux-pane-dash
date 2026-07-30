@@ -134,6 +134,36 @@ rm "$HOME/.config/opencode/plugin/pane-dash.ts"
 
 Without the plugin, command-matched panes remain visible with `? unknown` status.
 
+## tmux notifications
+
+Notifications are tmux-native and volatile for the tmux server/service lifetime;
+they do not depend on Ghostty or macOS. When the entrypoint is loaded, pane-dash
+owns the second status row (`status 2`, `status-format[1]`) and preserves row
+zero. It also installs the root `MouseDown1Status` binding for notification
+clicks. Load-order matters: a later custom second-row format or root mouse
+binding overrides pane-dash's display or clicks, so reload the entrypoint after
+those customizations when pane-dash should own them.
+
+The row keeps one visible persistent notification and shows `+N more` for the
+rest. Clicking the visible item dismisses it and routes to its pane; clicking
+`+N more` opens the notification list. Ordering is deterministic and shared by
+tmux clients: error > permission > question > finished, then oldest first.
+Notifications from the focused origin are suppressed, and queued items for
+exited panes are removed.
+
+With the companion plugin installed, OpenCode automatically produces all four
+notification kinds. Other producers can publish directly:
+
+```sh
+pane-dash notify publish --event-id <id> --kind <error|permission|question|finished> --message <text> [--pane <%id>]
+```
+
+`--pane` defaults to `TMUX_PANE`. A missing notification service or a full
+queue returns a nonzero status. If the second row is missing, check that
+`bin/pane-dash` is built and executable, then reload `pane_dash.tmux`; if the
+service or binary is unavailable, run `make build` in the checkout and reload
+the entrypoint.
+
 ## tmux options
 
 | Option | Default | Meaning |

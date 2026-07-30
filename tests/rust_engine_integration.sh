@@ -29,7 +29,9 @@ cp "$ROOT/pane_dash.tmux" "$PLUGIN/"
 cp "$ROOT/scripts/open.sh" "$PLUGIN/scripts/"
 cat > "$PLUGIN/bin/pane-dash" <<EOF
 #!/usr/bin/env bash
-printf '%s\n' "\$@" > "$LOG"
+if [[ "\${1:-}" != notify ]]; then
+  printf '%s\n' "\$@" > "$LOG"
+fi
 EOF
 chmod +x "$PLUGIN/bin/pane-dash"
 cat > "$WRAPPER/tmux" <<EOF
