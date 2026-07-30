@@ -794,6 +794,12 @@ mod unix {
                 status_width: width,
             });
             self.active_client = Some(client);
+            if result.snapshot.is_empty() {
+                return Ok(HandledRequest {
+                    response: response_for_result(&result),
+                    stop: false,
+                });
+            }
             self.finish_state_change(result, None).await
         }
 

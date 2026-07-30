@@ -183,7 +183,7 @@ impl TmuxExec {
         self.run_dynamic(&[
             "refresh-client".into(),
             "-S".into(),
-            "-c".into(),
+            "-t".into(),
             client_tty.into(),
         ])
         .await
