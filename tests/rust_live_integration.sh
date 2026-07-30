@@ -346,8 +346,9 @@ notification_scenario() {
   tty="${CLIENT_TTYS[0]}"
 
   admin switch-client -c "$tty" -t "$session"
-  send_bytes 0 '\033[I'
-  notify_client "$origin" hook focus --client "$tty" --pane "$origin" --width 120 --focused 1 >/dev/null
+  # switch-client deterministically runs the installed client-session-changed
+  # hook; allow its background run-shell notification command to complete.
+  sleep .2
   status="$(notify_client "$origin" publish --event-id focused-origin --kind question --message suppressed --pane "$origin")"
   [[ "$status" == *'"outcome":"suppressed"'* ]] || die "focused origin was not suppressed: $status"
 

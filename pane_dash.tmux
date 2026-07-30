@@ -78,9 +78,9 @@ if [ -f "$binary" ] && [ -x "$binary" ]; then
   tmux set-option -g status 2
   tmux set-option -g 'status-format[1]' '#{E:@pane_dash_notify_status}'
 
-  focus_in_notify_hook="$(notify_hook_command notify hook focus --client '#{q:client_tty}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
-  focus_out_notify_hook="$(notify_hook_command notify hook focus --client '#{q:client_tty}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 0)"
-  active_notify_hook="$(notify_hook_command notify hook focus --client '#{q:client_tty}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
+  focus_in_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
+  focus_out_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 0)"
+  active_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
   pane_exited_notify_hook="$(notify_hook_command notify hook pane-exited --pane '#{q:hook_pane}')"
   session_closed_notify_hook="$(notify_hook_command notify hook session-closed)"
 
