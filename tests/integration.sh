@@ -37,7 +37,13 @@ pane="$(T display-message -p -t alpha '#{pane_id}')"
 T set-hook -g 'client-focus-in[31337]' 'display-message user-focus-in'
 T set-hook -g 'client-focus-out[31337]' 'display-message user-focus-out'
 T set-hook -g 'after-select-pane[31337]' 'display-message user-select-pane'
-T set-hook -g 'after-select-pane[31338]' 'run-shell -b "legacy notify hook focus --client #{q:hook_client} --pane #{q:hook_pane}"'
+unrelated_notify_hook='run-shell -b "user notify hook focus --client #{q:hook_client} --pane #{q:hook_pane}"'
+legacy_notify_hook="run-shell -b \"TMUX=#{q:socket_path},#{q:pid},0 #{q:@pane_dash_notify_binary} notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1 >/dev/null 2>&1\""
+T set-hook -g 'after-select-pane[31338]' "$unrelated_notify_hook"
+T set-hook -g 'after-select-pane[31339]' "$legacy_notify_hook"
+select_pane_hooks_before="$(T show-hooks -g after-select-pane)"
+unrelated_hook_before="$(printf '%s\n' "$select_pane_hooks_before" | grep -F 'after-select-pane[31338]')"
+legacy_hook_before="$(printf '%s\n' "$select_pane_hooks_before" | grep -F 'after-select-pane[31339]')"
 T set-option -s 'terminal-features[31337]' 'user*:RGB'
 T run-shell "$ROOT/pane_dash.tmux"
 focus_in_hooks="$(T show-hooks -g client-focus-in)"
@@ -54,11 +60,13 @@ terminal_features="$(T show-options -sv terminal-features)"
   || fail "plugin client-focus-out hook count"
 [ "$(printf '%s\n' "$select_pane_hooks" | grep -Fxc 'after-select-pane[31337] display-message user-select-pane')" = "1" ] \
   || fail "plugin replaced user after-select-pane hook"
-[ "$(printf '%s\n' "$select_pane_hooks" | grep -Fxc 'after-select-pane[31338] run-shell -b \"legacy notify hook focus --client #{q:hook_client} --pane #{q:hook_pane}\"')" = "0" ] \
+[ "$(printf '%s\n' "$select_pane_hooks" | grep -Fxc -- "$unrelated_hook_before")" = "1" ] \
+  || fail "unrelated notify-looking after-select-pane hook changed"
+[ "$(printf '%s\n' "$select_pane_hooks" | grep -Fxc -- "$legacy_hook_before")" = "0" ] \
   || fail "legacy pane-dash after-select-pane hook survived"
-[ "$(printf '%s\n' "$select_pane_hooks" | grep -Fc 'after-select-pane[31338]')" = "1" ] \
+[ "$(printf '%s\n' "$select_pane_hooks" | grep -Fc 'after-select-pane[31339]')" = "1" ] \
   || fail "pane-dash after-select-pane hook was not replaced in place"
-select_pane_owned="$(printf '%s\n' "$select_pane_hooks" | grep -F 'after-select-pane[31338]' || true)"
+select_pane_owned="$(printf '%s\n' "$select_pane_hooks" | grep -F 'after-select-pane[31339]' || true)"
 case "$select_pane_owned" in
   *'#{q:client_tty}'*'#{q:pane_id}'*) ;;
   *) fail "after-select-pane hook did not use generic client/pane formats" ;;

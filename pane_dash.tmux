@@ -89,15 +89,16 @@ if [ -f "$binary" ] && [ -x "$binary" ]; then
   client_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
   pane_exited_notify_hook="$(notify_hook_command notify hook pane-exited --pane '#{q:hook_pane}')"
   session_closed_notify_hook="$(notify_hook_command notify hook session-closed)"
+  notify_hook_prefix='run-shell -b "TMUX=#{q:socket_path},#{q:pid},0 #{q:@pane_dash_notify_binary} notify hook'
 
-  install_notify_hook client-focus-in 'notify hook focus --client' "$focus_in_notify_hook"
-  install_notify_hook client-focus-out 'notify hook focus --client' "$focus_out_notify_hook"
-  install_notify_hook after-select-pane 'notify hook focus --client' "$select_notify_hook"
-  install_notify_hook after-select-window 'notify hook focus --client' "$select_notify_hook"
-  install_notify_hook client-session-changed 'notify hook focus --client' "$client_notify_hook"
-  install_notify_hook client-resized 'notify hook focus --client' "$client_notify_hook"
-  install_notify_hook pane-exited 'notify hook pane-exited --pane' "$pane_exited_notify_hook"
-  install_notify_hook session-closed 'notify hook session-closed' "$session_closed_notify_hook"
+  install_notify_hook client-focus-in "$notify_hook_prefix focus --client" "$focus_in_notify_hook"
+  install_notify_hook client-focus-out "$notify_hook_prefix focus --client" "$focus_out_notify_hook"
+  install_notify_hook after-select-pane "$notify_hook_prefix focus --client" "$select_notify_hook"
+  install_notify_hook after-select-window "$notify_hook_prefix focus --client" "$select_notify_hook"
+  install_notify_hook client-session-changed "$notify_hook_prefix focus --client" "$client_notify_hook"
+  install_notify_hook client-resized "$notify_hook_prefix focus --client" "$client_notify_hook"
+  install_notify_hook pane-exited "$notify_hook_prefix pane-exited --pane" "$pane_exited_notify_hook"
+  install_notify_hook session-closed "$notify_hook_prefix session-closed " "$session_closed_notify_hook"
 
   visible_click_condition='#{&&:#{==:#{mouse_status_line},1},#{m/r:^pane-dash-visible-[0-9]+$,#{mouse_status_range}}}'
   more_click_condition='#{&&:#{==:#{mouse_status_line},1},#{==:#{mouse_status_range},pane-dash-more}}'
