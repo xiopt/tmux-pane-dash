@@ -672,22 +672,7 @@ mod unix {
     }
 
     fn validate_range(value: &str) -> Result<()> {
-        if value == "pane-dash-more" {
-            return Ok(());
-        }
-        let Some(digits) = value.strip_prefix("pane-dash-visible-") else {
-            bail!("invalid notification range")
-        };
-        if digits.is_empty()
-            || (digits.len() > 1 && digits.starts_with('0'))
-            || !digits.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            bail!("invalid notification range")
-        }
-        let sequence = digits
-            .parse::<u64>()
-            .map_err(|_| anyhow!("invalid notification range"))?;
-        if sequence == 0 {
+        if !crate::notifications::is_valid_click_range(value) {
             bail!("invalid notification range")
         }
         Ok(())

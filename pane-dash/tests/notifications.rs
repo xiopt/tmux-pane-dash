@@ -541,7 +541,7 @@ fn publish_list_and_click_round_trip_with_exact_targeting() {
         "notify",
         "click",
         "--range",
-        "pane-dash-visible-1",
+        "v1",
         "--client",
         "/dev/ttys001",
     ]);
@@ -658,7 +658,7 @@ fn concurrent_clicks_dismiss_and_route_only_once() {
                 "notify",
                 "click",
                 "--range",
-                "pane-dash-visible-1",
+                "v1",
                 "--client",
                 "/dev/ttys001",
             ])
@@ -668,7 +668,7 @@ fn concurrent_clicks_dismiss_and_route_only_once() {
                 "notify",
                 "click",
                 "--range",
-                "pane-dash-visible-1",
+                "v1",
                 "--client",
                 "/dev/ttys001",
             ])

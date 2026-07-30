@@ -100,8 +100,8 @@ if [ -f "$binary" ] && [ -x "$binary" ]; then
   install_notify_hook pane-exited "$notify_hook_prefix pane-exited --pane" "$pane_exited_notify_hook"
   install_notify_hook session-closed "$notify_hook_prefix session-closed " "$session_closed_notify_hook"
 
-  visible_click_condition='#{&&:#{==:#{mouse_status_line},1},#{m/r:^pane-dash-visible-[0-9]+$,#{mouse_status_range}}}'
-  more_click_condition='#{&&:#{==:#{mouse_status_line},1},#{==:#{mouse_status_range},pane-dash-more}}'
+  visible_click_condition='#{&&:#{==:#{mouse_status_line},1},#{m/r:^v[0-9a-z]+$,#{mouse_status_range}}}'
+  more_click_condition='#{&&:#{==:#{mouse_status_line},1},#{==:#{mouse_status_range},m}}'
   open_script="$(shell_quote "$DIR/scripts/open.sh")"
   visible_click_command="run-shell -b \"TMUX=#{q:socket_path},#{q:pid},0 #{q:@pane_dash_notify_binary} notify click --range #{q:mouse_status_range} --client #{q:client_tty} >/dev/null 2>&1\""
   more_click_command="run-shell -b \"TMUX=#{q:socket_path},#{q:pid},0 #{q:@pane_dash_notify_binary} notify click --range #{q:mouse_status_range} --client #{q:client_tty} >/dev/null 2>&1 && $open_script --notification-list #{q:@pane_dash_notify_binary} #{q:client_tty} #{q:session_id} #{q:pane_id}\""

@@ -345,7 +345,7 @@ notification_open_list_popup() {
   local index="$1" session_id="$2" pane_id="$3" tty="$4" before server_pid command popup_pid
   before="$(notification_list_pids)"
   server_pid="$(admin display-message -p '#{pid}')"
-  command="TMUX=$(pd_posix_shell_quote "$SOCKET,$server_pid,0") $(pd_posix_shell_quote "$BIN") notify click --range pane-dash-more --client $(pd_posix_shell_quote "$tty") >/dev/null 2>&1 && $(pd_posix_shell_quote "$ROOT/scripts/open.sh") --notification-list $(pd_posix_shell_quote "$BIN") $(pd_posix_shell_quote "$tty") $(pd_posix_shell_quote "$session_id") $(pd_posix_shell_quote "$pane_id")"
+  command="TMUX=$(pd_posix_shell_quote "$SOCKET,$server_pid,0") $(pd_posix_shell_quote "$BIN") notify click --range m --client $(pd_posix_shell_quote "$tty") >/dev/null 2>&1 && $(pd_posix_shell_quote "$ROOT/scripts/open.sh") --notification-list $(pd_posix_shell_quote "$BIN") $(pd_posix_shell_quote "$tty") $(pd_posix_shell_quote "$session_id") $(pd_posix_shell_quote "$pane_id")"
   admin run-shell -b "$command"
   wait_for 'notification list popup process' 3 new_notification_list_process "$before"
   popup_pid="$NEW_NOTIFICATION_LIST_PID"
@@ -410,16 +410,16 @@ notification_scenario() {
   notify_client "$origin" publish --event-id error-oldest --kind error --message oldest-error --pane "$target" >/dev/null
   notify_client "$origin" publish --event-id error-newer --kind error --message newer-error --pane "$exit_target" >/dev/null
   notify_client "$origin" publish --event-id question-newer --kind question --message "newer-question-$list_tag" --pane "$target" >/dev/null
-  wait_for 'priority and oldest notification status' 3 notification_status_contains 'pane-dash-visible-2'
+  wait_for 'priority and oldest notification status' 3 notification_status_contains 'range=user|v2'
   notification_status_contains 'error: oldest-error' || die 'visible notification was not the oldest highest-priority item'
-  notification_status_contains 'pane-dash-more' || die 'notification more range missing'
+  notification_status_contains 'range=user|m' || die 'notification more range missing'
   notification_status_contains '+3 more' || die 'notification more count missing'
-  ! notification_status_contains 'pane-dash-visible-3' || die 'newer equal-priority notification was visible'
+  ! notification_status_contains 'range=user|v3' || die 'newer equal-priority notification was visible'
   [[ "$(notification_list_count "$origin")" == 4 ]] || die 'notification list publish count'
 
   # This is the same tmux run-shell action used by the visible status binding;
   # a PTY mouse escape is not deterministic across the macOS script harness.
-  notification_run_shell click --range pane-dash-visible-2 --client "$tty"
+  notification_run_shell click --range v2 --client "$tty"
   wait_for 'notification click routes client' 3 client_is "$tty" "$session_id" "$target"
   wait_for 'notification click dismisses one item' 3 notification_list_count "$origin"
   [[ "$(notification_list_count "$origin")" == 3 ]] || die 'notification click dismissed the wrong number of items'

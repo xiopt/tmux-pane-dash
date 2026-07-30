@@ -11,8 +11,9 @@ pub const MAX_MESSAGE_SCALARS: usize = 256;
 pub const DEFAULT_STATUS_WIDTH: usize = 80;
 
 const MAX_EVENT_ID_BYTES: usize = 128;
-const VISIBLE_RANGE_PREFIX: &str = "pane-dash-visible-";
-const MORE_RANGE_NAME: &str = "pane-dash-more";
+const VISIBLE_RANGE_PREFIX: &str = "v";
+const MORE_RANGE_NAME: &str = "m";
+const BASE36_DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 const ELLIPSIS: &str = "…";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -344,7 +345,7 @@ impl NotificationState {
             return String::new();
         };
 
-        let visible_name = format!("{VISIBLE_RANGE_PREFIX}{}", visible.sequence);
+        let visible_name = visible_range(visible.sequence);
         let visible_text = notification_text(visible);
         let more_count = ordered.len().saturating_sub(1);
         if more_count == 0 {
@@ -646,12 +647,33 @@ fn parse_visible_range(value: &str) -> Option<u64> {
     let digits = value.strip_prefix(VISIBLE_RANGE_PREFIX)?;
     if digits.is_empty()
         || (digits.len() > 1 && digits.starts_with('0'))
-        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || !digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
     {
         return None;
     }
-    let sequence = digits.parse::<u64>().ok()?;
-    (sequence.to_string() == digits).then_some(sequence)
+    let sequence = u64::from_str_radix(digits, 36).ok()?;
+    (sequence > 0 && visible_range(sequence) == value).then_some(sequence)
+}
+
+fn visible_range(mut sequence: u64) -> String {
+    debug_assert!(sequence > 0);
+    let mut encoded = [0_u8; 13];
+    let mut index = encoded.len();
+    while sequence > 0 {
+        index -= 1;
+        encoded[index] = BASE36_DIGITS[(sequence % 36) as usize];
+        sequence /= 36;
+    }
+    format!(
+        "{VISIBLE_RANGE_PREFIX}{}",
+        std::str::from_utf8(&encoded[index..]).expect("base36 digits are ASCII")
+    )
+}
+
+pub(crate) fn is_valid_click_range(value: &str) -> bool {
+    value == MORE_RANGE_NAME || parse_visible_range(value).is_some()
 }
 
 #[cfg(test)]
@@ -963,9 +985,7 @@ mod tests {
         let current = publish(&mut state, "current", NotificationKind::Error, "%2");
         let current_sequence = published_sequence(&current);
 
-        let stale = state.apply(NotificationCommand::Click(format!(
-            "{VISIBLE_RANGE_PREFIX}{old_sequence}"
-        )));
+        let stale = state.apply(NotificationCommand::Click(visible_range(old_sequence)));
         assert_eq!(stale.outcome, ApplyOutcome::IgnoredClick);
         assert!(!stale.changed);
         assert_eq!(state.len(), 2);
@@ -975,9 +995,7 @@ mod tests {
         assert_eq!(more.route, Some(RouteIntent::List));
         assert!(!more.changed);
 
-        let clicked = state.apply(NotificationCommand::Click(format!(
-            "{VISIBLE_RANGE_PREFIX}{current_sequence}"
-        )));
+        let clicked = state.apply(NotificationCommand::Click(visible_range(current_sequence)));
         assert_eq!(
             clicked.outcome,
             ApplyOutcome::ClickedVisible {
@@ -989,6 +1007,20 @@ mod tests {
     }
 
     #[test]
+    fn click_ranges_fit_tmux_and_round_trip_the_maximum_sequence() {
+        for sequence in [1, 35, 36, u64::MAX] {
+            let range = visible_range(sequence);
+            assert!(range.len() <= 15);
+            assert_eq!(parse_visible_range(&range), Some(sequence));
+            assert!(is_valid_click_range(&range));
+        }
+        for invalid in ["", "v", "v0", "v01", "vA", "pane-dash-visible-1"] {
+            assert!(!is_valid_click_range(invalid));
+        }
+        assert!(is_valid_click_range(MORE_RANGE_NAME));
+    }
+
+    #[test]
     fn rendering_is_bounded_clickable_and_safe_for_tmux_formats() {
         let empty = NotificationState::new();
         assert_eq!(empty.render_status_row(80), "");
@@ -996,8 +1028,8 @@ mod tests {
         let mut one = NotificationState::new();
         publish(&mut one, "one", NotificationKind::Error, "%1");
         let row = one.render_status_row(80);
-        assert!(row.contains("#[range=user|pane-dash-visible-1]"));
-        assert!(!row.contains("pane-dash-more"));
+        assert!(row.contains("#[range=user|v1]"));
+        assert!(!row.contains("#[range=user|m]"));
         assert_eq!(row.matches("#[range=user|").count(), 1);
         assert_eq!(row.matches("#[norange]").count(), 1);
         assert!(visible_content(&row).width() <= 80);
@@ -1027,16 +1059,16 @@ mod tests {
         publish(&mut many, "one", NotificationKind::Finished, "%1");
         publish(&mut many, "two", NotificationKind::Permission, "%2");
         let normal = many.render_status_row(80);
-        assert!(normal.contains("#[range=user|pane-dash-visible-2]"));
-        assert!(normal.contains("#[range=user|pane-dash-more]"));
+        assert!(normal.contains("#[range=user|v2]"));
+        assert!(normal.contains("#[range=user|m]"));
         assert!(normal.contains("+1 more"));
         assert_eq!(normal.matches("#[range=user|").count(), 2);
         assert_eq!(normal.matches("#[norange]").count(), 2);
         assert!(visible_content(&normal).width() <= 80);
 
         let narrow = many.render_status_row(12);
-        assert!(narrow.contains("#[range=user|pane-dash-visible-2]"));
-        assert!(narrow.contains("#[range=user|pane-dash-more]"));
+        assert!(narrow.contains("#[range=user|v2]"));
+        assert!(narrow.contains("#[range=user|m]"));
         assert!(narrow.contains("+1 more"));
         assert_eq!(narrow.matches("#[range=user|").count(), 2);
         assert!(visible_content(&narrow).width() <= 12);
