@@ -110,6 +110,23 @@ mod tests {
     }
 
     #[test]
+    fn hidden_status_excludes_command_matched_panes_unless_tagged() {
+        let mut hidden = record();
+        hidden.status = "hidden".into();
+        hidden.heartbeat = Some(1_000);
+        hidden.pane_current_command = "opencode".into();
+
+        let mut tagged = hidden.clone();
+        tagged.pane_id = "%tagged".into();
+        tagged.tag = "keep".into();
+
+        let built = model(&[hidden, tagged]);
+
+        assert!(!built.panes().contains_key(&"%1".into()));
+        assert!(built.panes().contains_key(&"%tagged".into()));
+    }
+
+    #[test]
     fn preserves_linked_pane_memberships_and_last_canonical_facts() {
         let mut first = record();
         first.status = "working".into();
@@ -744,12 +761,13 @@ impl Model {
 }
 
 pub fn is_discovered(record: &RawRecord, cfg: &ModelConfig, now: u64) -> bool {
-    (!record.status.is_empty()
-        && record
-            .heartbeat
-            .is_some_and(|heartbeat| now.saturating_sub(heartbeat) <= cfg.stale_secs))
-        || record.pane_current_command == cfg.match_pattern
-        || !record.tag.is_empty()
+    !record.tag.is_empty()
+        || (record.status != "hidden"
+            && ((!record.status.is_empty()
+                && record
+                    .heartbeat
+                    .is_some_and(|heartbeat| now.saturating_sub(heartbeat) <= cfg.stale_secs))
+                || record.pane_current_command == cfg.match_pattern))
 }
 
 fn derive_status(record: &RawRecord, stale_secs: u64, now: u64) -> Status {

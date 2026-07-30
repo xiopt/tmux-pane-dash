@@ -67,6 +67,11 @@ function normalize(raw) {
   }
 }
 
+// opencode-plugin/src/mode.ts
+function isServeInvocation(argv) {
+  return argv[1] === "serve";
+}
+
 // opencode-plugin/src/sanitize.ts
 function sanitize(value) {
   return value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 120);
@@ -415,6 +420,7 @@ class TmuxWriter {
 
 // opencode-plugin/pane-dash.ts
 var HEARTBEAT_MS = 20000;
+var HIDDEN_STATUS = "hidden";
 var STARTUP_OPTIONS = [
   "@pane_dash_status",
   "@pane_dash_status_since",
@@ -425,8 +431,16 @@ var PaneDash = async () => {
   const pane = process.env.TMUX_PANE;
   if (!pane)
     return {};
-  const store = createStore();
   const writer = new TmuxWriter(pane);
+  if (isServeInvocation(process.argv)) {
+    for (const name of STARTUP_OPTIONS)
+      writer.unsetOption(name, true);
+    writer.unsetOption("@pane_dash_heartbeat", true);
+    writer.setOption("@pane_dash_status", HIDDEN_STATUS, true);
+    process.on("exit", () => writer.clearSync());
+    return {};
+  }
+  const store = createStore();
   const notify = createNotificationPublisher(resolveNotificationBinary());
   const publish = () => {
     const derived = derive(store);

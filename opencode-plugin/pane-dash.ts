@@ -1,11 +1,13 @@
 // OpenCode plugin: publishes agent status to tmux pane options.
 // Install: ln -sf <repo>/opencode-plugin/pane-dash.ts ~/.config/opencode/plugin/
 import { normalize } from "./src/normalize"
+import { isServeInvocation } from "./src/mode"
 import { createNotificationPublisher, decideNotification, resolveNotificationBinary } from "./src/notifications"
 import { apply, createStore, derive } from "./src/state"
 import { TmuxWriter } from "./src/writer"
 
 const HEARTBEAT_MS = 20_000
+const HIDDEN_STATUS = "hidden"
 const STARTUP_OPTIONS = [
   "@pane_dash_status",
   "@pane_dash_status_since",
@@ -17,8 +19,17 @@ export const PaneDash = async () => {
   const pane = process.env.TMUX_PANE
   if (!pane) return {}
 
-  const store = createStore()
   const writer = new TmuxWriter(pane)
+
+  if (isServeInvocation(process.argv)) {
+    for (const name of STARTUP_OPTIONS) writer.unsetOption(name, true)
+    writer.unsetOption("@pane_dash_heartbeat", true)
+    writer.setOption("@pane_dash_status", HIDDEN_STATUS, true)
+    process.on("exit", () => writer.clearSync())
+    return {}
+  }
+
+  const store = createStore()
   const notify = createNotificationPublisher(resolveNotificationBinary())
 
   const publish = () => {
