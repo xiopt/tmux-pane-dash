@@ -6,7 +6,7 @@ mod unix {
     use std::collections::HashMap;
     use std::env;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -14,7 +14,7 @@ mod unix {
     use serde::{Deserialize, Serialize};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
-    use tokio::time::{Instant, sleep};
+    use tokio::time::{Instant, sleep, timeout};
 
     use crate::actions::execute_jump;
     use crate::control::is_safe_client_tty;
@@ -25,13 +25,15 @@ mod unix {
     };
     use crate::tmux_exec::TmuxExec;
 
-    const PROTOCOL_VERSION: u32 = 1;
+    const PROTOCOL_VERSION: u32 = 2;
     const MAX_FRAME_BYTES: usize = 4 * 1024;
+    const LIST_PAGE_SIZE: usize = 2;
     const SOCKET_MODE: u32 = 0o600;
     const SOCKET_PREFIX: &str = ".pane-dash-notify-";
     const SOCKET_SUFFIX: &str = ".sock";
     const CLIENT_RETRY: Duration = Duration::from_millis(100);
     const CLIENT_RETRY_STEP: Duration = Duration::from_millis(5);
+    const OWNER_RELEASE_TIMEOUT: Duration = Duration::from_millis(500);
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(tag = "op", rename_all = "snake_case")]
@@ -49,7 +51,9 @@ mod unix {
             range: String,
             client: String,
         },
-        List,
+        List {
+            after_sequence: Option<u64>,
+        },
         HookFocus {
             client: String,
             pane: String,
@@ -84,6 +88,8 @@ mod unix {
         route: Option<RouteResponse>,
         #[serde(skip_serializing_if = "Option::is_none")]
         snapshot: Option<Vec<SnapshotItem>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        next_after_sequence: Option<u64>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,7 +169,10 @@ mod unix {
             } => run_server(&tmux_socket, &server_pid).await,
             CliCommand::Client(request) => {
                 let socket = client_socket_path()?;
-                let response = send_request(&socket, &request).await?;
+                let response = match &request {
+                    Request::List { .. } => list_notifications(&socket).await?,
+                    _ => send_request(&socket, &request).await?,
+                };
                 if !response.ok {
                     bail!(
                         "{}: {}",
@@ -259,7 +268,9 @@ mod unix {
                 if args.len() != 1 {
                     bail!("notify list takes no arguments")
                 }
-                Ok(CliCommand::Client(Request::List))
+                Ok(CliCommand::Client(Request::List {
+                    after_sequence: None,
+                }))
             }
             "hook" => parse_hook(&args[1..]),
             "select" => {
@@ -460,12 +471,39 @@ mod unix {
 
     async fn send_request(path: &Path, request: &Request) -> Result<Response> {
         let mut stream = connect_with_retry(path).await?;
+        send_request_on_stream(&mut stream, request).await
+    }
+
+    async fn send_request_on_stream(
+        stream: &mut UnixStream,
+        request: &Request,
+    ) -> Result<Response> {
         let request = serde_json::to_vec(request)?;
-        write_frame(&mut stream, &request).await?;
-        let response = read_frame(&mut stream)
+        write_frame(stream, &request).await?;
+        let response = read_frame(stream)
             .await?
             .ok_or_else(|| anyhow!("notification service closed the connection"))?;
         serde_json::from_slice(&response).context("invalid notification service response")
+    }
+
+    async fn list_notifications(path: &Path) -> Result<Response> {
+        let mut after_sequence = None;
+        let mut snapshot = Vec::new();
+        loop {
+            let response = send_request(path, &Request::List { after_sequence }).await?;
+            if !response.ok {
+                return Ok(response);
+            }
+            let next_after_sequence = response.next_after_sequence;
+            snapshot.extend(response.snapshot.unwrap_or_default());
+            let Some(next) = next_after_sequence else {
+                return Ok(Response::success("listed").with_snapshot(snapshot));
+            };
+            if Some(next) == after_sequence {
+                bail!("notification list cursor did not advance")
+            }
+            after_sequence = Some(next);
+        }
     }
 
     async fn connect_with_retry(path: &Path) -> Result<UnixStream> {
@@ -491,49 +529,110 @@ mod unix {
         let Some(listener) = bind_or_join(&socket).await? else {
             return Ok(());
         };
+        let owner = socket_identity(&socket)?;
         let mut service = NotificationService {
             tmux: TmuxExec::with_socket("tmux", tmux_socket),
             state: NotificationState::new(),
             active_client: None,
         };
         let result = listen(&listener, &mut service).await;
-        let _ = fs::remove_file(&socket);
+        remove_socket_if_owned(&socket, owner);
         result
     }
 
     async fn bind_or_join(path: &Path) -> Result<Option<UnixListener>> {
         match UnixListener::bind(path) {
-            Ok(listener) => {
-                fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE)).with_context(
-                    || format!("set notification socket mode on {}", path.display()),
-                )?;
-                Ok(Some(listener))
-            }
-            Err(bind_error) => {
-                if let Ok(response) = send_request(
-                    path,
-                    &Request::Ping {
-                        version: PROTOCOL_VERSION,
-                    },
-                )
-                .await
-                    && response.ok
-                    && response.version == Some(PROTOCOL_VERSION)
-                {
-                    return Ok(None);
-                }
-                fs::remove_file(path).with_context(|| {
-                    format!(
-                        "remove stale notification socket {} after bind failure: {bind_error}",
-                        path.display()
+            Ok(listener) => return Ok(Some(configure_listener(path, listener)?)),
+            Err(bind_error) => match connect_with_retry(path).await {
+                Ok(mut stream) => {
+                    let response = match timeout(
+                        OWNER_RELEASE_TIMEOUT,
+                        send_request_on_stream(
+                            &mut stream,
+                            &Request::Ping {
+                                version: PROTOCOL_VERSION,
+                            },
+                        ),
                     )
-                })?;
-                let listener = UnixListener::bind(path)
-                    .with_context(|| format!("bind notification socket {}", path.display()))?;
-                fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE)).with_context(
-                    || format!("set notification socket mode on {}", path.display()),
-                )?;
-                Ok(Some(listener))
+                    .await
+                    {
+                        Ok(response) => response?,
+                        Err(_) => bail!("existing notification service did not answer ping"),
+                    };
+                    if response.ok && response.version == Some(PROTOCOL_VERSION) {
+                        return Ok(None);
+                    }
+
+                    let shutdown = match timeout(
+                        OWNER_RELEASE_TIMEOUT,
+                        send_request(path, &Request::Shutdown),
+                    )
+                    .await
+                    {
+                        Ok(shutdown) => shutdown?,
+                        Err(_) => {
+                            bail!("existing notification service did not answer shutdown")
+                        }
+                    };
+                    if !shutdown.ok {
+                        bail!(
+                            "existing notification service rejected shutdown: {}",
+                            shutdown.error.as_deref().unwrap_or("unknown error")
+                        );
+                    }
+                    wait_for_socket_release(path).await?;
+                }
+                Err(_) => {
+                    fs::remove_file(path).with_context(|| {
+                        format!(
+                            "remove stale notification socket {} after bind failure: {bind_error}",
+                            path.display()
+                        )
+                    })?;
+                }
+            },
+        }
+        let listener = UnixListener::bind(path)
+            .with_context(|| format!("bind notification socket {}", path.display()))?;
+        Ok(Some(configure_listener(path, listener)?))
+    }
+
+    fn configure_listener(path: &Path, listener: UnixListener) -> Result<UnixListener> {
+        fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE))
+            .with_context(|| format!("set notification socket mode on {}", path.display()))?;
+        Ok(listener)
+    }
+
+    fn socket_identity(path: &Path) -> Result<(u64, u64)> {
+        let metadata = fs::metadata(path)
+            .with_context(|| format!("read notification socket {}", path.display()))?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+
+    fn remove_socket_if_owned(path: &Path, owner: (u64, u64)) {
+        if fs::metadata(path)
+            .ok()
+            .is_some_and(|metadata| (metadata.dev(), metadata.ino()) == owner)
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    async fn wait_for_socket_release(path: &Path) -> Result<()> {
+        let deadline = Instant::now() + OWNER_RELEASE_TIMEOUT;
+        loop {
+            match fs::metadata(path) {
+                Ok(_) if Instant::now() < deadline => sleep(CLIENT_RETRY_STEP).await,
+                Ok(_) => bail!(
+                    "existing notification service did not release {}",
+                    path.display()
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("check notification socket release {}", path.display())
+                    });
+                }
             }
         }
     }
@@ -619,10 +718,15 @@ mod unix {
                     pane,
                 } => self.publish(event_id, kind, message, pane).await,
                 Request::Click { range, client } => self.click(range, client).await,
-                Request::List => Ok(HandledRequest {
-                    response: Response::success("listed").with_snapshot(self.snapshot_items()),
-                    stop: false,
-                }),
+                Request::List { after_sequence } => {
+                    let (snapshot, next_after_sequence) = self.snapshot_items(after_sequence);
+                    Ok(HandledRequest {
+                        response: Response::success("listed")
+                            .with_snapshot(snapshot)
+                            .with_next_after_sequence(next_after_sequence),
+                        stop: false,
+                    })
+                }
                 Request::HookFocus {
                     client,
                     pane,
@@ -806,10 +910,18 @@ mod unix {
             })
         }
 
-        fn snapshot_items(&self) -> Vec<SnapshotItem> {
-            self.state
-                .snapshot()
-                .items()
+        fn snapshot_items(&self, after_sequence: Option<u64>) -> (Vec<SnapshotItem>, Option<u64>) {
+            let ordered = self.state.snapshot();
+            let items = ordered.items();
+            let start = after_sequence
+                .and_then(|sequence| {
+                    items
+                        .iter()
+                        .position(|notification| notification.sequence() == sequence)
+                })
+                .map_or(0, |index| index + 1);
+            let end = (start + LIST_PAGE_SIZE).min(items.len());
+            let page = items[start..end]
                 .iter()
                 .map(|notification| SnapshotItem {
                     event_id: notification.event_id().as_str().to_owned(),
@@ -820,7 +932,9 @@ mod unix {
                     window_id: notification.target().window_id().0.clone(),
                     pane_id: notification.target().pane_id().0.clone(),
                 })
-                .collect()
+                .collect();
+            let next_after_sequence = (end < items.len()).then(|| items[end - 1].sequence());
+            (page, next_after_sequence)
         }
     }
 
@@ -960,6 +1074,7 @@ mod unix {
             removed: None,
             route: None,
             snapshot: None,
+            next_after_sequence: None,
         }
     }
 
@@ -978,6 +1093,7 @@ mod unix {
                 removed: None,
                 route: None,
                 snapshot: None,
+                next_after_sequence: None,
             }
         }
 
@@ -988,6 +1104,11 @@ mod unix {
 
         fn with_snapshot(mut self, snapshot: Vec<SnapshotItem>) -> Self {
             self.snapshot = Some(snapshot);
+            self
+        }
+
+        fn with_next_after_sequence(mut self, sequence: Option<u64>) -> Self {
+            self.next_after_sequence = sequence;
             self
         }
     }

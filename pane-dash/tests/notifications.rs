@@ -2,13 +2,14 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 struct Harness {
@@ -21,6 +22,13 @@ struct Harness {
 
 impl Harness {
     fn new(with_stale_socket: bool) -> Self {
+        let mut harness = Self::setup(with_stale_socket);
+        harness.start_service();
+        harness.wait_for_socket();
+        harness
+    }
+
+    fn setup(with_stale_socket: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let tmux_socket = dir.path().join("tmux,notification-server");
         let socket = dir.path().join(".pane-dash-notify-4242.sock");
@@ -40,9 +48,19 @@ impl Harness {
             fs::write(&socket, b"stale").unwrap();
         }
 
+        Self {
+            dir,
+            tmux_socket,
+            socket,
+            no_sessions,
+            server: None,
+        }
+    }
+
+    fn start_service(&mut self) {
         let path = format!(
             "{}:{}",
-            dir.path().display(),
+            self.dir.path().display(),
             std::env::var_os("PATH")
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default()
@@ -52,27 +70,19 @@ impl Harness {
                 "notify",
                 "serve",
                 "--tmux-socket",
-                tmux_socket.to_str().unwrap(),
+                self.tmux_socket.to_str().unwrap(),
                 "--server-pid",
                 "4242",
             ])
             .env("PATH", path)
-            .env("TMUX_NOTIFY_LOG", &log)
-            .env("TMUX_NOTIFY_NO_SESSIONS", &no_sessions)
+            .env("TMUX_NOTIFY_LOG", self.log_path())
+            .env("TMUX_NOTIFY_NO_SESSIONS", &self.no_sessions)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let mut harness = Self {
-            dir,
-            tmux_socket,
-            socket,
-            no_sessions,
-            server: Some(server),
-        };
-        harness.wait_for_socket();
-        harness
+        self.server = Some(server);
     }
 
     fn identity(&self) -> String {
@@ -116,6 +126,39 @@ impl Harness {
         }
     }
 
+    fn socket_identity(&self) -> (u64, u64) {
+        let metadata = fs::metadata(&self.socket).unwrap();
+        (metadata.dev(), metadata.ino())
+    }
+
+    fn wait_for_socket_replacement(&self, old_identity: (u64, u64)) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if fs::metadata(&self.socket).is_ok_and(|metadata| {
+                metadata.file_type().is_socket() && (metadata.dev(), metadata.ino()) != old_identity
+            }) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "notification service did not replace the socket"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn raw_request(&self, request: Value) -> (Value, usize) {
+        let mut stream = UnixStream::connect(&self.socket).unwrap();
+        let mut frame = serde_json::to_vec(&request).unwrap();
+        frame.push(b'\n');
+        stream.write_all(&frame).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        let frame_len = response.len();
+        assert_eq!(response.pop(), Some(b'\n'));
+        (serde_json::from_slice(&response).unwrap(), frame_len)
+    }
+
     fn log(&self) -> String {
         fs::read_to_string(self.log_path()).unwrap_or_default()
     }
@@ -138,6 +181,69 @@ impl Drop for Harness {
 
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
+}
+
+fn read_frame(stream: &mut UnixStream) -> Vec<u8> {
+    let mut frame = Vec::new();
+    loop {
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).unwrap();
+        frame.push(byte[0]);
+        if byte[0] == b'\n' {
+            return frame;
+        }
+    }
+}
+
+fn legacy_owner(path: &Path) -> thread::JoinHandle<()> {
+    let path = path.to_owned();
+    let listener = UnixListener::bind(&path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    thread::spawn(move || {
+        let (mut ping, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("legacy owner failed to accept ping: {error}"),
+            }
+        };
+        ping.set_nonblocking(false).unwrap();
+        let request: Value = serde_json::from_slice(&read_frame(&mut ping)).unwrap();
+        assert_eq!(request["op"], "ping");
+        ping.write_all(b"{\"ok\":true,\"version\":1,\"outcome\":\"pong\"}\n")
+            .unwrap();
+        drop(ping);
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            match listener.accept() {
+                Ok((mut shutdown, _)) => {
+                    shutdown.set_nonblocking(false).unwrap();
+                    let request: Value =
+                        serde_json::from_slice(&read_frame(&mut shutdown)).unwrap();
+                    assert_eq!(request["op"], "shutdown");
+                    shutdown
+                        .write_all(b"{\"ok\":true,\"outcome\":\"stopped\"}\n")
+                        .unwrap();
+                    drop(shutdown);
+                    drop(listener);
+                    thread::sleep(Duration::from_millis(100));
+                    let _ = fs::remove_file(&path);
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        let _ = fs::remove_file(&path);
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("legacy owner failed to accept shutdown: {error}"),
+            }
+        }
+    })
 }
 
 fn json(output: &Output) -> Value {
@@ -207,6 +313,34 @@ fn service_socket_is_private_and_same_owner_second_service_exits() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn reachable_version_mismatch_shuts_down_old_owner_before_replacing_socket() {
+    let mut harness = Harness::setup(false);
+    let legacy = legacy_owner(&harness.socket);
+    let old_identity = harness.socket_identity();
+    harness.start_service();
+    harness.wait_for_socket_replacement(old_identity);
+
+    thread::sleep(Duration::from_millis(700));
+    let listed = harness.client(&["notify", "list"]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert_eq!(json(&listed)["snapshot"], Value::Array(Vec::new()));
+    assert!(
+        harness
+            .server
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none()
+    );
+    legacy.join().unwrap();
 }
 
 #[test]
@@ -287,6 +421,75 @@ fn publish_list_and_click_round_trip_with_exact_targeting() {
             .log()
             .contains("switch-client\n-Z\n-c\n/dev/ttys001\n-t\n%1\n")
     );
+}
+
+#[test]
+fn paged_list_fetches_all_maximum_notifications_with_bounded_frames() {
+    let harness = Harness::new(false);
+    let message = "x".repeat(pane_dash::notifications::MAX_MESSAGE_SCALARS);
+    let kinds = ["error", "permission", "question", "finished"];
+
+    for index in 0..64 {
+        let event_id = format!("{index:0>128}");
+        let output = harness.client(&[
+            "notify",
+            "publish",
+            "--event-id",
+            event_id.as_str(),
+            "--kind",
+            kinds[index % kinds.len()],
+            "--message",
+            message.as_str(),
+            "--pane",
+            "%1",
+        ]);
+        assert!(
+            output.status.success(),
+            "publish {index} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let mut after_sequence = None;
+    let mut sequences = Vec::new();
+    let mut pages = 0;
+    loop {
+        let (page, frame_len) = harness.raw_request(json!({
+            "op": "list",
+            "after_sequence": after_sequence,
+        }));
+        assert!(frame_len <= 4 * 1024);
+        assert_eq!(page["ok"], true);
+        sequences.extend(
+            page["snapshot"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["sequence"].as_u64().unwrap()),
+        );
+        after_sequence = page["next_after_sequence"].as_u64();
+        pages += 1;
+        assert!(pages <= 64);
+        if after_sequence.is_none() {
+            break;
+        }
+    }
+
+    let mut expected: Vec<_> = (0..64)
+        .map(|index| (4 - (index % kinds.len()) as u8, index as u64 + 1))
+        .collect();
+    expected.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    assert_eq!(
+        sequences,
+        expected
+            .into_iter()
+            .map(|(_, sequence)| sequence)
+            .collect::<Vec<_>>()
+    );
+
+    let listed = harness.client(&["notify", "list"]);
+    assert!(listed.status.success());
+    assert_eq!(json(&listed)["snapshot"].as_array().unwrap().len(), 64);
 }
 
 #[test]
