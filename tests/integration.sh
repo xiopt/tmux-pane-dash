@@ -33,14 +33,16 @@ T -f /dev/null new-session -d -s alpha -x 120 -y 30
 
 pane="$(T display-message -p -t alpha '#{pane_id}')"
 
-# 1. Plugin setup appends focus entries without taking a user's index.
+# 1. Plugin setup preserves user hooks and upgrades pane-dash hooks in place.
 T set-hook -g 'client-focus-in[31337]' 'display-message user-focus-in'
 T set-hook -g 'client-focus-out[31337]' 'display-message user-focus-out'
+T set-hook -g 'after-select-pane[31337]' 'display-message user-select-pane'
+T set-hook -g 'after-select-pane[31338]' 'run-shell -b "legacy notify hook focus --client #{q:hook_client} --pane #{q:hook_pane}"'
 T set-option -s 'terminal-features[31337]' 'user*:RGB'
-T run-shell "$ROOT/pane_dash.tmux"
 T run-shell "$ROOT/pane_dash.tmux"
 focus_in_hooks="$(T show-hooks -g client-focus-in)"
 focus_out_hooks="$(T show-hooks -g client-focus-out)"
+select_pane_hooks="$(T show-hooks -g after-select-pane)"
 terminal_features="$(T show-options -sv terminal-features)"
 [ "$(printf '%s\n' "$focus_in_hooks" | grep -Fxc 'client-focus-in[31337] display-message user-focus-in')" = "1" ] \
   || fail "plugin replaced user client-focus-in hook"
@@ -50,6 +52,57 @@ terminal_features="$(T show-options -sv terminal-features)"
   || fail "plugin client-focus-in hook count"
 [ "$(printf '%s\n' "$focus_out_hooks" | grep -Fc '@pane_dash_focus_#{hook_client}')" = "1" ] \
   || fail "plugin client-focus-out hook count"
+[ "$(printf '%s\n' "$select_pane_hooks" | grep -Fxc 'after-select-pane[31337] display-message user-select-pane')" = "1" ] \
+  || fail "plugin replaced user after-select-pane hook"
+[ "$(printf '%s\n' "$select_pane_hooks" | grep -Fxc 'after-select-pane[31338] run-shell -b \"legacy notify hook focus --client #{q:hook_client} --pane #{q:hook_pane}\"')" = "0" ] \
+  || fail "legacy pane-dash after-select-pane hook survived"
+[ "$(printf '%s\n' "$select_pane_hooks" | grep -Fc 'after-select-pane[31338]')" = "1" ] \
+  || fail "pane-dash after-select-pane hook was not replaced in place"
+select_pane_owned="$(printf '%s\n' "$select_pane_hooks" | grep -F 'after-select-pane[31338]' || true)"
+case "$select_pane_owned" in
+  *'#{q:client_tty}'*'#{q:pane_id}'*) ;;
+  *) fail "after-select-pane hook did not use generic client/pane formats" ;;
+esac
+case "$select_pane_owned" in
+  *'#{q:hook_client}'*|*'#{q:hook_pane}'*) fail "after-select-pane hook retained authoritative-only formats" ;;
+esac
+for hook in client-focus-in client-focus-out after-select-window client-session-changed client-resized; do
+  hook_lines="$(T show-hooks -g "$hook")"
+  hook_line="$(printf '%s\n' "$hook_lines" | grep -F 'notify hook focus --client' || true)"
+  [ "$(printf '%s\n' "$hook_lines" | grep -Fc 'notify hook focus --client')" = "1" ] \
+    || fail "$hook notification hook count"
+  case "$hook_line" in
+    *'#{q:pane_id}'*'#{q:client_width}'*) ;;
+    *) fail "$hook notification hook missing generic pane/width formats" ;;
+  esac
+  case "$hook" in
+    after-select-window)
+      case "$hook_line" in
+        *'#{q:client_tty}'*'#{q:hook_client}'*) fail "$hook mixed client formats" ;;
+        *'#{q:client_tty}'*) ;;
+        *) fail "$hook did not use generic client format" ;;
+      esac
+      ;;
+    *)
+      case "$hook_line" in
+        *'#{q:hook_client}'*) ;;
+        *) fail "$hook did not use hook client format" ;;
+      esac
+      ;;
+  esac
+done
+pane_exited_hooks="$(T show-hooks -g pane-exited)"
+pane_exited_line="$(printf '%s\n' "$pane_exited_hooks" | grep -F 'notify hook pane-exited' || true)"
+case "$pane_exited_line" in
+  *'#{q:hook_pane}'*) ;;
+  *) fail "pane-exited hook did not use hook pane format" ;;
+esac
+select_pane_hooks_first="$select_pane_hooks"
+T run-shell "$ROOT/pane_dash.tmux"
+select_pane_hooks_second="$(T show-hooks -g after-select-pane)"
+[ "$select_pane_hooks_second" = "$select_pane_hooks_first" ] || fail "plugin reload was not idempotent"
+[ "$(printf '%s\n' "$select_pane_hooks_second" | grep -Fxc 'after-select-pane[31337] display-message user-select-pane')" = "1" ] \
+  || fail "plugin reload changed unrelated after-select-pane hook"
 [ "$(printf '%s\n' "$terminal_features" | grep -Fxc 'user*:RGB')" = "1" ] \
   || fail "plugin replaced user terminal feature"
 [ "$(printf '%s\n' "$terminal_features" | grep -Fxc '*:focus')" = "1" ] \

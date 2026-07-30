@@ -364,8 +364,15 @@ notification_list_has_event() {
   [[ "$(notify_client "$pane" list | perl -MJSON::PP -0777 -e \
     '$value = decode_json(<STDIN>); print scalar grep { $_->{event_id} eq $ARGV[0] } @{$value->{snapshot} // []}' "$event")" == "$expected" ]]
 }
+tmux_hook_failure_count() {
+  admin show-messages -t "$1" 2>/dev/null | grep -Ec 'returned 1|hook.*(failed|returned)' || true
+}
+transcript_has_hook_failure_since() {
+  tail -c "+$2" "${TRANSCRIPTS[$1]}" | grep -aEq 'returned 1|hook.*(failed|returned)'
+}
 notification_scenario() {
   local session session_id origin target exit_target tty status list_tag list_offset list_popup_pid list_control list_exited
+  local selection_offset hook_failures_before hook_failures_after
   session="notify-$RANDOM-$RANDOM"
   list_tag="notification-list-$RANDOM$RANDOM"
   admin new-session -d -s "$session" -x 120 -y 40 'exec cat'
@@ -374,6 +381,7 @@ notification_scenario() {
   target="$(admin split-window -d -P -F '#{pane_id}' -t "$origin" 'exec cat')"
   exit_target="$(admin split-window -d -P -F '#{pane_id}' -t "$origin" 'exec cat')"
   tty="${CLIENT_TTYS[0]}"
+  [[ -n "$tty" && -n "$target" ]] || die 'notification selection identities were empty'
 
   admin switch-client -c "$tty" -t "$session"
   # switch-client deterministically runs the installed client-session-changed
@@ -381,6 +389,22 @@ notification_scenario() {
   sleep .2
   status="$(notify_client "$origin" publish --event-id focused-origin --kind question --message suppressed --pane "$origin")"
   [[ "$status" == *'"outcome":"suppressed"'* ]] || die "focused origin was not suppressed: $status"
+
+  # A real attached-client pane switch must expand the generic client_tty and
+  # pane_id formats supplied by after-select-pane.  The old hook used the
+  # unavailable hook_client/hook_pane formats and left the service focused on
+  # the previous pane while painting a tmux run-shell failure.
+  selection_offset="$(ansi_size 0)"
+  hook_failures_before="$(tmux_hook_failure_count "$tty")"
+  admin select-pane -t "$target"
+  sleep .2
+  status="$(notify_client "$target" publish --event-id focused-target-by-selection --kind question --message suppressed --pane "$target")"
+  [[ "$status" == *'"outcome":"suppressed"'* ]] || die "selected target was not suppressed: $status"
+  admin select-pane -t "$origin"
+  sleep .2
+  hook_failures_after="$(tmux_hook_failure_count "$tty")"
+  [[ "$hook_failures_after" == "$hook_failures_before" ]] || die 'pane selection added a tmux hook failure message'
+  ! transcript_has_hook_failure_since 0 "$((selection_offset + 1))" || die 'pane selection displayed a tmux hook failure message'
 
   notify_client "$origin" publish --event-id finished-oldest --kind finished --message oldest-finished --pane "$target" >/dev/null
   notify_client "$origin" publish --event-id error-oldest --kind error --message oldest-error --pane "$target" >/dev/null

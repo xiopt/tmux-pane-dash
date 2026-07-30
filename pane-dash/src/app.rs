@@ -1793,7 +1793,7 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
         Some(PendingCreationState::AwaitingSnapshot { .. })
     );
     let model_config = state.model_config();
-    let selection = reconcile_snapshot_presence(state, &outcome, &model_config);
+    let selection = reconcile_snapshot_presence(state, &outcome, &model_config, observed_at);
     let verification_expired = expire_creation_verification(state, observed_at);
     let creation_resolved = awaiting_snapshot && state.pending_creation.is_none();
     let model = Model::build_with_ephemeral(
@@ -1862,6 +1862,7 @@ fn reconcile_snapshot_presence(
     state: &mut AppState,
     outcome: &ParseOutcome,
     model_config: &ModelConfig,
+    now: u64,
 ) -> Option<(Option<SessionId>, PaneId)> {
     state.ephemeral_panes.retain(|pane_id| {
         let raw_present = outcome.raw_panes.contains(&pane_id.0);
@@ -1873,7 +1874,7 @@ fn reconcile_snapshot_presence(
         if records.iter().any(|record| !record.pane_dead) {
             return !records
                 .iter()
-                .any(|record| is_discovered(record, model_config));
+                .any(|record| is_discovered(record, model_config, now));
         }
         if raw_present {
             return false;
@@ -1908,7 +1909,7 @@ fn reconcile_snapshot_presence(
         if tag_uncertain
             && !records
                 .iter()
-                .any(|record| is_discovered(record, model_config))
+                .any(|record| is_discovered(record, model_config, now))
         {
             state.ephemeral_panes.insert(pane_id.clone());
         }

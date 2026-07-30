@@ -27,24 +27,29 @@ install_focus_hook() {
   fi
 }
 
-has_notify_hook() {
-  local hooks marker
-  hooks="$(tmux show-hooks -g "$1" 2>/dev/null || true)"
-  marker="$2"
-  case "$hooks" in
-    *"$marker"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 install_notify_hook() {
-  if ! has_notify_hook "$1" "$2"; then
-    tmux set-hook -ag "$1" "$3"
-  fi
+  local hook="$1" marker="$2" command="$3" hooks line indexed index found=0
+  hooks="$(tmux show-hooks -g "$hook" 2>/dev/null || true)"
+  while IFS= read -r line; do
+    case "$line" in
+      "${hook}["*"$marker"*)
+        indexed="${line#"${hook}["}"
+        index="${indexed%%]*}"
+        [[ "$index" =~ ^[0-9]+$ ]] || continue
+        if (( found == 0 )); then
+          tmux set-hook -g "${hook}[${index}]" "$command"
+          found=1
+        else
+          tmux set-hook -gu "${hook}[${index}]"
+        fi
+        ;;
+    esac
+  done <<< "$hooks"
+  (( found != 0 )) || tmux set-hook -ag "$hook" "$command"
 }
 
 notify_hook_command() {
-  printf 'run-shell -b "TMUX=#{q:socket_path},#{q:pid},0 #{q:@pane_dash_notify_binary} %s >/dev/null 2>&1"' "$*"
+  printf 'run-shell -b "TMUX=#{q:socket_path},#{q:pid},0 #{q:@pane_dash_notify_binary} %s >/dev/null 2>&1 || :"' "$*"
 }
 
 has_focus_terminal_feature() {
@@ -80,16 +85,17 @@ if [ -f "$binary" ] && [ -x "$binary" ]; then
 
   focus_in_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
   focus_out_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 0)"
-  active_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
+  select_notify_hook="$(notify_hook_command notify hook focus --client '#{q:client_tty}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
+  client_notify_hook="$(notify_hook_command notify hook focus --client '#{q:hook_client}' --pane '#{q:pane_id}' --width '#{q:client_width}' --focused 1)"
   pane_exited_notify_hook="$(notify_hook_command notify hook pane-exited --pane '#{q:hook_pane}')"
   session_closed_notify_hook="$(notify_hook_command notify hook session-closed)"
 
   install_notify_hook client-focus-in 'notify hook focus --client' "$focus_in_notify_hook"
   install_notify_hook client-focus-out 'notify hook focus --client' "$focus_out_notify_hook"
-  install_notify_hook after-select-pane 'notify hook focus --client' "$active_notify_hook"
-  install_notify_hook after-select-window 'notify hook focus --client' "$active_notify_hook"
-  install_notify_hook client-session-changed 'notify hook focus --client' "$active_notify_hook"
-  install_notify_hook client-resized 'notify hook focus --client' "$active_notify_hook"
+  install_notify_hook after-select-pane 'notify hook focus --client' "$select_notify_hook"
+  install_notify_hook after-select-window 'notify hook focus --client' "$select_notify_hook"
+  install_notify_hook client-session-changed 'notify hook focus --client' "$client_notify_hook"
+  install_notify_hook client-resized 'notify hook focus --client' "$client_notify_hook"
   install_notify_hook pane-exited 'notify hook pane-exited --pane' "$pane_exited_notify_hook"
   install_notify_hook session-closed 'notify hook session-closed' "$session_closed_notify_hook"
 

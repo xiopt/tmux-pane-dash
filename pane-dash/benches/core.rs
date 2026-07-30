@@ -41,7 +41,7 @@ fn snapshot(panes: usize, grouped: bool) -> Vec<u8> {
             index % 4,
             u8::from(index % 4 == 0),
             1_700_000_000_u64 + index as u64,
-            1_700_000_010_u64 + index as u64,
+            1_700_000_050_u64 + index as u64,
             index % 7,
         );
         output.extend_from_slice(record.as_bytes());

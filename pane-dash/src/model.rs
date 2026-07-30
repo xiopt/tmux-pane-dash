@@ -36,6 +36,7 @@ mod tests {
     fn discovers_status_command_or_tagged_records_only() {
         let mut status_only = record();
         status_only.status = "idle".into();
+        status_only.heartbeat = Some(1_000);
         let mut command_only = record();
         command_only.pane_id = "%2".into();
         command_only.pane_current_command = "opencode".into();
@@ -72,9 +73,47 @@ mod tests {
     }
 
     #[test]
+    fn stale_status_only_panes_are_dropped_but_boundary_command_and_tag_exceptions_remain() {
+        let mut boundary = record();
+        boundary.pane_id = "%boundary".into();
+        boundary.status = "unknown".into();
+        boundary.heartbeat = Some(940);
+
+        let mut expired = boundary.clone();
+        expired.pane_id = "%expired".into();
+        expired.pane_current_command = "fish".into();
+        expired.heartbeat = Some(939);
+
+        let mut missing = expired.clone();
+        missing.pane_id = "%missing".into();
+        missing.heartbeat = None;
+
+        let mut command = expired.clone();
+        command.pane_id = "%command".into();
+        command.pane_current_command = "opencode".into();
+
+        let mut tagged = expired.clone();
+        tagged.pane_id = "%tagged".into();
+        tagged.tag = "keep".into();
+
+        let built = Model::build(
+            &[boundary, expired, missing, command, tagged],
+            &ModelConfig::default(),
+            1_000,
+        );
+
+        assert!(built.panes().contains_key(&"%boundary".into()));
+        assert!(built.panes().contains_key(&"%command".into()));
+        assert!(built.panes().contains_key(&"%tagged".into()));
+        assert!(!built.panes().contains_key(&"%expired".into()));
+        assert!(!built.panes().contains_key(&"%missing".into()));
+    }
+
+    #[test]
     fn preserves_linked_pane_memberships_and_last_canonical_facts() {
         let mut first = record();
         first.status = "working".into();
+        first.heartbeat = Some(1_000);
         let mut linked = first.clone();
         linked.session_id = "$2".into();
         linked.session_name = "beta".into();
@@ -175,6 +214,7 @@ mod tests {
         let mut stale = threshold.clone();
         stale.pane_id = "%2".into();
         stale.heartbeat = Some(939);
+        stale.tag = "keep".into();
         let mut garbage = threshold.clone();
         garbage.pane_id = "%3".into();
         garbage.status = "unrecognized".into();
@@ -195,6 +235,7 @@ mod tests {
     fn applies_heartbeat_freshness_only_to_status_publishing_panes() {
         let mut missing_heartbeat = record();
         missing_heartbeat.status = "working".into();
+        missing_heartbeat.tag = "keep".into();
         let mut command_only = record();
         command_only.pane_id = "%2".into();
         command_only.pane_current_command = "opencode".into();
@@ -266,6 +307,9 @@ mod tests {
         same_status_other_session.status_since = Some(30);
         same_status_other_session.heartbeat = Some(1_000);
         items.push(same_status_other_session);
+
+        items[10].tag = "keep".into();
+        items[11].tag = "keep".into();
 
         let input_order = [10, 3, 13, 7, 1, 12, 5, 9, 0, 11, 4, 8, 6, 2];
         let input: Vec<_> = input_order
@@ -511,7 +555,7 @@ impl Model {
         let mut memberships = Vec::new();
 
         for record in records.iter().filter(|record| {
-            is_discovered(record, cfg)
+            is_discovered(record, cfg, now)
                 || (!record.pane_dead && ephemeral.contains(&PaneId(record.pane_id.clone())))
         }) {
             let session_id = SessionId(record.session_id.clone());
@@ -699,8 +743,11 @@ impl Model {
     }
 }
 
-pub fn is_discovered(record: &RawRecord, cfg: &ModelConfig) -> bool {
-    !record.status.is_empty()
+pub fn is_discovered(record: &RawRecord, cfg: &ModelConfig, now: u64) -> bool {
+    (!record.status.is_empty()
+        && record
+            .heartbeat
+            .is_some_and(|heartbeat| now.saturating_sub(heartbeat) <= cfg.stale_secs))
         || record.pane_current_command == cfg.match_pattern
         || !record.tag.is_empty()
 }
