@@ -418,7 +418,7 @@ function insertPlugin(text, plugin, desired) {
   return `${text.slice(0, entry.end)}${insertion}${text.slice(entry.end)}`;
 }
 function planOpenCodeEdit(input) {
-  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.2", text = decoder.decode(input.bytes), plugin = rootPlugin(text);
+  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.5", text = decoder.decode(input.bytes), plugin = rootPlugin(text);
   if (plugin) {
     const managed = plugin.entries.filter((entry) => validPaneDash(entry.value));
     const desiredEntries = managed.filter((entry) => entry.value === desired);
@@ -715,6 +715,9 @@ function tmuxVersion(value) {
   const match = /^tmux\s+(\d+)\.(\d+)(?:\.|[a-z]|\s|$)/.exec(value.trim());
   return !!match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 6);
 }
+function companionPackage(value) {
+  return /^@xiopt\/pane-dash-opencode@(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value);
+}
 async function run(deps, path, args, maxOutputBytes = 8 * 1024) {
   if (!deps.spawn)
     throw new Error("child execution unavailable");
@@ -870,8 +873,8 @@ async function doctor(deps) {
       const owned = ownership?.components.opencode;
       if (!owned)
         throw new Error("OpenCode ownership is missing");
-      const selected = await selectDoctorOpenCodeConfig(fs, deps.env), expected = `@xiopt/pane-dash-opencode@${deps.executingVersion}`;
-      if (selected !== owned.logicalPath || owned.packageEntries.length !== 1 || owned.packageEntries[0] !== expected)
+      const selected = await selectDoctorOpenCodeConfig(fs, deps.env), expected = owned.packageEntries[0];
+      if (selected !== owned.logicalPath || owned.packageEntries.length !== 1 || !expected || !companionPackage(expected))
         throw new Error("OpenCode selection or ownership differs");
       const config = parseJsonc(text.decode(await read(fs, owned.resolvedPath))), entries = config?.plugin;
       if (!Array.isArray(entries) || entries.filter((entry) => entry === expected).length !== 1)

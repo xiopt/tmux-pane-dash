@@ -53,6 +53,7 @@ async function loadOwnership(fs: DoctorFs, installRoot: string): Promise<Ownersh
 }
 function inRoot(installRoot: string, path: string): boolean { const rel = relative(resolve(installRoot), resolve(path)); return rel !== "" && !rel.startsWith("..") && !rel.includes("/../") }
 function tmuxVersion(value: string): boolean { const match = /^tmux\s+(\d+)\.(\d+)(?:\.|[a-z]|\s|$)/.exec(value.trim()); return !!match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 6) }
+function companionPackage(value: string): boolean { return /^@xiopt\/pane-dash-opencode@(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value) }
 async function run(deps: Dependencies, path: string, args: readonly string[], maxOutputBytes = 8 * 1024) { if (!deps.spawn) throw new Error("child execution unavailable"); return deps.spawn(path, args, { timeoutMs: 5_000, env: childEnv(deps.env?.TMUX_TMPDIR), maxOutputBytes }) }
 type TmuxBinding = { action: string }
 function tmuxBindings(output: string): TmuxBinding[] {
@@ -142,8 +143,8 @@ export async function doctor(deps: Dependencies): Promise<DoctorReport> {
     try {
       const owned = ownership?.components.opencode
       if (!owned) throw new Error("OpenCode ownership is missing")
-      const selected = await selectDoctorOpenCodeConfig(fs, deps.env), expected = `@xiopt/pane-dash-opencode@${deps.executingVersion}`
-      if (selected !== owned.logicalPath || owned.packageEntries.length !== 1 || owned.packageEntries[0] !== expected) throw new Error("OpenCode selection or ownership differs")
+      const selected = await selectDoctorOpenCodeConfig(fs, deps.env), expected = owned.packageEntries[0]
+      if (selected !== owned.logicalPath || owned.packageEntries.length !== 1 || !expected || !companionPackage(expected)) throw new Error("OpenCode selection or ownership differs")
        const config = parseJsonc(text.decode(await read(fs, owned.resolvedPath))) as { plugin?: unknown }, entries = config?.plugin
        if (!Array.isArray(entries) || entries.filter((entry: unknown) => entry === expected).length !== 1) throw new Error("OpenCode plugin entries differ")
       checks.push(check("opencode.config", "ok", null, "OpenCode plugin entry matches"))

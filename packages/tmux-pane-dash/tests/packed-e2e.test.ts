@@ -319,7 +319,7 @@ process.on("exit", () => fs.writeFileSync(process.env.PANE_DASH_DENY_NET_OBSERVE
       await cli(runtime, ["update"], newDeps)
 
       const rollbackBaseline = { current: await readlink(join(managed, "current")), configs: await lifecycleConfigState(h.env), ownership: await pathState(join(managed, "state", "ownership.json")), versions: await directoryEntries(join(managed, "versions")) }
-      expect(rollbackBaseline.current).toBe("versions/0.1.2")
+      expect(rollbackBaseline.current).toBe("versions/0.1.3")
       const rollback = { ...oldDeps }
       Object.defineProperty(rollback, "signal", { get: () => readlinkSync(join(managed, "current")) === "versions/0.1.2" ? "TERM" : undefined })
       await expect(cli(runtime, ["setup", "--allow-downgrade"], rollback)).rejects.toThrow("E_SIGNAL_TERM")
@@ -348,7 +348,7 @@ process.on("exit", () => fs.writeFileSync(process.env.PANE_DASH_DENY_NET_OBSERVE
         expect(ownership.components[disabled]).toBeNull()
         expect(Object.keys(ownership.components[enabled]).sort()).toEqual(["baselineBackup", "logicalPath", "marker", "packageEntries", "resolvedPath"])
         expect(await lifecycleConfigState(isolated.env)).not.toEqual(isolated.baseline)
-        expect(await readFile(component === "no-tmux" ? isolated.opencode : isolated.tmux, "utf8")).toContain(component === "no-tmux" ? "@xiopt/pane-dash-opencode@0.1.3" : "tmux-pane-dash")
+        expect(await readFile(component === "no-tmux" ? isolated.opencode : isolated.tmux, "utf8")).toContain(component === "no-tmux" ? "@xiopt/pane-dash-opencode@0.1.2" : "tmux-pane-dash")
         expect(component === "no-tmux" ? await configState(isolated.tmux) : await configState(isolated.opencode)).toEqual(component === "no-tmux" ? isolated.baseline.tmux : isolated.baseline.opencode)
         await cli(runtime, ["uninstall"], deps)
         expect(await lifecycleConfigState(isolated.env)).toEqual(isolated.baseline)
@@ -361,7 +361,7 @@ process.on("exit", () => fs.writeFileSync(process.env.PANE_DASH_DENY_NET_OBSERVE
       expect(await pathState(legacyLink)).toEqual({ present: false }); expect(await readFile(legacyTarget, "utf8")).toBe("export const legacy = true\n")
       const migratedOwnership = JSON.parse(await readFile(join(migration.env.XDG_DATA_HOME, "tmux-pane-dash", "state", "ownership.json"), "utf8"))
       expect(migratedOwnership.migrations).toEqual([{ from: legacyLink, to: await realpath(legacyTarget), sha256: "" }])
-      expect(await readFile(migration.opencode, "utf8")).toContain("@xiopt/pane-dash-opencode@0.1.3")
+      expect(await readFile(migration.opencode, "utf8")).toContain("@xiopt/pane-dash-opencode@0.1.2")
       await assertNoTransactionJournals(join(migration.env.XDG_DATA_HOME, "tmux-pane-dash"))
       await cli(runtime, ["uninstall"], migrationDeps)
       expect(await lifecycleConfigState(migration.env)).toEqual(migration.baseline)

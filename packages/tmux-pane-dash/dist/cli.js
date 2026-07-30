@@ -576,7 +576,7 @@ function insertPlugin(text, plugin, desired) {
   return `${text.slice(0, entry.end)}${insertion}${text.slice(entry.end)}`;
 }
 function planOpenCodeEdit(input) {
-  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.2", text = decoder.decode(input.bytes), plugin = rootPlugin(text);
+  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.5", text = decoder.decode(input.bytes), plugin = rootPlugin(text);
   if (plugin) {
     const managed = plugin.entries.filter((entry) => validPaneDash(entry.value));
     const desiredEntries = managed.filter((entry) => entry.value === desired);
@@ -776,6 +776,9 @@ function tmuxVersion(value) {
   const match = /^tmux\s+(\d+)\.(\d+)(?:\.|[a-z]|\s|$)/.exec(value.trim());
   return !!match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 6);
 }
+function companionPackage(value) {
+  return /^@xiopt\/pane-dash-opencode@(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value);
+}
 async function run(deps, path, args, maxOutputBytes = 8 * 1024) {
   if (!deps.spawn)
     throw new Error("child execution unavailable");
@@ -931,8 +934,8 @@ async function doctor(deps) {
       const owned = ownership?.components.opencode;
       if (!owned)
         throw new Error("OpenCode ownership is missing");
-      const selected = await selectDoctorOpenCodeConfig(fs, deps.env), expected = `@xiopt/pane-dash-opencode@${deps.executingVersion}`;
-      if (selected !== owned.logicalPath || owned.packageEntries.length !== 1 || owned.packageEntries[0] !== expected)
+      const selected = await selectDoctorOpenCodeConfig(fs, deps.env), expected = owned.packageEntries[0];
+      if (selected !== owned.logicalPath || owned.packageEntries.length !== 1 || !expected || !companionPackage(expected))
         throw new Error("OpenCode selection or ownership differs");
       const config = parseJsonc(text.decode(await read(fs, owned.resolvedPath))), entries = config?.plugin;
       if (!Array.isArray(entries) || entries.filter((entry) => entry === expected).length !== 1)
@@ -2240,11 +2243,11 @@ var init_runtime = __esm(() => {
 import process3 from "node:process";
 // packages/tmux-pane-dash/generated/release-manifest.json
 var release_manifest_default = {
-  assets: { "darwin-arm64": { asset: "tmux-pane-dash-v0.1.2-aarch64-apple-darwin.tar.gz", sha256: "22953f09f77a3e604db73d149e2aa6a4f24138e30d47e767d4b44c6a51040c98", size: 878873, target: "aarch64-apple-darwin", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.2/tmux-pane-dash-v0.1.2-aarch64-apple-darwin.tar.gz" }, "darwin-x64": { asset: "tmux-pane-dash-v0.1.2-x86_64-apple-darwin.tar.gz", sha256: "32dceb86277ae99dbf7b17e4629ace2c6448d2dd47d049ab8ae4ca5aa8c80a79", size: 7055, target: "x86_64-apple-darwin", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.2/tmux-pane-dash-v0.1.2-x86_64-apple-darwin.tar.gz" }, "linux-arm64": { asset: "tmux-pane-dash-v0.1.2-aarch64-unknown-linux-musl.tar.gz", sha256: "67ab6a27afa7459bdc4712ddbfda0ea64e14b802a013151af90559dd117daf5e", size: 7050, target: "aarch64-unknown-linux-musl", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.2/tmux-pane-dash-v0.1.2-aarch64-unknown-linux-musl.tar.gz" }, "linux-x64": { asset: "tmux-pane-dash-v0.1.2-x86_64-unknown-linux-musl.tar.gz", sha256: "fe8ad2e445a99016987b0883284fefa11f05fda33bc6d0c83ef2d0365d32c2fc", size: 7052, target: "x86_64-unknown-linux-musl", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.2/tmux-pane-dash-v0.1.2-x86_64-unknown-linux-musl.tar.gz" } },
+  assets: { "darwin-arm64": { asset: "tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz", sha256: "07af1e4eefbadf4250f224cf1868e31e2477c8ce9712b69836c62f1deefb3a9e", size: 1046947, target: "aarch64-apple-darwin", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.5/tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz" }, "darwin-x64": { asset: "tmux-pane-dash-v0.1.5-x86_64-apple-darwin.tar.gz", sha256: "6dfbcade03b11b34af657619e1452cb73be8e9bb80f123eb4160ab280ed631bc", size: 8665, target: "x86_64-apple-darwin", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.5/tmux-pane-dash-v0.1.5-x86_64-apple-darwin.tar.gz" }, "linux-arm64": { asset: "tmux-pane-dash-v0.1.5-aarch64-unknown-linux-musl.tar.gz", sha256: "6761f54f90da3d2e55512b51785600e9c856fcc9be9444352d10a6b456f89c9c", size: 8662, target: "aarch64-unknown-linux-musl", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.5/tmux-pane-dash-v0.1.5-aarch64-unknown-linux-musl.tar.gz" }, "linux-x64": { asset: "tmux-pane-dash-v0.1.5-x86_64-unknown-linux-musl.tar.gz", sha256: "d370a7976458c2402bd9f2e2f86be68a7cbd30bd943e727e60fa9c3400cc514f", size: 8662, target: "x86_64-unknown-linux-musl", url: "https://github.com/xiopt/tmux-pane-dash/releases/download/v0.1.5/tmux-pane-dash-v0.1.5-x86_64-unknown-linux-musl.tar.gz" } },
   repository: "xiopt/tmux-pane-dash",
   schemaVersion: 1,
-  tag: "v0.1.2",
-  version: "0.1.2"
+  tag: "v0.1.5",
+  version: "0.1.5"
 };
 
 // packages/tmux-pane-dash/src/dependencies.ts

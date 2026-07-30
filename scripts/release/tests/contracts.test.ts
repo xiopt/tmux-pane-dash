@@ -13,28 +13,28 @@ import {
   VERSION,
 } from "../contracts"
 
-test("defines the exact v0.1.2 release identities and four target assets", () => {
+test("defines the exact v0.1.5 release identities and four target assets", () => {
   expect({ VERSION, TAG, REPOSITORY }).toEqual({
-    VERSION: "0.1.2",
-    TAG: "v0.1.2",
+    VERSION: "0.1.5",
+    TAG: "v0.1.5",
     REPOSITORY: "xiopt/tmux-pane-dash",
   })
   expect(TARGETS).toEqual({
     "darwin-arm64": {
       rustTarget: "aarch64-apple-darwin",
-      asset: "tmux-pane-dash-v0.1.2-aarch64-apple-darwin.tar.gz",
+      asset: "tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz",
     },
     "darwin-x64": {
       rustTarget: "x86_64-apple-darwin",
-      asset: "tmux-pane-dash-v0.1.2-x86_64-apple-darwin.tar.gz",
+      asset: "tmux-pane-dash-v0.1.5-x86_64-apple-darwin.tar.gz",
     },
     "linux-arm64": {
       rustTarget: "aarch64-unknown-linux-musl",
-      asset: "tmux-pane-dash-v0.1.2-aarch64-unknown-linux-musl.tar.gz",
+      asset: "tmux-pane-dash-v0.1.5-aarch64-unknown-linux-musl.tar.gz",
     },
     "linux-x64": {
       rustTarget: "x86_64-unknown-linux-musl",
-      asset: "tmux-pane-dash-v0.1.2-x86_64-unknown-linux-musl.tar.gz",
+      asset: "tmux-pane-dash-v0.1.5-x86_64-unknown-linux-musl.tar.gz",
     },
   })
 })
@@ -57,7 +57,7 @@ test("defines exact archive and package inventories before consumers", () => {
     "package/dist/cli.js",
     "package/dist/runtime.js",
     "package/generated/release-manifest.json",
-    "package/payload/tmux-pane-dash-v0.1.2-aarch64-apple-darwin.tar.gz",
+    "package/payload/tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz",
   ])
   expect(OPENCODE_PACKAGE_FILES).toEqual([
     "package/package.json",
@@ -66,10 +66,10 @@ test("defines exact archive and package inventories before consumers", () => {
     "package/dist/index.js",
   ])
   expect(RELEASE_ASSETS).toEqual([
-    "tmux-pane-dash-v0.1.2-aarch64-apple-darwin.tar.gz",
-    "tmux-pane-dash-v0.1.2-x86_64-apple-darwin.tar.gz",
-    "tmux-pane-dash-v0.1.2-aarch64-unknown-linux-musl.tar.gz",
-    "tmux-pane-dash-v0.1.2-x86_64-unknown-linux-musl.tar.gz",
+    "tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz",
+    "tmux-pane-dash-v0.1.5-x86_64-apple-darwin.tar.gz",
+    "tmux-pane-dash-v0.1.5-aarch64-unknown-linux-musl.tar.gz",
+    "tmux-pane-dash-v0.1.5-x86_64-unknown-linux-musl.tar.gz",
     "release-manifest.json",
     "SHA256SUMS",
   ])

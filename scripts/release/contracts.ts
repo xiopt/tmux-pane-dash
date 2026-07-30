@@ -1,4 +1,4 @@
-export const VERSION = "0.1.2" as const
+export const VERSION = "0.1.5" as const
 export const TAG = `v${VERSION}` as const
 export const TAG_COMMIT = "d47a37a" as const
 export const REPOSITORY = "xiopt/tmux-pane-dash" as const
@@ -72,7 +72,7 @@ export const CLI_PACKAGE_FILES = [
   "package/dist/cli.js",
   "package/dist/runtime.js",
   "package/generated/release-manifest.json",
-  "package/payload/tmux-pane-dash-v0.1.2-aarch64-apple-darwin.tar.gz",
+  "package/payload/tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz",
 ] as const
 
 export const OPENCODE_PACKAGE_FILES = [

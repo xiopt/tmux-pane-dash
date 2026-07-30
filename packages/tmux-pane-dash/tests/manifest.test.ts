@@ -53,7 +53,7 @@ test("generated package manifest is a canonical immutable four-target manifest",
   expect(bytes).toEqual(Buffer.from(canonicalJson(value)))
   expect(bytes.includes("\r")).toBeFalse()
   expect(Object.keys(value)).toEqual(["assets", "repository", "schemaVersion", "tag", "version"])
-  expect(value).toMatchObject({ schemaVersion: 1, repository: "xiopt/tmux-pane-dash", version: "0.1.2", tag: "v0.1.2" })
+  expect(value).toMatchObject({ schemaVersion: 1, repository: "xiopt/tmux-pane-dash", version: "0.1.5", tag: "v0.1.5" })
   expect(Object.keys(value.assets)).toEqual(Object.keys(targets))
   for (const [key, target] of Object.entries(targets)) {
     const record = value.assets[key]

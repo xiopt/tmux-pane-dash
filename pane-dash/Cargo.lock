@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "pane-dash"
-version = "0.1.2"
+version = "0.1.5"
 dependencies = [
  "ansi-to-tui",
  "anyhow",

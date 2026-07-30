@@ -142,8 +142,8 @@ test("verifier rejects a release tag that no longer resolves to the expected com
 case "$*" in
   'rev-parse d47a37a^{commit}') printf '%s\\n' expected-release-commit ;;
   'show -s --format=%ct expected-release-commit') printf '%s\\n' ${epoch} ;;
-  'rev-parse --verify --quiet refs/tags/v0.1.1') printf '%s\\n' release-tag-ref ;;
-  'rev-parse v0.1.1^{commit}') printf '%s\\n' moved-release-tag ;;
+  'rev-parse --verify --quiet refs/tags/v0.1.5') printf '%s\\n' release-tag-ref ;;
+  'rev-parse v0.1.5^{commit}') printf '%s\\n' moved-release-tag ;;
   *) exit 1 ;;
 esac
 `)
