@@ -20,6 +20,7 @@ struct Harness {
     clients: PathBuf,
     focus: PathBuf,
     status: PathBuf,
+    server_stderr: PathBuf,
     server: Option<Child>,
 }
 
@@ -39,6 +40,7 @@ impl Harness {
         let clients = dir.path().join("clients");
         let focus = dir.path().join("focus");
         let status = dir.path().join("status");
+        let server_stderr = dir.path().join("server.stderr");
         let log = dir.path().join("tmux.log");
         let fake_tmux = dir.path().join("tmux");
         fs::write(
@@ -86,6 +88,7 @@ esac
             clients,
             focus,
             status,
+            server_stderr,
             server: None,
         }
     }
@@ -127,7 +130,7 @@ esac
             .env("TMUX_NOTIFY_STATUS", &self.status)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(fs::File::create(&self.server_stderr).unwrap()))
             .spawn()
             .unwrap();
         self.server = Some(server);
@@ -188,7 +191,7 @@ esac
         (metadata.dev(), metadata.ino())
     }
 
-    fn wait_for_socket_replacement(&self, old_identity: (u64, u64)) {
+    fn wait_for_socket_replacement(&mut self, old_identity: (u64, u64)) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if fs::metadata(&self.socket).is_ok_and(|metadata| {
@@ -196,10 +199,11 @@ esac
             }) {
                 return;
             }
-            assert!(
-                Instant::now() < deadline,
-                "notification service did not replace the socket"
-            );
+            if Instant::now() >= deadline {
+                let status = self.server.as_mut().unwrap().try_wait().unwrap();
+                let stderr = fs::read_to_string(&self.server_stderr).unwrap_or_default();
+                panic!("notification service did not replace the socket; child={status:?}; stderr={stderr}");
+            }
             thread::sleep(Duration::from_millis(5));
         }
     }
