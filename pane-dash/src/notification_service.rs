@@ -142,7 +142,7 @@ mod unix {
     const SOCKET_SUFFIX: &str = ".sock";
     const CLIENT_RETRY: Duration = Duration::from_millis(100);
     const CLIENT_RETRY_STEP: Duration = Duration::from_millis(5);
-    const OWNER_RELEASE_TIMEOUT: Duration = Duration::from_millis(500);
+    const OWNER_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 
     pub(super) fn client_from_environment() -> Result<NotificationClient> {
         Ok(NotificationClient {

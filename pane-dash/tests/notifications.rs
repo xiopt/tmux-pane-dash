@@ -189,7 +189,7 @@ esac
     }
 
     fn wait_for_socket_replacement(&self, old_identity: (u64, u64)) {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if fs::metadata(&self.socket).is_ok_and(|metadata| {
                 metadata.file_type().is_socket() && (metadata.dev(), metadata.ino()) != old_identity
@@ -256,7 +256,7 @@ fn read_frame(stream: &mut UnixStream) -> Vec<u8> {
     }
 }
 
-fn legacy_owner(path: &Path) -> thread::JoinHandle<()> {
+fn legacy_owner(path: &Path, shutdown_delay: Duration) -> thread::JoinHandle<()> {
     let path = path.to_owned();
     let listener = UnixListener::bind(&path).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -281,6 +281,7 @@ fn legacy_owner(path: &Path) -> thread::JoinHandle<()> {
         let (mut shutdown, _) = listener.accept().unwrap();
         let request: Value = serde_json::from_slice(&read_frame(&mut shutdown)).unwrap();
         assert_eq!(request["op"], "shutdown");
+        thread::sleep(shutdown_delay);
         shutdown
             .write_all(b"{\"ok\":true,\"outcome\":\"stopped\"}\n")
             .unwrap();
@@ -440,7 +441,7 @@ fn startup_without_focus_relay_does_not_suppress() {
 #[test]
 fn reachable_version_mismatch_shuts_down_old_owner_before_replacing_socket() {
     let mut harness = Harness::setup(false);
-    let legacy = legacy_owner(&harness.socket);
+    let legacy = legacy_owner(&harness.socket, Duration::from_millis(700));
     let old_identity = harness.socket_identity();
     harness.start_service();
     harness.wait_for_socket_replacement(old_identity);
