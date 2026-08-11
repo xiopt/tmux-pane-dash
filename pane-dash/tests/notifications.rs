@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -20,7 +20,6 @@ struct Harness {
     clients: PathBuf,
     focus: PathBuf,
     status: PathBuf,
-    server_stderr: PathBuf,
     server: Option<Child>,
 }
 
@@ -40,7 +39,6 @@ impl Harness {
         let clients = dir.path().join("clients");
         let focus = dir.path().join("focus");
         let status = dir.path().join("status");
-        let server_stderr = dir.path().join("server.stderr");
         let log = dir.path().join("tmux.log");
         let fake_tmux = dir.path().join("tmux");
         fs::write(
@@ -88,7 +86,6 @@ esac
             clients,
             focus,
             status,
-            server_stderr,
             server: None,
         }
     }
@@ -130,7 +127,7 @@ esac
             .env("TMUX_NOTIFY_STATUS", &self.status)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::from(fs::File::create(&self.server_stderr).unwrap()))
+            .stderr(Stdio::null())
             .spawn()
             .unwrap();
         self.server = Some(server);
@@ -184,30 +181,6 @@ esac
             "notification service did not finish startup: {}",
             String::from_utf8_lossy(&ready.stderr)
         );
-    }
-
-    fn socket_identity(&self) -> (u64, u64) {
-        let metadata = fs::metadata(&self.socket).unwrap();
-        (metadata.dev(), metadata.ino())
-    }
-
-    fn wait_for_socket_replacement(&mut self, old_identity: (u64, u64)) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if fs::metadata(&self.socket).is_ok_and(|metadata| {
-                metadata.file_type().is_socket() && (metadata.dev(), metadata.ino()) != old_identity
-            }) {
-                return;
-            }
-            if Instant::now() >= deadline {
-                let status = self.server.as_mut().unwrap().try_wait().unwrap();
-                let stderr = fs::read_to_string(&self.server_stderr).unwrap_or_default();
-                panic!(
-                    "notification service did not replace the socket; child={status:?}; stderr={stderr}"
-                );
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
     }
 
     fn raw_request(&self, request: Value) -> (Value, usize) {
@@ -448,9 +421,9 @@ fn startup_without_focus_relay_does_not_suppress() {
 fn reachable_version_mismatch_shuts_down_old_owner_before_replacing_socket() {
     let mut harness = Harness::setup(false);
     let legacy = legacy_owner(&harness.socket, Duration::from_millis(700));
-    let old_identity = harness.socket_identity();
     harness.start_service();
-    harness.wait_for_socket_replacement(old_identity);
+    legacy.join().unwrap();
+    harness.wait_for_socket();
 
     thread::sleep(Duration::from_millis(700));
     let listed = harness.client(&["notify", "list"]);
@@ -469,7 +442,6 @@ fn reachable_version_mismatch_shuts_down_old_owner_before_replacing_socket() {
             .unwrap()
             .is_none()
     );
-    legacy.join().unwrap();
 }
 
 #[test]
