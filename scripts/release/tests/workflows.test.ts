@@ -300,7 +300,7 @@ const rustGateCommands = [
 const rustBuildCommands = [
   "make build",
   "test -x bin/pane-dash",
-  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.2"',
+  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.6"',
 ] as const
 
 function assertRustLiveBinaryBuild(workflow: ParsedWorkflow): void {
@@ -513,7 +513,7 @@ const ciCliMuslBuildCommands = [
   "mkdir -p bin",
   `install -m0755 pane-dash/target/${ciCliMuslTarget}/release/pane-dash bin/pane-dash`,
   "test -x bin/pane-dash",
-  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.2"',
+  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.6"',
 ] as const
 
 function assertCiCliMuslFixture(workflow: ParsedWorkflow): void {
