@@ -114,7 +114,7 @@ startup does not run a package-manager operation or access the network.
 ## OpenCode integration
 
 OpenCode integration is optional. The npm setup command adds the exact package
-entry `@xiopt/pane-dash-opencode@0.1.5` to the selected global OpenCode config;
+entry `@xiopt/pane-dash-opencode@0.1.6` to the selected global OpenCode config;
 use `--no-opencode` to skip it. The companion package requires OpenCode >=1.17.20.
 It does not edit a project-local OpenCode configuration file.
 
@@ -171,9 +171,10 @@ the entrypoint.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `@pane-dash-key` | `D` | Dashboard prefix binding |
+| `@pane-dash-key` | `Tab` | Dashboard prefix binding |
 | `@pane-dash-tag-key` | `T` | Tag-toggle prefix binding |
 | `@pane-dash-label-key` | `M` | Typed-label prefix binding |
+| `@pane-dash-notifications-key` | `j` | Notification-list prefix binding |
 | `@pane-dash-width` | `90%` | Popup width; empty uses default |
 | `@pane-dash-height` | `85%` | Popup height; empty uses default |
 | `@pane-dash-match` | `opencode` | Command match for auto-discovery; explicit empty disables command matching |
@@ -195,12 +196,14 @@ the entrypoint.
 
 ## Dashboard keys
 
-The default tmux bindings are `<prefix> D` for the dashboard, `<prefix> T` for
-a manual tag using the current command, and `<prefix> M` for a prompted label.
+The default tmux bindings are `<prefix> Tab` for the dashboard, `<prefix> j` for
+notifications, `<prefix> T` for a manual tag using the current command, and
+`<prefix> M` for a prompted label.
 
 | Key | Action |
 | --- | --- |
-| `<prefix> D` | Open dashboard |
+| `<prefix> Tab` | Open dashboard |
+| `<prefix> j` | Open notifications |
 | `<prefix> T` | Toggle manual tag using the current command as label |
 | `<prefix> M` | Prompt for and set a manual label |
 | `j` / `k`, `Down` / `Up` | Move down/up |

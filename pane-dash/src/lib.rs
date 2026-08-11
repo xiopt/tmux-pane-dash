@@ -8,6 +8,7 @@ pub mod model;
 pub mod notification_service;
 pub mod notification_ui;
 pub mod notifications;
+pub mod opencode;
 pub mod options;
 pub mod palette;
 pub mod preview;

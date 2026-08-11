@@ -14,7 +14,7 @@ use tokio::time::Instant;
 use crate::creation::{CreationError, ValidatedCwd};
 use crate::model::PaneId;
 
-pub const SNAPSHOT_FORMAT: &str = "\x1e#{session_id}\x1f#{session_name}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_dead}\x1f#{@pane_dash_status}\x1f#{@pane_dash_status_since}\x1f#{@pane_dash_heartbeat}\x1f#{@pane_dash_title}\x1f#{@pane_dash_model}\x1f#{@pane_dash_tag}\x1f#{@pane_dash_group}";
+pub const SNAPSHOT_FORMAT: &str = "\x1e#{session_id}\x1f#{session_name}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_dead}\x1f#{@pane_dash_status}\x1f#{@pane_dash_status_since}\x1f#{@pane_dash_heartbeat}\x1f#{@pane_dash_title}\x1f#{@pane_dash_model}\x1f#{@pane_dash_opencode_session}\x1f#{@pane_dash_tag}\x1f#{@pane_dash_group}";
 pub const NOTIFICATION_TARGET_FORMAT: &str = "#{pane_id}\x1f#{session_id}\x1f#{window_id}";
 pub const NOTIFICATION_CLIENT_FORMAT: &str = "#{client_tty}\x1f#{client_activity}\x1f#{pane_id}\x1f#{client_width}\x1f#{client_control_mode}";
 

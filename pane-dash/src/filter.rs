@@ -23,40 +23,56 @@ pub fn ranked_row_indices(model: &Model, grouped: bool, query: &str) -> Vec<usiz
         .iter()
         .enumerate()
         .filter_map(|(row_index, row)| {
-            let Row::Pane {
-                session_id,
-                window_id,
-                pane_id,
-                command,
-                path,
-                title,
-                model: model_name,
-                tag,
-                status,
-                ..
-            } = row
-            else {
-                return None;
+            let haystack = match row {
+                Row::Pane {
+                    session_id,
+                    window_id,
+                    pane_id,
+                    command,
+                    path,
+                    title,
+                    model: model_name,
+                    tag,
+                    status,
+                    ..
+                } => {
+                    let session = &model.sessions()[session_id];
+                    let window = &model.windows()[window_id];
+                    let label = if !title.is_empty() {
+                        title
+                    } else if !tag.is_empty() {
+                        tag
+                    } else {
+                        command
+                    };
+                    format!(
+                        "{} {} {} {} {} {} {}",
+                        session.name,
+                        window.name,
+                        label,
+                        path,
+                        model_name,
+                        status_text(*status),
+                        pane_id.0
+                    )
+                }
+                Row::Headless {
+                    session_id,
+                    title,
+                    directory,
+                    model,
+                    status,
+                    ..
+                } => format!(
+                    "kimaki {} {} {} {} {}",
+                    session_id.0,
+                    title,
+                    directory,
+                    model,
+                    status_text(*status)
+                ),
+                Row::SessionHeader { .. } | Row::HeadlessHeader { .. } => return None,
             };
-            let session = &model.sessions()[session_id];
-            let window = &model.windows()[window_id];
-            let label = if !title.is_empty() {
-                title
-            } else if !tag.is_empty() {
-                tag
-            } else {
-                command
-            };
-            let haystack = format!(
-                "{} {} {} {} {} {} {}",
-                session.name,
-                window.name,
-                label,
-                path,
-                model_name,
-                status_text(*status),
-                pane_id.0
-            );
             pattern
                 .score(Utf32Str::new(&haystack, &mut utf32_buf), &mut matcher)
                 .map(|score| (row_index, score, row_index))
@@ -73,20 +89,23 @@ pub fn ranked_row_indices(model: &Model, grouped: bool, query: &str) -> Vec<usiz
 
     let mut indices = Vec::new();
     for (header_index, header) in rows.iter().enumerate() {
-        let Row::SessionHeader { session_id, .. } = header else {
-            continue;
+        let same_group = |row: &Row| match (header, row) {
+            (
+                Row::SessionHeader { session_id, .. },
+                Row::Pane {
+                    session_id: pane_session_id,
+                    ..
+                },
+            ) => pane_session_id == session_id,
+            (Row::HeadlessHeader { .. }, Row::Headless { .. }) => true,
+            _ => false,
         };
         // `matches` is globally sorted by descending score and native row order, and filtering
         // preserves that order for each session's subset.
         let session_matches = matches
             .iter()
             .copied()
-            .filter(|(row_index, _, _)| {
-                matches!(
-                    &rows[*row_index],
-                    Row::Pane { session_id: pane_session_id, .. } if pane_session_id == session_id
-                )
-            })
+            .filter(|(row_index, _, _)| same_group(&rows[*row_index]))
             .collect::<Vec<_>>();
         if session_matches.is_empty() {
             continue;
@@ -120,7 +139,7 @@ fn status_text(status: Status) -> &'static str {
 mod tests {
     use super::ranked_row_indices;
     use crate::{
-        model::{Model, ModelConfig, Row},
+        model::{HeadlessRecord, HeadlessSessionId, Model, ModelConfig, Row, Status},
         snapshot::RawRecord,
     };
 
@@ -372,6 +391,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn headless_rows_filter_by_exact_api_metadata_and_keep_kimaki_header() {
+        let model = model(vec![]).replace_headless(&[HeadlessRecord {
+            source_url: "http://127.0.0.1:53550".into(),
+            session_id: HeadlessSessionId::from("ses_exact"),
+            title: "Deploy worker".into(),
+            directory: "/work/backend".into(),
+            model: "gpt-test".into(),
+            status: Status::NeedsInput,
+            status_since: Some(1),
+        }]);
+
+        for query in [
+            "kimaki",
+            "ses_exact",
+            "Deploy",
+            "backend",
+            "gpt-test",
+            "needs_input",
+        ] {
+            let indices = ranked_row_indices(&model, true, query);
+            assert_eq!(indices, vec![0, 1], "query: {query}");
+        }
+        assert!(ranked_row_indices(&model, true, "missing").is_empty());
+    }
+
     fn model(records: Vec<RawRecord>) -> Model {
         Model::build(&records, &ModelConfig::default(), 1_000)
     }
@@ -405,6 +450,7 @@ mod tests {
             heartbeat: Some(1_000),
             title: title.into(),
             model: model.into(),
+            opencode_session: String::new(),
             tag: tag.into(),
             group: "0".into(),
         }
@@ -423,7 +469,9 @@ mod tests {
             .iter()
             .filter_map(|&index| match &rows[index] {
                 Row::Pane { pane_id, .. } => Some(pane_id.0.as_str()),
-                Row::SessionHeader { .. } => None,
+                Row::SessionHeader { .. } | Row::HeadlessHeader { .. } | Row::Headless { .. } => {
+                    None
+                }
             })
             .collect()
     }

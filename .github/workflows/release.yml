@@ -85,19 +85,19 @@ jobs:
           - target: darwin-arm64
             runner: macos-14
             rust_target: aarch64-apple-darwin
-            asset: tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz
+            asset: tmux-pane-dash-v0.1.6-aarch64-apple-darwin.tar.gz
           - target: darwin-x64
             runner: macos-15-intel
             rust_target: x86_64-apple-darwin
-            asset: tmux-pane-dash-v0.1.5-x86_64-apple-darwin.tar.gz
+            asset: tmux-pane-dash-v0.1.6-x86_64-apple-darwin.tar.gz
           - target: linux-arm64
             runner: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-musl
-            asset: tmux-pane-dash-v0.1.5-aarch64-unknown-linux-musl.tar.gz
+            asset: tmux-pane-dash-v0.1.6-aarch64-unknown-linux-musl.tar.gz
           - target: linux-x64
             runner: ubuntu-24.04
             rust_target: x86_64-unknown-linux-musl
-            asset: tmux-pane-dash-v0.1.5-x86_64-unknown-linux-musl.tar.gz
+            asset: tmux-pane-dash-v0.1.6-x86_64-unknown-linux-musl.tar.gz
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -177,10 +177,10 @@ jobs:
           handoff_dir="$RUNNER_TEMP/verified-handoff"
           mkdir -p "$release_dir" "$npm_dir" "$handoff_dir"
           for asset in \
-            tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz \
-            tmux-pane-dash-v0.1.5-x86_64-apple-darwin.tar.gz \
-            tmux-pane-dash-v0.1.5-aarch64-unknown-linux-musl.tar.gz \
-            tmux-pane-dash-v0.1.5-x86_64-unknown-linux-musl.tar.gz; do
+            tmux-pane-dash-v0.1.6-aarch64-apple-darwin.tar.gz \
+            tmux-pane-dash-v0.1.6-x86_64-apple-darwin.tar.gz \
+            tmux-pane-dash-v0.1.6-aarch64-unknown-linux-musl.tar.gz \
+            tmux-pane-dash-v0.1.6-x86_64-unknown-linux-musl.tar.gz; do
             test -f "$RUNNER_TEMP/target-archives/$asset"
             cp -n "$RUNNER_TEMP/target-archives/$asset" "$release_dir/$asset"
           done
@@ -203,9 +203,9 @@ jobs:
           const release = process.env.RUNNER_TEMP + "/release";
           const npm = process.env.RUNNER_TEMP + "/npm";
           const packageFiles = readdirSync(npm).filter((name) => name.endsWith(".tgz")).sort();
-          const expectedPackages = ["xiopt-pane-dash-opencode-0.1.5.tgz", "xiopt-tmux-pane-dash-0.1.5.tgz"];
+          const expectedPackages = ["xiopt-pane-dash-opencode-0.1.6.tgz", "xiopt-tmux-pane-dash-0.1.6.tgz"];
           if (JSON.stringify(packageFiles) !== JSON.stringify(expectedPackages)) throw new Error("npm package inventory is not exact");
-          const assets = ["tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.5-x86_64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.5-aarch64-unknown-linux-musl.tar.gz", "tmux-pane-dash-v0.1.5-x86_64-unknown-linux-musl.tar.gz", "release-manifest.json", "SHA256SUMS"];
+          const assets = ["tmux-pane-dash-v0.1.6-aarch64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.6-x86_64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.6-aarch64-unknown-linux-musl.tar.gz", "tmux-pane-dash-v0.1.6-x86_64-unknown-linux-musl.tar.gz", "release-manifest.json", "SHA256SUMS"];
           if (readdirSync(release).sort().join(",") !== assets.slice().sort().join(",")) throw new Error("release asset inventory is not exact");
           const releaseAssets = Object.fromEntries(assets.map((name) => [name, hash("sha256", join(release, name))]));
            const packageInventory = { "@xiopt/pane-dash-opencode": { filename: expectedPackages[0], integrity: integrity(join(npm, expectedPackages[0])) }, "@xiopt/tmux-pane-dash": { filename: expectedPackages[1], integrity: integrity(join(npm, expectedPackages[1])) } };
@@ -277,7 +277,7 @@ jobs:
           const handoff = JSON.parse(readFileSync(process.argv[2], "utf8"));
           const release = process.env.RUNNER_TEMP + "/release";
           const assets = Object.keys(handoff.releaseAssets).sort();
-          const expected = ["SHA256SUMS", "release-manifest.json", "tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.5-aarch64-unknown-linux-musl.tar.gz", "tmux-pane-dash-v0.1.5-x86_64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.5-x86_64-unknown-linux-musl.tar.gz"];
+          const expected = ["SHA256SUMS", "release-manifest.json", "tmux-pane-dash-v0.1.6-aarch64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.6-aarch64-unknown-linux-musl.tar.gz", "tmux-pane-dash-v0.1.6-x86_64-apple-darwin.tar.gz", "tmux-pane-dash-v0.1.6-x86_64-unknown-linux-musl.tar.gz"];
           if (JSON.stringify(assets) !== JSON.stringify(expected)) throw new Error("handoff asset inventory is not exact");
           for (const asset of expected) { const bytes = readFileSync(join(release, asset)); if (createHash("sha256").update(bytes).digest("hex") !== handoff.releaseAssets[asset]) throw new Error(`asset handoff mismatch: ${asset}`); }
           NODE
@@ -350,18 +350,18 @@ jobs:
           const draft = process.env.RUNNER_TEMP + "/draft";
           const npm = process.env.RUNNER_TEMP + "/npm";
           const packageFiles = Object.values(handoff.npm).map((entry) => entry.filename).sort();
-          if (JSON.stringify(packageFiles) !== JSON.stringify(["xiopt-pane-dash-opencode-0.1.5.tgz", "xiopt-tmux-pane-dash-0.1.5.tgz"])) throw new Error("handoff npm inventory is not exact");
+          if (JSON.stringify(packageFiles) !== JSON.stringify(["xiopt-pane-dash-opencode-0.1.6.tgz", "xiopt-tmux-pane-dash-0.1.6.tgz"])) throw new Error("handoff npm inventory is not exact");
           for (const entry of Object.values(handoff.npm)) { const bytes = readFileSync(join(npm, entry.filename)); const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`; if (integrity !== entry.integrity) throw new Error(`npm handoff mismatch: ${entry.filename}`); }
           for (const [asset, expected] of Object.entries(handoff.releaseAssets)) if (createHash("sha256").update(readFileSync(join(draft, asset))).digest("hex") !== expected) throw new Error(`draft hash mismatch: ${asset}`);
           const manifest = JSON.parse(readFileSync(join(draft, "release-manifest.json"), "utf8"));
-          if (manifest.version !== "0.1.5" || manifest.tag !== "v0.1.5" || Object.keys(manifest.assets).sort().join(",") !== "darwin-arm64,darwin-x64,linux-arm64,linux-x64") throw new Error("version/architecture inventory mismatch");
+          if (manifest.version !== "0.1.6" || manifest.tag !== "v0.1.6" || Object.keys(manifest.assets).sort().join(",") !== "darwin-arm64,darwin-x64,linux-arm64,linux-x64") throw new Error("version/architecture inventory mismatch");
           NODE
           bun scripts/release/verify-artifacts.ts "$RUNNER_TEMP/draft" --tag-commit "$GITHUB_SHA"
            attestation_assets=(
-              "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz"
-              "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.5-x86_64-apple-darwin.tar.gz"
-              "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.5-aarch64-unknown-linux-musl.tar.gz"
-              "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.5-x86_64-unknown-linux-musl.tar.gz"
+              "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.6-aarch64-apple-darwin.tar.gz"
+              "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.6-x86_64-apple-darwin.tar.gz"
+              "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.6-aarch64-unknown-linux-musl.tar.gz"
+              "$RUNNER_TEMP/draft/tmux-pane-dash-v0.1.6-x86_64-unknown-linux-musl.tar.gz"
              "$RUNNER_TEMP/draft/release-manifest.json"
              "$RUNNER_TEMP/draft/SHA256SUMS"
            )
@@ -370,7 +370,7 @@ jobs:
              gh attestation verify "$asset" \
                --repo "$GITHUB_REPOSITORY" \
                --signer-workflow xiopt/tmux-pane-dash/.github/workflows/release.yml \
-                --source-ref refs/tags/v0.1.5 \
+                --source-ref refs/tags/v0.1.6 \
                --source-digest "$GITHUB_SHA" \
                --signer-digest "$GITHUB_SHA"
            done
@@ -458,22 +458,22 @@ jobs:
           import { join } from "node:path";
           const handoff = JSON.parse(readFileSync(process.argv[2], "utf8"));
           const npm = process.env.RUNNER_TEMP + "/npm";
-          const expected = ["xiopt-pane-dash-opencode-0.1.5.tgz", "xiopt-tmux-pane-dash-0.1.5.tgz"];
+          const expected = ["xiopt-pane-dash-opencode-0.1.6.tgz", "xiopt-tmux-pane-dash-0.1.6.tgz"];
           if (Object.values(handoff.npm).map((entry) => entry.filename).sort().join(",") !== expected.join(",")) throw new Error("npm handoff inventory is not exact");
           for (const entry of Object.values(handoff.npm)) { const bytes = readFileSync(join(npm, entry.filename)); if (`sha512-${createHash("sha512").update(bytes).digest("base64")}` !== entry.integrity) throw new Error(`npm handoff hash mismatch: ${entry.filename}`); }
           NODE
            test -n "${NPM_TRUSTED_PUBLISHER_BINDING:?NPM_TRUSTED_PUBLISHER_BINDING is required}"
            test "$NPM_TRUSTED_PUBLISHER_BINDING" = "$NPM_TRUSTED_PUBLISHER_EXPECTED"
-            npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.5.tgz" --access public --provenance
-            npm publish "$RUNNER_TEMP/npm/xiopt-tmux-pane-dash-0.1.5.tgz" --access public --provenance
+            npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.6.tgz" --access public --provenance
+            npm publish "$RUNNER_TEMP/npm/xiopt-tmux-pane-dash-0.1.6.tgz" --access public --provenance
            audit_dir="$RUNNER_TEMP/npm-audit"
            mkdir -p "$audit_dir" "$RUNNER_TEMP/npm-audit-cache"
            printf '%s\n' 'registry=https://registry.npmjs.org/' 'audit=false' 'fund=false' > "$audit_dir/.npmrc"
            printf '%s\n' '{"name":"task14-npm-signature-audit","private":true}' > "$audit_dir/package.json"
-            npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm install --prefix "$audit_dir" --ignore-scripts --no-audit --no-fund --package-lock=false @xiopt/pane-dash-opencode@0.1.5 @xiopt/tmux-pane-dash@0.1.5
+            npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm install --prefix "$audit_dir" --ignore-scripts --no-audit --no-fund --package-lock=false @xiopt/pane-dash-opencode@0.1.6 @xiopt/tmux-pane-dash@0.1.6
            npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm audit signatures --prefix "$audit_dir"
-          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/pane-dash-opencode --version 0.1.5 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.5
-          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/tmux-pane-dash --version 0.1.5 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.5
+          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/pane-dash-opencode --version 0.1.6 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.6
+          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/tmux-pane-dash --version 0.1.6 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.6
 
   promote-release:
     needs: npm-production
@@ -515,8 +515,8 @@ jobs:
           export NODE_24_BIN="$(command -v node)"
           export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
           export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
-          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/pane-dash-opencode --version 0.1.5 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.5
-          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/tmux-pane-dash --version 0.1.5 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.5
+          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/pane-dash-opencode --version 0.1.6 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.6
+          "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/tmux-pane-dash --version 0.1.6 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.6
       - name: Prove the active approved release-promotion deployment
         shell: bash
         run: |

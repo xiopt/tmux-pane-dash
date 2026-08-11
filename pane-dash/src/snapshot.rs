@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 const RS: u8 = 0x1e;
 const US: u8 = 0x1f;
-const FIELD_COUNT: usize = 18;
+const FIELD_COUNT: usize = 19;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawRecord {
@@ -22,6 +22,7 @@ pub struct RawRecord {
     pub heartbeat: Option<u64>,
     pub title: String,
     pub model: String,
+    pub opencode_session: String,
     pub tag: String,
     pub group: String,
 }
@@ -132,8 +133,9 @@ fn parse_record(record: &[u8]) -> Option<RawRecord> {
         heartbeat: parse_optional_u64(fields[13])?,
         title: decode(fields[14]),
         model: decode(fields[15]),
-        tag: decode(fields[16]),
-        group: decode(fields[17]),
+        opencode_session: decode(fields[16]),
+        tag: decode(fields[17]),
+        group: decode(fields[18]),
     })
 }
 
@@ -186,6 +188,7 @@ mod tests {
             "1700000001",
             "Task title",
             "model",
+            "ses_exact",
             "tag",
             "1",
         ]
@@ -221,6 +224,7 @@ mod tests {
         assert!(!outcome.records[2].pane_dead);
         assert_eq!(outcome.records[2].status_since, Some(1_700_000_000));
         assert_eq!(outcome.records[2].heartbeat, Some(1_700_000_001));
+        assert_eq!(outcome.records[2].opencode_session, "ses_exact");
     }
 
     #[test]
@@ -228,7 +232,7 @@ mod tests {
         let mut undiscovered = fields("undiscovered");
         undiscovered[5] = b"%undiscovered".to_vec();
         undiscovered[8] = b"shell".to_vec();
-        for field in &mut undiscovered[11..17] {
+        for field in &mut undiscovered[11..18] {
             field.clear();
         }
         let mut linked = undiscovered.clone();
@@ -297,9 +301,9 @@ mod tests {
     #[test]
     fn strips_tmux_row_lf_without_changing_empty_final_fields() {
         let mut empty_group = fields("empty-group");
-        empty_group[17].clear();
+        empty_group[18].clear();
         let mut zero_group = fields("zero-group");
-        zero_group[17] = b"0".to_vec();
+        zero_group[18] = b"0".to_vec();
 
         let mut bytes = record(&empty_group);
         bytes.push(b'\n');
@@ -317,7 +321,7 @@ mod tests {
     #[test]
     fn drops_records_with_newline_continuations_in_any_field() {
         let mut bytes = Vec::new();
-        for field_index in [0, 8, 17] {
+        for field_index in [0, 8, 18] {
             let mut values = fields("valid");
             values[field_index].extend(b"\ncontinuation");
             bytes.extend(record(&values));
@@ -344,7 +348,7 @@ mod tests {
     #[test]
     fn drops_records_with_us_in_first_middle_or_final_field() {
         let mut bytes = Vec::new();
-        for field_index in [0, 8, 17] {
+        for field_index in [0, 8, 18] {
             let mut values = fields("valid");
             values[field_index].extend([US, b'x']);
             bytes.extend(record(&values));

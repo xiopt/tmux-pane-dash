@@ -76,7 +76,7 @@ function defaultStdout(argv: readonly string[]): string {
   if (command.includes("readelf -l")) return "\n"
   if (command.includes("readelf -d")) return "\n"
   if (command.includes("ldd /work/")) return "\tnot a dynamic executable\n"
-  if (command.includes("--version")) return "pane-dash 0.1.5\n"
+  if (command.includes("--version")) return "pane-dash 0.1.6\n"
   if (command.includes("tmux -V")) return "tmux 3.6\n"
   if (command.includes("timeout 20")) return "pane-dash coldframe_ms=1.000\n"
   return ""
@@ -111,11 +111,11 @@ test("reads an absolute OpenCode binary through the bounded process seam", async
 })
 
 test.skipIf(process.platform !== "darwin")("observes the exact scoped OpenCode plugin spec with npm-package-arg", async () => {
-  await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.5")).resolves.toEqual({
+  await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.6")).resolves.toEqual({
     name: "@xiopt/pane-dash-opencode",
-    rawSpec: "0.1.5",
+    rawSpec: "0.1.6",
   })
-  for (const invalid of ["pane-dash-opencode@0.1.5", "@xiopt/pane-dash-opencode", "@xiopt/pane-dash-opencode@v0.1.5", "@xiopt/pane-dash-opencode@0.1"]) {
+  for (const invalid of ["pane-dash-opencode@0.1.6", "@xiopt/pane-dash-opencode", "@xiopt/pane-dash-opencode@v0.1.6", "@xiopt/pane-dash-opencode@0.1"]) {
     await expect(observeOpenCodePluginSpec(invalid)).rejects.toThrow("exact scoped package")
   }
 })
@@ -126,9 +126,9 @@ test.skipIf(process.platform !== "darwin")("keeps the validated parser root when
   await mkdir(cleanTmp)
   process.env.TMPDIR = cleanTmp
   try {
-    await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.5")).resolves.toEqual({
+    await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.6")).resolves.toEqual({
       name: "@xiopt/pane-dash-opencode",
-      rawSpec: "0.1.5",
+      rawSpec: "0.1.6",
     })
   } finally {
     if (previousTmpdir === undefined) delete process.env.TMPDIR
@@ -140,7 +140,7 @@ test("refuses an unvalidated ambient npm-package-arg root", async () => {
   const previous = process.env.PANE_DASH_NPA_ROOT
   process.env.PANE_DASH_NPA_ROOT = "/not-a-validated-npa-root"
   try {
-    await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.5")).rejects.toThrow("PANE_DASH_NPA_ROOT")
+    await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.6")).rejects.toThrow("PANE_DASH_NPA_ROOT")
   } finally {
     if (previous === undefined) delete process.env.PANE_DASH_NPA_ROOT
     else process.env.PANE_DASH_NPA_ROOT = previous
@@ -158,15 +158,15 @@ test("fails closed when the Seatbelt parser returns malformed or noncanonical pa
   process.env.PANE_DASH_NPA_TMP_PREFIX = root
   try {
     await writeFile(join(packageRoot, "index.js"), "module.exports = () => { throw new Error('malformed parser fixture') }")
-    await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.5")).rejects.toThrow()
+    await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.6")).rejects.toThrow()
     for (const { version, parsed } of [
-      { version: "13.0.1", parsed: { name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.5" } },
-      { version: "13.0.2", parsed: { name: "wrong", rawSpec: "0.1.5" } },
+      { version: "13.0.1", parsed: { name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.6" } },
+      { version: "13.0.2", parsed: { name: "wrong", rawSpec: "0.1.6" } },
       { version: "13.0.2", parsed: { name: "@xiopt/pane-dash-opencode", rawSpec: "latest" } },
     ]) {
       await writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "npm-package-arg", version }))
       await writeFile(join(packageRoot, "index.js"), `module.exports = () => (${JSON.stringify(parsed)});`)
-      await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.5")).rejects.toThrow()
+      await expect(observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.6")).rejects.toThrow()
     }
   } finally {
     if (previous === undefined) delete process.env.PANE_DASH_NPA_ROOT
@@ -198,8 +198,8 @@ test.skipIf(process.platform !== "darwin")("observeOpenCodePluginSpec launches p
   process.env.PANE_DASH_NPA_TMP_PREFIX = physicalRoot
   try {
     // This must run through /usr/bin/sandbox-exec -f <profile>
-    const result = await observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.5")
-    expect(result).toEqual({ name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.5" })
+    const result = await observeOpenCodePluginSpec("@xiopt/pane-dash-opencode@0.1.6")
+    expect(result).toEqual({ name: "@xiopt/pane-dash-opencode", rawSpec: "0.1.6" })
     // The profile file is cleaned up, but the call must have used sandbox-exec
     // Verify no stale profile files remain
     const { readdir } = await import("node:fs/promises")
@@ -219,7 +219,7 @@ test("accepts only the local companion and scoped-plugin registry inventory", ()
     "/@opencode-ai%2fplugin",
     "/@xiopt%2fpane-dash-opencode",
     "/%40opencode-ai%2Fplugin/-/plugin-1.17.20.tgz",
-    "/%40xiopt%2Fpane-dash-opencode/-/pane-dash-opencode-0.1.5.tgz",
+    "/%40xiopt%2Fpane-dash-opencode/-/pane-dash-opencode-0.1.6.tgz",
   ], origin)).not.toThrow()
   expect(() => assertOpenCodeRegistryRequests(["/@xiopt%2fpane-dash-opencode", "/unexpected"], origin)).toThrow("unexpected local registry request")
 })
@@ -251,14 +251,14 @@ test("requires an absolute tmux binary and embeds it in the cleanup wrapper", ()
 test("requires the exact normative OpenCode fixture metadata and tarball inventory", () => {
   const packageJson = {
     name: "@xiopt/pane-dash-opencode",
-    version: "0.1.5",
+    version: "0.1.6",
     type: "module",
     main: "./dist/index.js",
     engines: { opencode: ">=1.17.20" },
-    exports: { ".": "./dist/index.js", "./server": "./dist/index.js" },
-    files: ["dist/index.js", "README.md", "LICENSE"],
+    exports: { ".": "./dist/index.js", "./server": "./dist/index.js", "./tui": "./dist/tui.js" },
+    files: ["dist/index.js", "dist/tui.js", "README.md", "LICENSE"],
   }
-  const inventory = ["package/package.json", "package/README.md", "package/LICENSE", "package/dist/index.js"]
+  const inventory = ["package/package.json", "package/README.md", "package/LICENSE", "package/dist/index.js", "package/dist/tui.js"]
   expect(() => assertExactPackageFixture(packageJson, inventory, "opencode")).not.toThrow()
   for (const [field, value] of Object.entries({
     main: "./index.js",

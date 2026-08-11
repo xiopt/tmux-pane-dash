@@ -1,11 +1,11 @@
 {
   "name": "@xiopt/tmux-pane-dash",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "macOS arm64 installer for tmux-pane-dash",
   "type": "module",
   "engines": { "node": ">=20" },
   "bin": { "tmux-pane-dash": "dist/cli.js" },
-  "files": ["dist/cli.js", "dist/runtime.js", "generated/release-manifest.json", "payload/tmux-pane-dash-v0.1.5-aarch64-apple-darwin.tar.gz", "README.md", "LICENSE"],
+  "files": ["dist/cli.js", "dist/runtime.js", "generated/release-manifest.json", "payload/tmux-pane-dash-v0.1.6-aarch64-apple-darwin.tar.gz", "README.md", "LICENSE"],
   "repository": { "type": "git", "url": "git+https://github.com/xiopt/tmux-pane-dash.git" },
   "homepage": "https://github.com/xiopt/tmux-pane-dash#readme",
   "bugs": { "url": "https://github.com/xiopt/tmux-pane-dash/issues" },

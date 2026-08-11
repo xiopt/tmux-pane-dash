@@ -63,9 +63,10 @@ EOF
   return 1
 }
 
-dash_key="$(get_opt @pane-dash-key D)"
+dash_key="$(get_opt @pane-dash-key Tab)"
 tag_key="$(get_opt @pane-dash-tag-key T)"
 label_key="$(get_opt @pane-dash-label-key M)"
+notifications_key="$(get_opt @pane-dash-notifications-key j)"
 
 install_focus_hook client-focus-in 'set-option -gF "@pane_dash_focus_#{hook_client}" "1"'
 install_focus_hook client-focus-out 'set-option -gF "@pane_dash_focus_#{hook_client}" "0"'
@@ -112,6 +113,9 @@ if [ -f "$binary" ] && [ -x "$binary" ]; then
 
   tmux bind-key "$dash_key" run-shell \
     "$(shell_quote "$DIR/scripts/open.sh") $(shell_quote "$binary") '#{client_tty}' '#{session_id}' '#{pane_id}'"
+
+  tmux bind-key "$notifications_key" run-shell \
+    "$open_script --notification-list $(shell_quote "$binary") '#{client_tty}' '#{session_id}' '#{pane_id}'"
 else
   tmux display-message "pane-dash: Rust binary unavailable; run 'make build' in the tmux-pane-dash directory"
 fi

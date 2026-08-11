@@ -9,7 +9,10 @@ use crate::creation::{
     build_request, display_error,
 };
 use crate::filter::ranked_row_indices;
-use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, WindowId, is_discovered};
+use crate::model::{
+    HeadlessRecord, HeadlessSessionId, Model, ModelConfig, PaneId, Row, SessionId, WindowId,
+    is_discovered,
+};
 use crate::options::DashConfig;
 use crate::preview::PreviewFrame;
 use crate::snapshot::ParseOutcome;
@@ -48,6 +51,12 @@ pub enum Action {
     },
     KillPane {
         pane_id: PaneId,
+    },
+    AttachHeadless {
+        id: CreationId,
+        source_url: String,
+        directory: String,
+        session_id: HeadlessSessionId,
     },
     StartCreation {
         id: CreationId,
@@ -219,6 +228,10 @@ pub enum Event {
         outcome: ActionOutcome,
     },
     CreationProgress(CreationProgress),
+    HeadlessSnapshot {
+        records: Vec<HeadlessRecord>,
+        warning: Option<String>,
+    },
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -231,6 +244,8 @@ pub struct ReduceResult {
 pub(crate) enum Focus {
     Header(SessionId),
     Pane(Selection),
+    HeadlessHeader,
+    Headless(HeadlessSessionId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +303,7 @@ pub struct AppState {
     pub dropped_records: usize,
     pub banner: Option<String>,
     pub transport_degraded: bool,
+    pub kimaki_warning: Option<String>,
     pub preview: PreviewState,
     pub modal: Option<Modal>,
     pub pending_creation: Option<PendingCreation>,
@@ -328,6 +344,7 @@ impl AppState {
             dropped_records: 0,
             banner: None,
             transport_degraded: false,
+            kimaki_warning: None,
             preview: PreviewState::default(),
             modal: None,
             pending_creation: None,
@@ -372,7 +389,7 @@ impl AppState {
     pub fn selected_pane(&self) -> Option<PaneId> {
         match &self.focus {
             Some(Focus::Pane((_, _, pane_id))) => Some(pane_id.clone()),
-            Some(Focus::Header(_)) | None => None,
+            Some(Focus::Header(_) | Focus::HeadlessHeader | Focus::Headless(_)) | None => None,
         }
     }
 
@@ -392,6 +409,8 @@ impl AppState {
             for index in ranked_row_indices(&self.model, grouped, &self.filter_query) {
                 let row = &self.model.rows(grouped)[index];
                 let focus = match row {
+                    Row::HeadlessHeader { .. } => Some(Focus::HeadlessHeader),
+                    Row::Headless { session_id, .. } => Some(Focus::Headless(session_id.clone())),
                     Row::SessionHeader { session_id, .. } => {
                         Some(Focus::Header(session_id.clone()))
                     }
@@ -416,6 +435,9 @@ impl AppState {
             for pane in self.model.panes().values() {
                 cache.status_counts[status_index(pane.status)] += 1;
             }
+            for record in self.model.headless() {
+                cache.status_counts[status_index(record.status)] += 1;
+            }
         }
         cache
     }
@@ -433,6 +455,10 @@ impl AppState {
                 .iter()
                 .filter_map(|index| match &self.model.rows(self.grouped())[*index] {
                     Row::Pane {
+                        status_since: Some(since),
+                        ..
+                    }
+                    | Row::Headless {
                         status_since: Some(since),
                         ..
                     } => Some(next_age_boundary(*since, now)),
@@ -462,6 +488,8 @@ impl AppState {
             .map(|index| &self.model.rows(grouped)[*index])
             .map(|row| match row {
                 Row::SessionHeader { session_id, .. } => Focus::Header(session_id.clone()),
+                Row::HeadlessHeader { .. } => Focus::HeadlessHeader,
+                Row::Headless { session_id, .. } => Focus::Headless(session_id.clone()),
                 Row::Pane {
                     session_id,
                     window_id,
@@ -497,7 +525,7 @@ impl AppState {
     fn sync_selection(&mut self) {
         self.selection = match &self.focus {
             Some(Focus::Pane(selection)) => Some(selection.clone()),
-            Some(Focus::Header(_)) | None => None,
+            Some(Focus::Header(_) | Focus::HeadlessHeader | Focus::Headless(_)) | None => None,
         };
     }
 }
@@ -529,6 +557,9 @@ pub fn reduce(state: &mut AppState, event: Event) -> ReduceResult {
             outcome,
         } => reduce_action_finished(state, kind, pane_id, outcome),
         Event::CreationProgress(progress) => reduce_creation_progress(state, progress),
+        Event::HeadlessSnapshot { records, warning } => {
+            reduce_headless_snapshot(state, records, warning)
+        }
     };
     sync_preview_target(state, &mut result);
     result
@@ -1016,6 +1047,11 @@ fn open_create_modal(state: &mut AppState) -> ReduceResult {
                     CreateChoice::new(CreateChoiceKind::NewSession, CreateContext::NewSession, cwd),
                 ]
             }
+            Some(Focus::HeadlessHeader | Focus::Headless(_)) => vec![CreateChoice::new(
+                CreateChoiceKind::NewSession,
+                CreateContext::NewSession,
+                String::new(),
+            )],
             None => vec![CreateChoice::new(
                 CreateChoiceKind::NewSession,
                 CreateContext::NewSession,
@@ -1490,6 +1526,9 @@ fn reduce_creation_progress(state: &mut AppState, progress: CreationProgress) ->
             if let Some(Modal::Create(CreateModal::Form(form))) = state.modal.as_mut() {
                 form.submitting = false;
                 form.error = Some(error);
+            } else {
+                state.pending_creation = None;
+                state.banner = Some(error);
             }
             state.invalidate_render_cache();
             ReduceResult {
@@ -1554,6 +1593,9 @@ fn reduce_creation_progress(state: &mut AppState, progress: CreationProgress) ->
                 if let Some(Modal::Create(CreateModal::Form(form))) = state.modal.as_mut() {
                     form.submitting = false;
                     form.error = Some(error);
+                } else {
+                    state.pending_creation = None;
+                    state.banner = Some(error);
                 }
                 state.invalidate_render_cache();
                 return ReduceResult {
@@ -1733,7 +1775,7 @@ fn session_at_focus(state: &AppState) -> Option<SessionId> {
     match &state.focus {
         Some(Focus::Header(session_id)) => Some(session_id.clone()),
         Some(Focus::Pane((session_id, _, _))) => Some(session_id.clone()),
-        None => None,
+        Some(Focus::HeadlessHeader | Focus::Headless(_)) | None => None,
     }
 }
 
@@ -1770,6 +1812,39 @@ fn emit_jump(state: &mut AppState, zoom: bool, result: &mut ReduceResult) {
     let (target, zoom) = match &state.focus {
         Some(Focus::Pane((_, _, pane_id))) => (Some(JumpTarget::Pane(pane_id.clone())), zoom),
         Some(Focus::Header(session_id)) => (Some(JumpTarget::Session(session_id.clone())), false),
+        Some(Focus::Headless(session_id)) => {
+            if zoom || state.pending_creation.is_some() {
+                return;
+            }
+            let Some(record) = state
+                .model
+                .headless()
+                .iter()
+                .find(|record| record.session_id == *session_id)
+                .cloned()
+            else {
+                return;
+            };
+            let id = CreationId(state.next_creation_id);
+            state.next_creation_id = state
+                .next_creation_id
+                .checked_add(1)
+                .expect("creation ID exhausted");
+            state.pending_creation = Some(PendingCreation {
+                id,
+                initiating_session: None,
+                state: PendingCreationState::Creating,
+            });
+            result.actions.push(Action::AttachHeadless {
+                id,
+                source_url: record.source_url.clone(),
+                directory: record.directory.clone(),
+                session_id: record.session_id.clone(),
+            });
+            result.changed = true;
+            return;
+        }
+        Some(Focus::HeadlessHeader) => (None, false),
         None => (None, false),
     };
     if let Some(target) = target {
@@ -1796,8 +1871,10 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
     let selection = reconcile_snapshot_presence(state, &outcome, &model_config, observed_at);
     let verification_expired = expire_creation_verification(state, observed_at);
     let creation_resolved = awaiting_snapshot && state.pending_creation.is_none();
-    let model = Model::build_with_ephemeral(
+    let headless = state.model.headless().to_vec();
+    let model = Model::build_complete(
         &outcome.records,
+        &headless,
         &model_config,
         observed_at,
         &state.ephemeral_panes,
@@ -1851,6 +1928,40 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
             })
             .or_else(|| visible.first().cloned());
     }
+    state.sync_selection();
+    ReduceResult {
+        actions: Vec::new(),
+        changed: true,
+    }
+}
+
+fn reduce_headless_snapshot(
+    state: &mut AppState,
+    records: Vec<HeadlessRecord>,
+    warning: Option<String>,
+) -> ReduceResult {
+    let old_visible = state.visible_rows();
+    let old_focus = state.focus.clone();
+    let model = state.model.replace_headless(&records);
+    if model.content_hash() == state.model.content_hash() && state.kimaki_warning == warning {
+        return ReduceResult::default();
+    }
+    state.model = model;
+    state.kimaki_warning = warning;
+    state.invalidate_render_cache();
+    let visible = state.visible_rows();
+    state.focus = old_focus
+        .clone()
+        .filter(|focus| visible.contains(focus))
+        .or_else(|| {
+            let old_index =
+                old_focus.and_then(|focus| old_visible.iter().position(|row| row == &focus))?;
+            visible
+                .get(old_index)
+                .cloned()
+                .or_else(|| visible.last().cloned())
+        })
+        .or_else(|| visible.first().cloned());
     state.sync_selection();
     ReduceResult {
         actions: Vec::new(),
@@ -2037,11 +2148,15 @@ mod tests {
         Action, ActionOutcome, AppState, CompletedAction, CreateChoice, CreateChoiceKind,
         CreateField, CreateForm, CreateModal, CreationId, Event, Focus, HelpState, InputMode,
         JumpTarget, Modal, Mode, PendingCreation, PendingCreationState, ReduceResult, reduce,
+        status_index,
     };
     use crate::creation::{
         CreateContext, CreateDraft, CreateStage, CreationProgress, CreationResolution,
     };
-    use crate::model::{Model, ModelConfig, PaneId, Row, SessionId, Status, WindowId};
+    use crate::model::{
+        HeadlessRecord, HeadlessSessionId, Model, ModelConfig, PaneId, Row, SessionId, Status,
+        WindowId,
+    };
     use crate::preview::{PreviewFrame, parse_preview};
     use crate::snapshot::{ParseOutcome, RawRecord};
     use crate::ui::help_viewport;
@@ -2064,6 +2179,7 @@ mod tests {
             heartbeat: Some(1),
             title: String::new(),
             model: String::new(),
+            opencode_session: String::new(),
             tag: String::new(),
             group: "1".into(),
         }
@@ -3362,9 +3478,140 @@ mod tests {
             .iter()
             .filter_map(|index| match &rows[*index] {
                 Row::Pane { pane_id, .. } => Some(pane_id.0.clone()),
-                Row::SessionHeader { .. } => None,
+                Row::SessionHeader { .. } | Row::HeadlessHeader { .. } | Row::Headless { .. } => {
+                    None
+                }
             })
             .collect()
+    }
+
+    #[test]
+    fn headless_enter_emits_exact_attach_once_while_header_and_pane_actions_stay_inert() {
+        let mut app = state(vec![record("$tmux", "@1", "%1", 0)]);
+        let update = Event::HeadlessSnapshot {
+            records: vec![HeadlessRecord {
+                source_url: "http://127.0.0.1:53550".into(),
+                session_id: HeadlessSessionId::from("ses_live"),
+                title: "Live task".into(),
+                directory: "/work/live".into(),
+                model: "model".into(),
+                status: Status::NeedsInput,
+                status_since: Some(9),
+            }],
+            warning: None,
+        };
+
+        assert!(reduce(&mut app, update).changed);
+        assert_eq!(
+            app.render_cache().status_counts[status_index(Status::NeedsInput)],
+            1
+        );
+        let header_enter = reduce(&mut app, key(KeyCode::Enter));
+        assert!(header_enter.actions.is_empty());
+        assert!(app.pending_creation.is_none());
+        let moved = reduce(&mut app, key(KeyCode::Down));
+        assert!(moved.changed);
+        assert!(matches!(app.focus(), Some(Focus::Headless(_))));
+        let enter = reduce(&mut app, key(KeyCode::Enter));
+        assert_eq!(
+            enter.actions,
+            vec![Action::AttachHeadless {
+                id: CreationId(1),
+                source_url: "http://127.0.0.1:53550".into(),
+                directory: "/work/live".into(),
+                session_id: HeadlessSessionId::from("ses_live"),
+            }]
+        );
+        assert!(matches!(
+            app.pending_creation,
+            Some(PendingCreation {
+                id: CreationId(1),
+                state: PendingCreationState::Creating,
+                ..
+            })
+        ));
+        assert!(
+            reduce(&mut app, key(KeyCode::Enter)).actions.is_empty(),
+            "repeat Enter must not start another creation"
+        );
+        let kill = reduce(&mut app, key(KeyCode::Char('x')));
+        assert!(kill.actions.is_empty());
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn headless_enter_ignores_repeat_while_creation_is_pending() {
+        let mut app = state(Vec::new());
+        reduce(
+            &mut app,
+            Event::HeadlessSnapshot {
+                records: vec![HeadlessRecord {
+                    source_url: "http://127.0.0.1:53550".into(),
+                    session_id: HeadlessSessionId::from("ses_live"),
+                    title: "Live task".into(),
+                    directory: "/work/live".into(),
+                    model: "model".into(),
+                    status: Status::NeedsInput,
+                    status_since: Some(9),
+                }],
+                warning: None,
+            },
+        );
+        reduce(&mut app, key(KeyCode::Down));
+
+        let first = reduce(&mut app, key(KeyCode::Enter));
+        assert_eq!(first.actions.len(), 1);
+        assert!(matches!(
+            first.actions.as_slice(),
+            [Action::AttachHeadless { .. }]
+        ));
+        let pending = app.pending_creation.clone();
+        let next_creation_id = app.next_creation_id;
+
+        let second = reduce(&mut app, key(KeyCode::Enter));
+        assert!(second.actions.is_empty());
+        assert_eq!(app.next_creation_id, next_creation_id);
+        assert_eq!(app.pending_creation, pending);
+    }
+
+    #[test]
+    fn headless_ctrl_z_does_not_attach_or_disturb_pending_creation() {
+        let mut app = state(Vec::new());
+        reduce(
+            &mut app,
+            Event::HeadlessSnapshot {
+                records: vec![HeadlessRecord {
+                    source_url: "http://127.0.0.1:53550".into(),
+                    session_id: HeadlessSessionId::from("ses_live"),
+                    title: "Live task".into(),
+                    directory: "/work/live".into(),
+                    model: "model".into(),
+                    status: Status::NeedsInput,
+                    status_since: Some(9),
+                }],
+                warning: None,
+            },
+        );
+        reduce(&mut app, key(KeyCode::Down));
+
+        let next_creation_id = app.next_creation_id;
+        let zoom = reduce(&mut app, control_key(KeyCode::Char('z')));
+        assert!(zoom.actions.is_empty());
+        assert_eq!(app.next_creation_id, next_creation_id);
+        assert!(app.pending_creation.is_none());
+
+        let enter = reduce(&mut app, key(KeyCode::Enter));
+        assert!(matches!(
+            enter.actions.as_slice(),
+            [Action::AttachHeadless { .. }]
+        ));
+        let pending = app.pending_creation.clone();
+        let next_creation_id = app.next_creation_id;
+
+        let zoom_while_pending = reduce(&mut app, control_key(KeyCode::Char('z')));
+        assert!(zoom_while_pending.actions.is_empty());
+        assert_eq!(app.next_creation_id, next_creation_id);
+        assert_eq!(app.pending_creation, pending);
     }
 
     fn snapshot(records: Vec<RawRecord>, observed_at: u64) -> Event {
@@ -4124,6 +4371,44 @@ mod tests {
         assert!(reduce(&mut app, Event::Tick { now: 1_001 }).changed);
         app.prepare_render(1_001);
         assert!(!reduce(&mut app, Event::Tick { now: 1_001 }).changed);
+    }
+
+    #[test]
+    fn tick_redraws_when_an_unchanged_visible_headless_age_changes() {
+        let records = vec![HeadlessRecord {
+            source_url: "http://127.0.0.1:53550".into(),
+            session_id: HeadlessSessionId::from("ses_live"),
+            title: "Live task".into(),
+            directory: "/work/live".into(),
+            model: "model".into(),
+            status: Status::Working,
+            status_since: Some(999),
+        }];
+        let mut app = state(Vec::new());
+        assert!(
+            reduce(
+                &mut app,
+                Event::HeadlessSnapshot {
+                    records: records.clone(),
+                    warning: None,
+                },
+            )
+            .changed
+        );
+        app.prepare_render(1_000);
+
+        assert!(
+            !reduce(
+                &mut app,
+                Event::HeadlessSnapshot {
+                    records,
+                    warning: None,
+                },
+            )
+            .changed
+        );
+        assert!(!reduce(&mut app, Event::Tick { now: 1_000 }).changed);
+        assert!(reduce(&mut app, Event::Tick { now: 1_001 }).changed);
     }
 
     #[test]

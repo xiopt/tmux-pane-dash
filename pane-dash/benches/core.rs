@@ -35,7 +35,7 @@ fn snapshot(panes: usize, grouped: bool) -> Vec<u8> {
         };
         let group = if grouped { "1" } else { "0" };
         let record = format!(
-            "\x1e${session}\x1fsession-{session}\x1f@{window}\x1f{}\x1fwork-{window}\x1f%{}\x1f{}\x1f{}\x1f{command}\x1f/Users/example/project-{session}\x1f0\x1f{status}\x1f{}\x1f{}\x1fauth Task {index}\x1fclaude-sonnet-{}\x1f{tag}\x1f{group}\n",
+            "\x1e${session}\x1fsession-{session}\x1f@{window}\x1f{}\x1fwork-{window}\x1f%{}\x1f{}\x1f{}\x1f{command}\x1f/Users/example/project-{session}\x1f0\x1f{status}\x1f{}\x1f{}\x1fauth Task {index}\x1fclaude-sonnet-{}\x1f\x1f{tag}\x1f{group}\n",
             window % 12,
             index + 1,
             index % 4,

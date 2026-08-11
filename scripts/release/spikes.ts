@@ -369,12 +369,14 @@ async function packOpenCodePlugin(sourceRoot: string, packageRoot: string): Prom
   await mkdir(join(packageRoot, "dist"), { recursive: true })
   const build = await Bun.build({ entrypoints: [join(sourceRoot, "opencode-plugin", "pane-dash.ts")], outdir: join(packageRoot, "dist"), naming: "index.js", target: "bun" })
   if (!build.success || build.logs.length > 0) throw new Error(`OpenCode bundle failed: ${build.logs.map(String).join("\n")}`)
+  const tuiBuild = await Bun.build({ entrypoints: [join(sourceRoot, "opencode-plugin", "tui.ts")], outdir: join(packageRoot, "dist"), naming: "tui.js", target: "bun" })
+  if (!tuiBuild.success || tuiBuild.logs.length > 0) throw new Error(`OpenCode TUI bundle failed: ${tuiBuild.logs.map(String).join("\n")}`)
   await Promise.all([
     copyFile(join(sourceRoot, "README.md"), join(packageRoot, "README.md")),
     // Task 2 owns the repository's publishable legal text. The spike still verifies
     // npm's required package shape without inventing a project-wide license claim.
     writeFile(join(packageRoot, "LICENSE"), "UNLICENSED\n"),
-    writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "@xiopt/pane-dash-opencode", version: OPENCODE_PLUGIN_VERSION, type: "module", main: "./dist/index.js", engines: { opencode: ">=1.17.20" }, exports: { ".": "./dist/index.js", "./server": "./dist/index.js" }, files: ["dist/index.js", "README.md", "LICENSE"] }, null, 2) + "\n"),
+    writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "@xiopt/pane-dash-opencode", version: OPENCODE_PLUGIN_VERSION, type: "module", main: "./dist/index.js", engines: { opencode: ">=1.17.20" }, exports: { ".": "./dist/index.js", "./server": "./dist/index.js", "./tui": "./dist/tui.js" }, files: ["dist/index.js", "dist/tui.js", "README.md", "LICENSE"] }, null, 2) + "\n"),
   ])
   return packPackage(packageRoot, "@xiopt/pane-dash-opencode", OPENCODE_PLUGIN_VERSION, "opencode")
 }
@@ -392,7 +394,7 @@ type PackageFixture = "opencode" | "companion"
 
 export function assertExactPackageFixture(packageJson: unknown, inventory: readonly string[], fixture: PackageFixture): void {
   const expected = fixture === "opencode"
-    ? { name: "@xiopt/pane-dash-opencode", version: OPENCODE_PLUGIN_VERSION, type: "module", main: "./dist/index.js", engines: { opencode: ">=1.17.20" }, exports: { ".": "./dist/index.js", "./server": "./dist/index.js" }, files: ["dist/index.js", "README.md", "LICENSE"] }
+    ? { name: "@xiopt/pane-dash-opencode", version: OPENCODE_PLUGIN_VERSION, type: "module", main: "./dist/index.js", engines: { opencode: ">=1.17.20" }, exports: { ".": "./dist/index.js", "./server": "./dist/index.js", "./tui": "./dist/tui.js" }, files: ["dist/index.js", "dist/tui.js", "README.md", "LICENSE"] }
     : { name: "@opencode-ai/plugin", version: "1.17.20", type: "module", exports: { ".": "./index.js" }, files: ["index.js"] }
   const expectedInventory = fixture === "opencode" ? OPENCODE_PACKAGE_FILES : ["package/package.json", "package/index.js"]
   if (JSON.stringify(packageJson) !== JSON.stringify(expected)) throw new Error(`${fixture} package.json is not the exact required fixture`)

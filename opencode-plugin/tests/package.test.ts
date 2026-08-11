@@ -8,6 +8,7 @@ const expectedEntries = [
   "package/LICENSE",
   "package/README.md",
   "package/dist/index.js",
+  "package/dist/tui.js",
   "package/package.json",
 ]
 
@@ -32,18 +33,20 @@ test("the packed plugin has the exact self-contained importable inventory", asyn
     await command(["tar", "-xzf", tarball], scratch)
     const manifest = JSON.parse(await readFile(join(scratch, "package", "package.json"), "utf8"))
     expect(manifest.main).toBe("./dist/index.js")
-    expect(manifest.exports).toEqual({ ".": "./dist/index.js", "./server": "./dist/index.js" })
-    expect(manifest.files).toEqual(["dist/index.js", "README.md", "LICENSE"])
+    expect(manifest.exports).toEqual({ ".": "./dist/index.js", "./server": "./dist/index.js", "./tui": "./dist/tui.js" })
+    expect(manifest.files).toEqual(["dist/index.js", "dist/tui.js", "README.md", "LICENSE"])
     expect(manifest.dependencies).toBeUndefined()
 
     const bundle = await readFile(join(scratch, "package", "dist", "index.js"), "utf8")
     expect(bundle).not.toMatch(/sourceMappingURL|from\s+["'](?!node:|bun:)/)
+    const tuiBundle = await readFile(join(scratch, "package", "dist", "tui.js"), "utf8")
+    expect(tuiBundle).not.toMatch(/sourceMappingURL|from\s+["'](?!node:|bun:)/)
 
     const consumer = join(scratch, "consumer")
     await mkdir(join(consumer, "node_modules", "@xiopt"), { recursive: true })
     await symlink(join(scratch, "package"), join(consumer, "node_modules", "@xiopt", "pane-dash-opencode"))
     const importer = join(consumer, "imports.mjs")
-    await writeFile(importer, `import * as root from "@xiopt/pane-dash-opencode"; import * as server from "@xiopt/pane-dash-opencode/server"; if (typeof root.PaneDash !== "function" || typeof server.PaneDash !== "function") process.exit(1)\n`)
+    await writeFile(importer, `import * as root from "@xiopt/pane-dash-opencode"; import * as server from "@xiopt/pane-dash-opencode/server"; import tui from "@xiopt/pane-dash-opencode/tui"; if (typeof root.PaneDash !== "function" || typeof server.PaneDash !== "function" || typeof tui.tui !== "function" || "server" in tui) process.exit(1)\n`)
     await command([process.execPath, importer], consumer)
   } finally {
     await rm(scratch, { recursive: true, force: true })

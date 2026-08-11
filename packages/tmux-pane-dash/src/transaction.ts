@@ -7,7 +7,7 @@ import { createJournal, persistJournal, persistPreimage, readJournal, transition
 import { ensureManagedRoot, managedRoot, type OwnershipRecord } from "./ownership"
 import type { Dependencies } from "./runtime"
 
-export type PlannedConfigMutation = { logicalPath: string; resolvedPath: string; bytes: Uint8Array; mode?: number; expectedPreimage?: { state: FileState; bytes?: Uint8Array; symlinkChain: readonly SymlinkRecord[] } }
+export type PlannedConfigMutation = { logicalPath: string; resolvedPath: string; bytes: Uint8Array; mode?: number; remove?: true; expectedPreimage?: { state: FileState; bytes?: Uint8Array; symlinkChain: readonly SymlinkRecord[] } }
 export interface TransactionPlan { command: "setup" | "update" | "uninstall"; components: { tmux: boolean; opencode: boolean }; desiredVersion: string; previousCurrent: string | null; configMutations: readonly PlannedConfigMutation[]; migrationUnlinks?: readonly { logicalPath: string; resolvedPath: string }[]; ownership?: OwnershipRecord; versionActivation?: { stagingPath: string }; uninstall?: { tombstoneVersions: boolean; removeCurrent: boolean; removeOwnership: boolean } }
 const missing = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT"
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
@@ -64,7 +64,15 @@ export async function executeTransaction(plan: TransactionPlan, deps: Dependenci
     if (plan.uninstall?.removeCurrent) await removeMutation(journal, { operation: "current", logicalPath: current, resolvedPath: current, pre: currentPre, post: absent, preimage: null }, 1, deps)
     else { const stagedCurrent = await stageSymlink(current, target, deps); await mutate(journal, { operation: "current", logicalPath: current, resolvedPath: current, pre: currentPre, post: stagedCurrent.post, preimage: null }, stagedCurrent.temp, 1, deps) }
     await phase(journal, "current_switched", deps)
-    for (const [index, item] of staged.entries()) { const stagedFile = await stageBytes(item.mutation.resolvedPath, item.mutation.bytes, item.mutation.mode ?? (item.pre.mode ?? 0o600), deps); await mutate(journal, { operation: "config", logicalPath: item.mutation.logicalPath, resolvedPath: item.mutation.resolvedPath, pre: item.pre, post: stagedFile.post, preimage: item.preimage, symlinkChain: item.mutation.expectedPreimage?.symlinkChain }, stagedFile.temp, index + 1, deps, item.mutation) }
+    for (const [index, item] of staged.entries()) {
+      if (item.mutation.remove) {
+        await verifyPlanned(item.mutation, deps)
+        await removeMutation(journal, { operation: "config", logicalPath: item.mutation.logicalPath, resolvedPath: item.mutation.resolvedPath, pre: item.pre, post: absent, preimage: item.preimage, symlinkChain: item.mutation.expectedPreimage?.symlinkChain }, index + 1, deps)
+      } else {
+        const stagedFile = await stageBytes(item.mutation.resolvedPath, item.mutation.bytes, item.mutation.mode ?? (item.pre.mode ?? 0o600), deps)
+        await mutate(journal, { operation: "config", logicalPath: item.mutation.logicalPath, resolvedPath: item.mutation.resolvedPath, pre: item.pre, post: stagedFile.post, preimage: item.preimage, symlinkChain: item.mutation.expectedPreimage?.symlinkChain }, stagedFile.temp, index + 1, deps, item.mutation)
+      }
+    }
     for (const [index, item] of (plan.migrationUnlinks ?? []).entries()) { const pre = await state(item.logicalPath); if (pre.type !== "symlink") throw new CliError("E_CONFIG_CONFLICT"); await removeMutation(journal, { operation: "config", logicalPath: item.logicalPath, resolvedPath: item.logicalPath, pre, post: absent, preimage: null }, staged.length + index + 1, deps) }
     if (deps.collisionAfterMutation && journal.mutations.length) { await rm(journal.mutations.at(-1)!.resolvedPath, { force: true }); throw new CliError("E_RECOVERY") }; await phase(journal, "configs_committed", deps); signal(deps)
     const ownershipPath = join(root, "state", "ownership.json"), ownershipCapture = await capture({ logicalPath: ownershipPath, resolvedPath: ownershipPath, bytes: new Uint8Array() }, root, id, deps)

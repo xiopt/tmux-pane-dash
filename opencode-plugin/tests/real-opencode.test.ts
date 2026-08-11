@@ -47,7 +47,7 @@ async function assertPackedPlugin(scratch: string): Promise<LocalPackage> {
   const packageRoot = join(root, "opencode-plugin")
   const plugin = await pack(packageRoot, scratch)
   const entries = (await command(["tar", "-tzf", join(scratch, `xiopt-pane-dash-opencode-${PLUGIN_VERSION}.tgz`)], root)).stdout.trim().split("\n").sort()
-  expect(entries).toEqual(["package/LICENSE", "package/README.md", "package/dist/index.js", "package/package.json"])
+  expect(entries).toEqual(["package/LICENSE", "package/README.md", "package/dist/index.js", "package/dist/tui.js", "package/package.json"])
   return plugin
 }
 

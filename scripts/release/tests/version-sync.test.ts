@@ -43,7 +43,7 @@ async function synchronizedFixture(version = "0.1.0") {
 
 test("application release identities are exactly synchronized", async () => {
   const result = await inspectVersions(repoFixture())
-  expect(result).toEqual({ version: "0.1.5", tag: "v0.1.5", mismatches: [] })
+  expect(result).toEqual({ version: "0.1.6", tag: "v0.1.6", mismatches: [] })
 })
 
 test("reports shared contract VERSION and TAG mismatches", async () => {
@@ -58,8 +58,8 @@ test("reports shared contract VERSION and TAG mismatches", async () => {
     version: "0.1.3",
     tag: "v0.1.3",
     mismatches: [
-      "scripts/release/contracts.ts: VERSION 0.1.5 !== VERSION 0.1.3",
-      "scripts/release/contracts.ts: TAG v0.1.5 !== v0.1.3",
+      "scripts/release/contracts.ts: VERSION 0.1.6 !== VERSION 0.1.3",
+      "scripts/release/contracts.ts: TAG v0.1.6 !== v0.1.3",
     ],
   })
 })
@@ -70,8 +70,8 @@ test("requires root identity files even when VERSION exists", async () => {
 
   await expect(inspectVersions(root)).resolves.toMatchObject({
     mismatches: [
-      "scripts/release/contracts.ts: VERSION 0.1.5 !== VERSION 0.1.0",
-      "scripts/release/contracts.ts: TAG v0.1.5 !== v0.1.0",
+      "scripts/release/contracts.ts: VERSION 0.1.6 !== VERSION 0.1.0",
+      "scripts/release/contracts.ts: TAG v0.1.6 !== v0.1.0",
       "package.json: missing",
       "pane-dash/Cargo.toml: missing",
       "pane-dash/Cargo.lock: missing",
@@ -90,13 +90,13 @@ test("OpenCode package is publishable and dependency-free", async () => {
   const pkg = JSON.parse(await readFile(join(repoFixture(), "opencode-plugin/package.json"), "utf8"))
   expect(pkg).toMatchObject({
     name: "@xiopt/pane-dash-opencode",
-    version: "0.1.5",
+    version: "0.1.6",
     type: "module",
     main: "./dist/index.js",
     engines: { opencode: ">=1.17.20" },
-    files: ["dist/index.js", "README.md", "LICENSE"],
+    files: ["dist/index.js", "dist/tui.js", "README.md", "LICENSE"],
   })
-  expect(pkg.exports).toEqual({ ".": "./dist/index.js", "./server": "./dist/index.js" })
+  expect(pkg.exports).toEqual({ ".": "./dist/index.js", "./server": "./dist/index.js", "./tui": "./dist/tui.js" })
   expect(pkg.repository).toEqual({ type: "git", url: "git+https://github.com/xiopt/tmux-pane-dash.git" })
   expect(pkg.dependencies ?? {}).toEqual({})
   expect(pkg.private).toBeUndefined()
@@ -119,33 +119,33 @@ test("--check reports mismatches without rewriting files", async () => {
 })
 
 test("accepts historical packed tags, the loose current tag, duplicates, and non-v tags", async () => {
-  const root = await synchronizedFixture("0.1.5")
+  const root = await synchronizedFixture("0.1.6")
   await mkdir(join(root, ".git", "refs", "tags"), { recursive: true })
-  await writeFile(join(root, ".git", "refs", "tags", "v0.1.5"), "current\n")
+  await writeFile(join(root, ".git", "refs", "tags", "v0.1.6"), "current\n")
   await writeFile(join(root, ".git", "packed-refs"), [
     "# pack-refs with: peeled fully-peeled",
     `${"a".repeat(40)} refs/tags/v0.1.0`,
-    `${"b".repeat(40)} refs/tags/v0.1.5`,
+    `${"b".repeat(40)} refs/tags/v0.1.6`,
     `^${"c".repeat(40)}`,
     `${"d".repeat(40)} refs/tags/release-not-a-version`,
     "",
   ].join("\n"))
 
-  await expect(inspectVersions(root)).resolves.toEqual({ version: "0.1.5", tag: "v0.1.5", mismatches: [] })
+  await expect(inspectVersions(root)).resolves.toEqual({ version: "0.1.6", tag: "v0.1.6", mismatches: [] })
 })
 
 test("rejects malformed and future v tags while retaining historical parity", async () => {
-  const root = await synchronizedFixture("0.1.5")
+  const root = await synchronizedFixture("0.1.6")
   await mkdir(join(root, ".git", "refs", "tags"), { recursive: true })
   await writeFile(join(root, ".git", "refs", "tags", "v0.1"), "malformed\n")
-  await writeFile(join(root, ".git", "packed-refs"), `${"a".repeat(40)} refs/tags/v0.1.0\n${"b".repeat(40)} refs/tags/v0.1.6\n`)
+  await writeFile(join(root, ".git", "packed-refs"), `${"a".repeat(40)} refs/tags/v0.1.0\n${"b".repeat(40)} refs/tags/v0.1.7\n`)
 
   await expect(inspectVersions(root)).resolves.toMatchObject({
-    version: "0.1.5",
-    tag: "v0.1.5",
+    version: "0.1.6",
+    tag: "v0.1.6",
     mismatches: [
       "tag v0.1: malformed v tag; expected v<major>.<minor>.<patch>",
-      "tag v0.1.6: future tag is newer than VERSION 0.1.5",
+      "tag v0.1.7: future tag is newer than VERSION 0.1.6",
     ],
   })
 })
@@ -169,8 +169,8 @@ test("checks optional package, tag, and generated manifests when present", async
     version: "0.1.0",
     tag: "v0.1.0",
     mismatches: [
-      "scripts/release/contracts.ts: VERSION 0.1.5 !== VERSION 0.1.0",
-      "scripts/release/contracts.ts: TAG v0.1.5 !== v0.1.0",
+      "scripts/release/contracts.ts: VERSION 0.1.6 !== VERSION 0.1.0",
+      "scripts/release/contracts.ts: TAG v0.1.6 !== v0.1.0",
       "packages/tmux-pane-dash/package.json: version 0.1.1 !== VERSION 0.1.0",
       "packages/tmux-pane-dash/generated/release-manifest.json: version 0.1.1 !== VERSION 0.1.0",
       "packages/tmux-pane-dash/generated/release-manifest.json: tag v0.1.1 !== v0.1.0",

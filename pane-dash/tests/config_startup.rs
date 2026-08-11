@@ -351,7 +351,7 @@ fn exact_1024_config(accent: &str) -> String {
     config
 }
 
-const SNAPSHOT_FORMAT: &str = "\x1e#{session_id}\x1f#{session_name}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_dead}\x1f#{@pane_dash_status}\x1f#{@pane_dash_status_since}\x1f#{@pane_dash_heartbeat}\x1f#{@pane_dash_title}\x1f#{@pane_dash_model}\x1f#{@pane_dash_tag}\x1f#{@pane_dash_group}";
+const SNAPSHOT_FORMAT: &str = "\x1e#{session_id}\x1f#{session_name}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_dead}\x1f#{@pane_dash_status}\x1f#{@pane_dash_status_since}\x1f#{@pane_dash_heartbeat}\x1f#{@pane_dash_title}\x1f#{@pane_dash_model}\x1f#{@pane_dash_opencode_session}\x1f#{@pane_dash_tag}\x1f#{@pane_dash_group}";
 
 fn script_path() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -363,7 +363,7 @@ fn script_path() -> Option<PathBuf> {
 fn write_fake_tmux(path: &Path) {
     let snapshot = [
         "$1", "grouped", "@1", "0", "main", "%1", "0", "1", "opencode", "/tmp", "0", "working",
-        "1", "1", "Header", "model", "tag", "group",
+        "1", "1", "Header", "model", "", "tag", "group",
     ]
     .join("\x1f");
     fs::write(

@@ -26,13 +26,16 @@ test("update replaces only the ownership-proven exact OpenCode package entry", a
   const h = await transactionFixture(), config = join(h.outside, ".config", "opencode", "opencode.json")
   try {
     await mkdir(join(h.outside, ".config", "opencode"), { recursive: true }); await writeFile(config, "{}\n")
-    const oldArchive = releaseArchive("0.1.2", "x86_64-unknown-linux-musl", "tmux-pane-dash-v0.1.2-x86_64-unknown-linux-musl.tar.gz"), oldDeps = { ...h.deps, env: { XDG_DATA_HOME: join(h.outside, "data"), HOME: h.outside }, executingVersion: "0.1.2", manifest: manifest("0.1.2"), spawn: async () => ({ code: 0, stdout: "pane-dash 0.1.2\n", stderr: "" }), fetch: async () => ({ status: 200, body: body(oldArchive) }) }
+    const oldArchive = releaseArchive("0.1.2", "x86_64-unknown-linux-musl", "tmux-pane-dash-v0.1.2-x86_64-unknown-linux-musl.tar.gz"), oldDeps = { ...h.deps, env: { XDG_DATA_HOME: join(h.outside, "data"), HOME: h.outside }, executingVersion: "0.1.2", manifest: manifest("0.1.2"), spawn: async (path: string) => ({ code: 0, stdout: path === "opencode" ? "1.18.15\n" : "pane-dash 0.1.2\n", stderr: "" }), fetch: async () => ({ status: 200, body: body(oldArchive) }) }
     await setup({ name: "setup", tmux: false, opencode: true, migrate: false, allowDowngrade: false }, oldDeps)
-    const newArchive = releaseArchive("0.1.3", "x86_64-unknown-linux-musl", "tmux-pane-dash-v0.1.3-x86_64-unknown-linux-musl.tar.gz"), newDeps = { ...oldDeps, executingVersion: "0.1.3", manifest: manifest("0.1.3"), spawn: async () => ({ code: 0, stdout: "pane-dash 0.1.3\n", stderr: "" }), fetch: async () => ({ status: 200, body: body(newArchive) }) }
+    const newArchive = releaseArchive("0.1.3", "x86_64-unknown-linux-musl", "tmux-pane-dash-v0.1.3-x86_64-unknown-linux-musl.tar.gz"), newDeps = { ...oldDeps, executingVersion: "0.1.3", manifest: manifest("0.1.3"), spawn: async (path: string) => ({ code: 0, stdout: path === "opencode" ? "1.18.15\n" : "pane-dash 0.1.3\n", stderr: "" }), fetch: async () => ({ status: 200, body: body(newArchive) }) }
     await update(newDeps)
     expect(await readFile(config, "utf8")).toContain("@xiopt/pane-dash-opencode@0.1.3")
+    expect(await readFile(join(h.outside, ".config", "opencode", "tui.json"), "utf8")).toContain("@xiopt/pane-dash-opencode@0.1.3")
     const ownership = await readOwnership(await managedRoot(newDeps.env), newDeps)
     expect(ownership?.currentTarget).toBe("versions/0.1.3")
     expect(ownership?.components.opencode?.packageEntries).toEqual(["@xiopt/pane-dash-opencode@0.1.3"])
+    expect(ownership?.components.opencodeTui?.packageEntries).toEqual(["@xiopt/pane-dash-opencode@0.1.3"])
+    expect(ownership?.components.opencodeTui?.created).toBeTrue()
   } finally { await h.cleanup() }
 })

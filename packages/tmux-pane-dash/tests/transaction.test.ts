@@ -98,6 +98,26 @@ test("ownership rollback restores byte-identical existing state or preserves abs
   }
 })
 
+test("config removal commits absence and crash recovery restores exact bytes", async () => {
+  for (const crash of [false, true]) {
+    const h = await transactionFixture({ alive: false })
+    try {
+      const path = join(h.root, "created-config.json"), original = new TextEncoder().encode('{\n  "plugin": []\n}\n')
+      await mkdir(h.root, { recursive: true })
+      await writeFile(path, original, { mode: 0o600 })
+      const removal = { ...plan(h.root), configMutations: [{ logicalPath: path, resolvedPath: path, bytes: new Uint8Array(), remove: true as const }] }
+      if (!crash) {
+        await executeTransaction(removal, h.deps)
+        expect(await snapshot(path)).toEqual({ type: "absent" })
+      } else {
+        await expect(executeTransaction(removal, { ...h.deps, crashMutation: { operation: "config", occurrence: 1, boundary: "published" } } as any)).rejects.toThrow("E_CRASH")
+        await recoverIncomplete(h.root, h.deps)
+        expect(await snapshot(path)).toEqual({ type: "file", bytes: original, mode: 0o600 })
+      }
+    } finally { await h.cleanup() }
+  }
+})
+
 test("collision signal and retention rows are exhaustive", async () => {
   for (const row of ["collision", "HUP", "INT", "TERM", "retention"] as const) {
     const h = await transactionFixture()
