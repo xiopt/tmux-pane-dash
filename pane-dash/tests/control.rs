@@ -2,12 +2,15 @@ use pane_dash::control::{
     CONTROL_SNAPSHOT_COMMAND, GuardId, ProtocolEvent, ProtocolParser, focus_subscription_command,
     is_safe_client_tty, jump_command,
 };
+use pane_dash::tmux_exec::SNAPSHOT_FORMAT;
 
 #[cfg(unix)]
 mod actor_tests {
     use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path};
 
-    use pane_dash::control::{CONTROL_SNAPSHOT_COMMAND, ControlEvent, connect_control};
+    use pane_dash::control::{
+        CONTROL_SNAPSHOT_COMMAND, ControlEvent, connect_control, focus_subscription_command,
+    };
     use tempfile::TempDir;
     use tokio::time::{Duration, timeout};
 
@@ -185,8 +188,10 @@ mod actor_tests {
         assert_eq!(snapshot.unwrap(), b"\x1e$7\x1f%1\n");
         assert_eq!(
             marker(&commands).await,
-            "refresh-client -B \"pane_dash_focus:1:#{@pane_dash_focus_/dev/ttys001}\"\n\
-             list-panes -a -F \"\\036#{session_id}\\037#{session_name}\\037#{window_id}\\037#{window_index}\\037#{window_name}\\037#{pane_id}\\037#{pane_index}\\037#{pane_active}\\037#{pane_current_command}\\037#{pane_current_path}\\037#{pane_dead}\\037#{@pane_dash_status}\\037#{@pane_dash_status_since}\\037#{@pane_dash_heartbeat}\\037#{@pane_dash_title}\\037#{@pane_dash_model}\\037#{@pane_dash_tag}\\037#{@pane_dash_group}\"\n"
+            format!(
+                "{}{CONTROL_SNAPSHOT_COMMAND}",
+                focus_subscription_command("/dev/ttys001").unwrap()
+            )
         );
     }
 
@@ -1189,8 +1194,16 @@ fn preserves_matching_closes_with_missing_or_nonnumeric_flags_as_data() {
 fn builds_the_exact_control_snapshot_command() {
     assert_eq!(
         CONTROL_SNAPSHOT_COMMAND,
-        "list-panes -a -F \"\\036#{session_id}\\037#{session_name}\\037#{window_id}\\037#{window_index}\\037#{window_name}\\037#{pane_id}\\037#{pane_index}\\037#{pane_active}\\037#{pane_current_command}\\037#{pane_current_path}\\037#{pane_dead}\\037#{@pane_dash_status}\\037#{@pane_dash_status_since}\\037#{@pane_dash_heartbeat}\\037#{@pane_dash_title}\\037#{@pane_dash_model}\\037#{@pane_dash_tag}\\037#{@pane_dash_group}\"\n"
+        "list-panes -a -F \"\\036#{session_id}\\037#{session_name}\\037#{window_id}\\037#{window_index}\\037#{window_name}\\037#{pane_id}\\037#{pane_index}\\037#{pane_active}\\037#{pane_current_command}\\037#{pane_current_path}\\037#{pane_dead}\\037#{@pane_dash_status}\\037#{@pane_dash_status_since}\\037#{@pane_dash_heartbeat}\\037#{@pane_dash_title}\\037#{@pane_dash_model}\\037#{@pane_dash_opencode_session}\\037#{@pane_dash_tag}\\037#{@pane_dash_group}\"\n"
     );
+    let format = CONTROL_SNAPSHOT_COMMAND
+        .strip_prefix("list-panes -a -F \"")
+        .unwrap()
+        .strip_suffix("\"\n")
+        .unwrap()
+        .replace("\\036", "\x1e")
+        .replace("\\037", "\x1f");
+    assert_eq!(format, SNAPSHOT_FORMAT);
 }
 
 #[test]
