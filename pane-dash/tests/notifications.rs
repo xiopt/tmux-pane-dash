@@ -202,7 +202,9 @@ esac
             if Instant::now() >= deadline {
                 let status = self.server.as_mut().unwrap().try_wait().unwrap();
                 let stderr = fs::read_to_string(&self.server_stderr).unwrap_or_default();
-                panic!("notification service did not replace the socket; child={status:?}; stderr={stderr}");
+                panic!(
+                    "notification service did not replace the socket; child={status:?}; stderr={stderr}"
+                );
             }
             thread::sleep(Duration::from_millis(5));
         }
