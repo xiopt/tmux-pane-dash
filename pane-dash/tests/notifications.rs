@@ -277,33 +277,16 @@ fn legacy_owner(path: &Path) -> thread::JoinHandle<()> {
             .unwrap();
         drop(ping);
 
-        let deadline = Instant::now() + Duration::from_millis(500);
-        loop {
-            match listener.accept() {
-                Ok((mut shutdown, _)) => {
-                    shutdown.set_nonblocking(false).unwrap();
-                    let request: Value =
-                        serde_json::from_slice(&read_frame(&mut shutdown)).unwrap();
-                    assert_eq!(request["op"], "shutdown");
-                    shutdown
-                        .write_all(b"{\"ok\":true,\"outcome\":\"stopped\"}\n")
-                        .unwrap();
-                    drop(shutdown);
-                    drop(listener);
-                    thread::sleep(Duration::from_millis(100));
-                    let _ = fs::remove_file(&path);
-                    return;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        let _ = fs::remove_file(&path);
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => panic!("legacy owner failed to accept shutdown: {error}"),
-            }
-        }
+        listener.set_nonblocking(false).unwrap();
+        let (mut shutdown, _) = listener.accept().unwrap();
+        let request: Value = serde_json::from_slice(&read_frame(&mut shutdown)).unwrap();
+        assert_eq!(request["op"], "shutdown");
+        shutdown
+            .write_all(b"{\"ok\":true,\"outcome\":\"stopped\"}\n")
+            .unwrap();
+        drop(shutdown);
+        drop(listener);
+        let _ = fs::remove_file(&path);
     })
 }
 
@@ -502,9 +485,7 @@ fn oversized_frame_is_rejected_without_mutating_state() {
         "x".repeat(5_000)
     );
     stream.write_all(request.as_bytes()).unwrap();
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).unwrap();
-    let response: Value = serde_json::from_slice(&response).unwrap();
+    let response: Value = serde_json::from_slice(&read_frame(&mut stream)).unwrap();
     assert_eq!(response["ok"], false);
     assert_eq!(response["outcome"], "malformed");
 
