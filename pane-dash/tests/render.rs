@@ -7,7 +7,7 @@ use pane_dash::config::LoadedUiConfig;
 use pane_dash::creation::{
     CreateContext, CreateDraft, CreationId, CreationResolution, SplitDirection,
 };
-use pane_dash::model::{Model, ModelConfig, PaneId};
+use pane_dash::model::{HeadlessRecord, HeadlessSessionId, Model, ModelConfig, PaneId, Status};
 use pane_dash::options::DashConfig;
 use pane_dash::palette::Palette;
 use pane_dash::preview::PreviewFrame;
@@ -41,6 +41,7 @@ fn record(session: &str, pane_id: &str, status: &str, title: &str) -> RawRecord 
         heartbeat: Some(NOW),
         title: title.into(),
         model: "sonnet".into(),
+        opencode_session: String::new(),
         tag: "important".into(),
         group: "1".into(),
     }
@@ -108,6 +109,32 @@ fn draw_buffer(app: &AppState, width: u16, height: u16, now: u64) -> Buffer {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, app, now)).unwrap();
     terminal.backend().buffer().clone()
+}
+
+#[test]
+fn renders_headless_sessions_in_a_separate_kimaki_section() {
+    let mut state = app(vec![record("dash", "%1", "idle", "Pane task")]);
+    reduce(
+        &mut state,
+        Event::HeadlessSnapshot {
+            records: vec![HeadlessRecord {
+                source_url: "http://127.0.0.1:53550".into(),
+                session_id: HeadlessSessionId::from("ses_live"),
+                title: "Headless task".into(),
+                directory: "/work/project".into(),
+                model: "gpt-test".into(),
+                status: Status::Working,
+                status_since: Some(990),
+            }],
+            warning: None,
+        },
+    );
+
+    let rendered = draw(&state, 160, 20);
+    assert!(rendered.contains("▾ kimaki (1)"));
+    assert!(rendered.contains("Headless task"));
+    assert!(rendered.contains("working 1"));
+    assert!(rendered.contains("2 items"));
 }
 
 #[test]

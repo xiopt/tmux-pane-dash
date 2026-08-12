@@ -123,7 +123,7 @@ async function launchBoundPopup(rootPath: string, env: Record<string, string>, t
 async function realHomeState() {
   const home = process.env.HOME
   if (!home) throw new Error("real HOME is unavailable")
-  return Promise.all([join(home, ".local", "share", "tmux-pane-dash"), join(home, ".config", "opencode", "opencode.json"), join(home, ".tmux.conf")].map(async path => {
+  return Promise.all([join(home, ".local", "share", "tmux-pane-dash"), join(home, ".config", "opencode", "opencode.json"), join(home, ".config", "opencode", "tui.json"), join(home, ".tmux.conf")].map(async path => {
     try {
       const info = await lstat(path)
       return { path, present: true, lstat: { mode: info.mode, size: info.size, dev: info.dev, ino: info.ino, symlink: info.isSymbolicLink() }, bytes: Array.from(await readFile(path)) }
@@ -162,6 +162,7 @@ async function lifecycleConfigState(env: Record<string, string>) {
   return {
     tmux: await configState(join(env.HOME, ".tmux.conf")),
     opencode: await configState(join(env.XDG_CONFIG_HOME, "opencode", "opencode.json")),
+    opencodeTui: await configState(join(env.XDG_CONFIG_HOME, "opencode", "tui.json")),
   }
 }
 
@@ -175,10 +176,10 @@ async function assertNoTransactionJournals(managed: string) {
 
 async function componentEnvironment(rootPath: string, name: string) {
   const env = { HOME: join(rootPath, `${name}-home`), XDG_DATA_HOME: join(rootPath, `${name}-data`), XDG_CONFIG_HOME: join(rootPath, `${name}-config`) }
-  const tmux = join(env.HOME, ".tmux.conf"), opencode = join(env.XDG_CONFIG_HOME, "opencode", "opencode.json")
+  const tmux = join(env.HOME, ".tmux.conf"), opencode = join(env.XDG_CONFIG_HOME, "opencode", "opencode.json"), opencodeTui = join(env.XDG_CONFIG_HOME, "opencode", "tui.json")
   await Promise.all([mkdir(dirname(tmux), { recursive: true }), mkdir(dirname(opencode), { recursive: true }), mkdir(env.XDG_DATA_HOME, { recursive: true })])
-  await writeFile(tmux, `set -g status ${name}`, { mode: 0o640 }); await writeFile(opencode, `{"sentinel":"${name}","plugin":[]}\n`, { mode: 0o600 })
-  return { env, tmux, opencode, baseline: await lifecycleConfigState(env) }
+  await writeFile(tmux, `set -g status ${name}`, { mode: 0o640 }); await writeFile(opencode, `{"sentinel":"${name}","plugin":[]}\n`, { mode: 0o600 }); await writeFile(opencodeTui, `{"sentinel":"${name}-tui","plugin":[]}\n`, { mode: 0o600 })
+  return { env, tmux, opencode, opencodeTui, baseline: await lifecycleConfigState(env) }
 }
 
 async function fixedPathTmux() {
@@ -267,7 +268,9 @@ test("lifecycle: packed runtime installs, updates, rolls back, and uninstalls on
     const server = await fixtureServer(releases), guard = installNetworkGuard(server.origin), output: string[] = []
     const managed = join(h.env.XDG_DATA_HOME, "tmux-pane-dash")
     const tmuxBin = await realpath(process.env.TMUX_BIN ?? (() => { throw new Error("TMUX_BIN required") })())
-    h.env.PATH = `${dirname(tmuxBin)}:${h.env.PATH}`
+    const toolBin = join(fixtureRoot, "bin"), opencodeBin = join(toolBin, "opencode")
+    await mkdir(toolBin); await writeFile(opencodeBin, "#!/bin/sh\nprintf '1.18.15\\n'\n", { mode: 0o755 }); await chmod(opencodeBin, 0o755)
+    h.env.PATH = `${toolBin}:${dirname(tmuxBin)}:${h.env.PATH}`
     const harnessTmux = async (args: readonly string[]) => {
       const child = Bun.spawn([tmuxBin, ...args], { env: { ...h.env, TMUX: "", TMUX_PANE: "" }, stdout: "pipe", stderr: "pipe" })
       const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
@@ -319,7 +322,7 @@ process.on("exit", () => fs.writeFileSync(process.env.PANE_DASH_DENY_NET_OBSERVE
       await cli(runtime, ["update"], newDeps)
 
       const rollbackBaseline = { current: await readlink(join(managed, "current")), configs: await lifecycleConfigState(h.env), ownership: await pathState(join(managed, "state", "ownership.json")), versions: await directoryEntries(join(managed, "versions")) }
-      expect(rollbackBaseline.current).toBe("versions/0.1.2")
+      expect(rollbackBaseline.current).toBe("versions/0.1.3")
       const rollback = { ...oldDeps }
       Object.defineProperty(rollback, "signal", { get: () => readlinkSync(join(managed, "current")) === "versions/0.1.2" ? "TERM" : undefined })
       await expect(cli(runtime, ["setup", "--allow-downgrade"], rollback)).rejects.toThrow("E_SIGNAL_TERM")
@@ -341,32 +344,38 @@ process.on("exit", () => fs.writeFileSync(process.env.PANE_DASH_DENY_NET_OBSERVE
 
       for (const component of ["no-tmux", "no-opencode"] as const) {
         const isolated = await componentEnvironment(fixtureRoot, component)
+        isolated.env.PATH = h.env.PATH
         const deps = runtimeDependencies({ manifest: await fixtureManifest("0.1.2", releases[0]!), version: "0.1.2", fetch: server.fetch, env: isolated.env, output })
         await cli(runtime, component === "no-tmux" ? ["setup", "--no-tmux"] : ["setup", "--no-opencode"], deps)
         const ownership = JSON.parse(await readFile(join(isolated.env.XDG_DATA_HOME, "tmux-pane-dash", "state", "ownership.json"), "utf8"))
         const enabled = component === "no-tmux" ? "opencode" : "tmux", disabled = component === "no-tmux" ? "tmux" : "opencode"
         expect(ownership.components[disabled]).toBeNull()
+        expect(ownership.components.opencodeTui === null).toBe(component === "no-opencode")
         expect(Object.keys(ownership.components[enabled]).sort()).toEqual(["baselineBackup", "logicalPath", "marker", "packageEntries", "resolvedPath"])
+        if (component === "no-tmux") expect(Object.keys(ownership.components.opencodeTui).sort()).toEqual(["baselineBackup", "logicalPath", "marker", "packageEntries", "resolvedPath"])
         expect(await lifecycleConfigState(isolated.env)).not.toEqual(isolated.baseline)
-        expect(await readFile(component === "no-tmux" ? isolated.opencode : isolated.tmux, "utf8")).toContain(component === "no-tmux" ? "@xiopt/pane-dash-opencode@0.1.3" : "tmux-pane-dash")
+        expect(await readFile(component === "no-tmux" ? isolated.opencode : isolated.tmux, "utf8")).toContain(component === "no-tmux" ? "@xiopt/pane-dash-opencode@0.1.2" : "tmux-pane-dash")
         expect(component === "no-tmux" ? await configState(isolated.tmux) : await configState(isolated.opencode)).toEqual(component === "no-tmux" ? isolated.baseline.tmux : isolated.baseline.opencode)
+        if (component === "no-opencode") expect(await configState(isolated.opencodeTui)).toEqual(isolated.baseline.opencodeTui)
         await cli(runtime, ["uninstall"], deps)
         expect(await lifecycleConfigState(isolated.env)).toEqual(isolated.baseline)
       }
 
       const migration = await componentEnvironment(fixtureRoot, "migration"), legacyRoot = join(fixtureRoot, "legacy", "tmux-pane-dash", "opencode-plugin"), legacyTarget = join(legacyRoot, "pane-dash.ts"), legacyLink = join(migration.env.XDG_CONFIG_HOME, "opencode", "plugin", "pane-dash.ts")
+      migration.env.PATH = h.env.PATH
       await mkdir(legacyRoot, { recursive: true }); await writeFile(legacyTarget, "export const legacy = true\n"); await mkdir(dirname(legacyLink), { recursive: true }); await symlink(legacyTarget, legacyLink)
       const migrationDeps = runtimeDependencies({ manifest: await fixtureManifest("0.1.2", releases[0]!), version: "0.1.2", fetch: server.fetch, env: migration.env, output })
       await cli(runtime, ["setup", "--no-tmux", "--migrate"], migrationDeps)
       expect(await pathState(legacyLink)).toEqual({ present: false }); expect(await readFile(legacyTarget, "utf8")).toBe("export const legacy = true\n")
       const migratedOwnership = JSON.parse(await readFile(join(migration.env.XDG_DATA_HOME, "tmux-pane-dash", "state", "ownership.json"), "utf8"))
       expect(migratedOwnership.migrations).toEqual([{ from: legacyLink, to: await realpath(legacyTarget), sha256: "" }])
-      expect(await readFile(migration.opencode, "utf8")).toContain("@xiopt/pane-dash-opencode@0.1.3")
+      expect(await readFile(migration.opencode, "utf8")).toContain("@xiopt/pane-dash-opencode@0.1.2")
       await assertNoTransactionJournals(join(migration.env.XDG_DATA_HOME, "tmux-pane-dash"))
       await cli(runtime, ["uninstall"], migrationDeps)
       expect(await lifecycleConfigState(migration.env)).toEqual(migration.baseline)
 
       const conflict = await componentEnvironment(fixtureRoot, "migration-conflict"), conflictLink = join(conflict.env.XDG_CONFIG_HOME, "opencode", "plugin", "pane-dash.ts"), conflictOther = join(conflict.env.XDG_CONFIG_HOME, "opencode", "plugins", "pane-dash.ts"), conflictManaged = join(conflict.env.XDG_DATA_HOME, "tmux-pane-dash")
+      conflict.env.PATH = h.env.PATH
       await mkdir(dirname(conflictLink), { recursive: true }); await mkdir(dirname(conflictOther), { recursive: true }); await symlink(legacyTarget, conflictLink); await symlink(legacyTarget, conflictOther)
       const conflictBefore = { links: [await readlink(conflictLink), await readlink(conflictOther)], configs: await lifecycleConfigState(conflict.env), managed: await pathState(conflictManaged), requests: server.requestsFor("0.1.2") }
       const conflictDeps = runtimeDependencies({ manifest: await fixtureManifest("0.1.2", releases[0]!), version: "0.1.2", fetch: server.fetch, env: conflict.env, output })

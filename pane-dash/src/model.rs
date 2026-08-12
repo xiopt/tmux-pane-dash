@@ -2,7 +2,7 @@
 mod tests {
     use std::collections::HashSet;
 
-    use super::{Model, ModelConfig, Row, Status};
+    use super::{HeadlessRecord, HeadlessSessionId, Model, ModelConfig, Row, Status};
     use crate::snapshot::RawRecord;
 
     fn record() -> RawRecord {
@@ -23,6 +23,7 @@ mod tests {
             heartbeat: None,
             title: String::new(),
             model: String::new(),
+            opencode_session: String::new(),
             tag: String::new(),
             group: String::new(),
         }
@@ -36,6 +37,7 @@ mod tests {
     fn discovers_status_command_or_tagged_records_only() {
         let mut status_only = record();
         status_only.status = "idle".into();
+        status_only.heartbeat = Some(1_000);
         let mut command_only = record();
         command_only.pane_id = "%2".into();
         command_only.pane_current_command = "opencode".into();
@@ -72,9 +74,64 @@ mod tests {
     }
 
     #[test]
+    fn stale_status_only_panes_are_dropped_but_boundary_command_and_tag_exceptions_remain() {
+        let mut boundary = record();
+        boundary.pane_id = "%boundary".into();
+        boundary.status = "unknown".into();
+        boundary.heartbeat = Some(940);
+
+        let mut expired = boundary.clone();
+        expired.pane_id = "%expired".into();
+        expired.pane_current_command = "fish".into();
+        expired.heartbeat = Some(939);
+
+        let mut missing = expired.clone();
+        missing.pane_id = "%missing".into();
+        missing.heartbeat = None;
+
+        let mut command = expired.clone();
+        command.pane_id = "%command".into();
+        command.pane_current_command = "opencode".into();
+
+        let mut tagged = expired.clone();
+        tagged.pane_id = "%tagged".into();
+        tagged.tag = "keep".into();
+
+        let built = Model::build(
+            &[boundary, expired, missing, command, tagged],
+            &ModelConfig::default(),
+            1_000,
+        );
+
+        assert!(built.panes().contains_key(&"%boundary".into()));
+        assert!(built.panes().contains_key(&"%command".into()));
+        assert!(built.panes().contains_key(&"%tagged".into()));
+        assert!(!built.panes().contains_key(&"%expired".into()));
+        assert!(!built.panes().contains_key(&"%missing".into()));
+    }
+
+    #[test]
+    fn hidden_status_excludes_command_matched_panes_unless_tagged() {
+        let mut hidden = record();
+        hidden.status = "hidden".into();
+        hidden.heartbeat = Some(1_000);
+        hidden.pane_current_command = "opencode".into();
+
+        let mut tagged = hidden.clone();
+        tagged.pane_id = "%tagged".into();
+        tagged.tag = "keep".into();
+
+        let built = model(&[hidden, tagged]);
+
+        assert!(!built.panes().contains_key(&"%1".into()));
+        assert!(built.panes().contains_key(&"%tagged".into()));
+    }
+
+    #[test]
     fn preserves_linked_pane_memberships_and_last_canonical_facts() {
         let mut first = record();
         first.status = "working".into();
+        first.heartbeat = Some(1_000);
         let mut linked = first.clone();
         linked.session_id = "$2".into();
         linked.session_name = "beta".into();
@@ -175,6 +232,7 @@ mod tests {
         let mut stale = threshold.clone();
         stale.pane_id = "%2".into();
         stale.heartbeat = Some(939);
+        stale.tag = "keep".into();
         let mut garbage = threshold.clone();
         garbage.pane_id = "%3".into();
         garbage.status = "unrecognized".into();
@@ -195,6 +253,7 @@ mod tests {
     fn applies_heartbeat_freshness_only_to_status_publishing_panes() {
         let mut missing_heartbeat = record();
         missing_heartbeat.status = "working".into();
+        missing_heartbeat.tag = "keep".into();
         let mut command_only = record();
         command_only.pane_id = "%2".into();
         command_only.pane_current_command = "opencode".into();
@@ -267,6 +326,9 @@ mod tests {
         same_status_other_session.heartbeat = Some(1_000);
         items.push(same_status_other_session);
 
+        items[10].tag = "keep".into();
+        items[11].tag = "keep".into();
+
         let input_order = [10, 3, 13, 7, 1, 12, 5, 9, 0, 11, 4, 8, 6, 2];
         let input: Vec<_> = input_order
             .into_iter()
@@ -330,6 +392,56 @@ mod tests {
         assert_eq!(same.content_hash(), identical.content_hash());
         assert_ne!(same.content_hash(), model(&[changed]).content_hash());
     }
+
+    #[test]
+    fn headless_rows_use_exact_session_id_dedup_and_separate_identity() {
+        let mut pane = record();
+        pane.status = "working".into();
+        pane.heartbeat = Some(1_000);
+        pane.opencode_session = "ses_attached".into();
+        let headless = [
+            HeadlessRecord {
+                source_url: "http://127.0.0.1:53550".into(),
+                session_id: HeadlessSessionId::from("ses_attached"),
+                title: "attached duplicate".into(),
+                directory: "/same/path".into(),
+                model: "model".into(),
+                status: Status::Working,
+                status_since: Some(900),
+            },
+            HeadlessRecord {
+                source_url: "http://127.0.0.1:53550".into(),
+                session_id: HeadlessSessionId::from("ses_headless"),
+                title: "same title and path".into(),
+                directory: "/same/path".into(),
+                model: "model".into(),
+                status: Status::NeedsInput,
+                status_since: Some(901),
+            },
+        ];
+
+        let built = Model::build_complete(
+            &[pane],
+            &headless,
+            &ModelConfig::default(),
+            1_000,
+            &HashSet::new(),
+        );
+
+        assert_eq!(built.headless().len(), 1);
+        assert_eq!(built.headless()[0].session_id.0, "ses_headless");
+        assert!(matches!(
+            built.rows(true)[0],
+            Row::HeadlessHeader {
+                session_count: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &built.rows(true)[1],
+            Row::Headless { session_id, .. } if session_id.0 == "ses_headless"
+        ));
+    }
 }
 use std::cell::{Cell, OnceCell};
 use std::collections::hash_map::DefaultHasher;
@@ -375,6 +487,7 @@ macro_rules! id {
 id!(SessionId);
 id!(WindowId);
 id!(PaneId);
+id!(HeadlessSessionId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Status {
@@ -393,7 +506,19 @@ pub struct Pane {
     pub dead: bool,
     pub title: String,
     pub model: String,
+    pub opencode_session: String,
     pub tag: String,
+    pub status: Status,
+    pub status_since: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HeadlessRecord {
+    pub source_url: String,
+    pub session_id: HeadlessSessionId,
+    pub title: String,
+    pub directory: String,
+    pub model: String,
     pub status: Status,
     pub status_since: Option<u64>,
 }
@@ -439,6 +564,7 @@ pub struct Model {
     sessions: HashMap<SessionId, Session>,
     windows: HashMap<WindowId, Window>,
     memberships: Vec<Membership>,
+    headless: Vec<HeadlessRecord>,
     grouped: bool,
     content_hash: u64,
     row_cache: RowCache,
@@ -450,6 +576,7 @@ impl PartialEq for Model {
             && self.sessions == other.sessions
             && self.windows == other.windows
             && self.memberships == other.memberships
+            && self.headless == other.headless
             && self.grouped == other.grouped
             && self.content_hash == other.content_hash
     }
@@ -466,6 +593,18 @@ struct RowCache {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
+    HeadlessHeader {
+        session_count: usize,
+        working_count: usize,
+    },
+    Headless {
+        session_id: HeadlessSessionId,
+        title: String,
+        directory: String,
+        model: String,
+        status: Status,
+        status_since: Option<u64>,
+    },
     SessionHeader {
         session_id: SessionId,
         name: String,
@@ -493,11 +632,21 @@ pub enum Row {
 
 impl Model {
     pub fn build(records: &[RawRecord], cfg: &ModelConfig, now: u64) -> Self {
-        Self::build_with_ephemeral(records, cfg, now, &HashSet::new())
+        Self::build_complete(records, &[], cfg, now, &HashSet::new())
     }
 
     pub fn build_with_ephemeral(
         records: &[RawRecord],
+        cfg: &ModelConfig,
+        now: u64,
+        ephemeral: &HashSet<PaneId>,
+    ) -> Self {
+        Self::build_complete(records, &[], cfg, now, ephemeral)
+    }
+
+    pub fn build_complete(
+        records: &[RawRecord],
+        headless: &[HeadlessRecord],
         cfg: &ModelConfig,
         now: u64,
         ephemeral: &HashSet<PaneId>,
@@ -511,7 +660,7 @@ impl Model {
         let mut memberships = Vec::new();
 
         for record in records.iter().filter(|record| {
-            is_discovered(record, cfg)
+            is_discovered(record, cfg, now)
                 || (!record.pane_dead && ephemeral.contains(&PaneId(record.pane_id.clone())))
         }) {
             let session_id = SessionId(record.session_id.clone());
@@ -539,6 +688,7 @@ impl Model {
                     dead: record.pane_dead,
                     title: record.title.clone(),
                     model: record.model.clone(),
+                    opencode_session: record.opencode_session.clone(),
                     tag: record.tag.clone(),
                     status,
                     status_since: record.status_since,
@@ -554,12 +704,32 @@ impl Model {
             });
         }
 
-        let content_hash = hash_content(&memberships, &panes, &sessions, &windows, grouped);
+        let pane_sessions = panes
+            .values()
+            .filter(|pane| !pane.opencode_session.is_empty())
+            .map(|pane| pane.opencode_session.as_str())
+            .collect::<HashSet<_>>();
+        let mut headless = headless
+            .iter()
+            .filter(|record| !pane_sessions.contains(record.session_id.0.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        headless.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        headless.dedup_by(|left, right| left.session_id == right.session_id);
+        let content_hash = hash_content(
+            &memberships,
+            &panes,
+            &sessions,
+            &windows,
+            &headless,
+            grouped,
+        );
         Self {
             panes,
             sessions,
             windows,
             memberships,
+            headless,
             grouped,
             content_hash,
             row_cache: RowCache::default(),
@@ -580,6 +750,44 @@ impl Model {
 
     pub fn memberships(&self) -> &[Membership] {
         &self.memberships
+    }
+
+    pub fn headless(&self) -> &[HeadlessRecord] {
+        &self.headless
+    }
+
+    pub fn replace_headless(&self, headless: &[HeadlessRecord]) -> Self {
+        let pane_sessions = self
+            .panes
+            .values()
+            .filter(|pane| !pane.opencode_session.is_empty())
+            .map(|pane| pane.opencode_session.as_str())
+            .collect::<HashSet<_>>();
+        let mut headless = headless
+            .iter()
+            .filter(|record| !pane_sessions.contains(record.session_id.0.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        headless.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        headless.dedup_by(|left, right| left.session_id == right.session_id);
+        let content_hash = hash_content(
+            &self.memberships,
+            &self.panes,
+            &self.sessions,
+            &self.windows,
+            &headless,
+            self.grouped,
+        );
+        Self {
+            panes: self.panes.clone(),
+            sessions: self.sessions.clone(),
+            windows: self.windows.clone(),
+            memberships: self.memberships.clone(),
+            headless,
+            grouped: self.grouped,
+            content_hash,
+            row_cache: RowCache::default(),
+        }
     }
 
     pub fn grouped(&self) -> bool {
@@ -624,6 +832,17 @@ impl Model {
         });
 
         let mut rows = Vec::new();
+        if !self.headless.is_empty() {
+            rows.push(Row::HeadlessHeader {
+                session_count: self.headless.len(),
+                working_count: self
+                    .headless
+                    .iter()
+                    .filter(|record| record.status == Status::Working)
+                    .count(),
+            });
+            rows.extend(self.headless.iter().map(headless_row));
+        }
         for (session_id, session) in sessions {
             let mut memberships: Vec<_> = self
                 .memberships
@@ -654,10 +873,25 @@ impl Model {
     fn flat_rows(&self) -> Vec<Row> {
         let mut memberships: Vec<_> = self.memberships.iter().collect();
         memberships.sort_by(|left, right| self.flat_order(left, right));
-        memberships
+        let mut rows = memberships
             .into_iter()
             .map(|membership| self.pane_row(membership))
-            .collect()
+            .chain(self.headless.iter().map(headless_row))
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| match row {
+            Row::Pane {
+                status,
+                status_since,
+                ..
+            }
+            | Row::Headless {
+                status,
+                status_since,
+                ..
+            } => (status_priority(*status), status_since.unwrap_or(u64::MAX)),
+            Row::SessionHeader { .. } | Row::HeadlessHeader { .. } => unreachable!(),
+        });
+        rows
     }
 
     fn flat_order(&self, left: &Membership, right: &Membership) -> std::cmp::Ordering {
@@ -699,10 +933,25 @@ impl Model {
     }
 }
 
-pub fn is_discovered(record: &RawRecord, cfg: &ModelConfig) -> bool {
-    !record.status.is_empty()
-        || record.pane_current_command == cfg.match_pattern
-        || !record.tag.is_empty()
+fn headless_row(record: &HeadlessRecord) -> Row {
+    Row::Headless {
+        session_id: record.session_id.clone(),
+        title: record.title.clone(),
+        directory: record.directory.clone(),
+        model: record.model.clone(),
+        status: record.status,
+        status_since: record.status_since,
+    }
+}
+
+pub fn is_discovered(record: &RawRecord, cfg: &ModelConfig, now: u64) -> bool {
+    !record.tag.is_empty()
+        || (record.status != "hidden"
+            && ((!record.status.is_empty()
+                && record
+                    .heartbeat
+                    .is_some_and(|heartbeat| now.saturating_sub(heartbeat) <= cfg.stale_secs))
+                || record.pane_current_command == cfg.match_pattern))
 }
 
 fn derive_status(record: &RawRecord, stale_secs: u64, now: u64) -> Status {
@@ -750,6 +999,7 @@ fn hash_content(
     panes: &HashMap<PaneId, Pane>,
     sessions: &HashMap<SessionId, Session>,
     windows: &HashMap<WindowId, Window>,
+    headless: &[HeadlessRecord],
     grouped: bool,
 ) -> u64 {
     let mut entries: Vec<_> = memberships
@@ -765,6 +1015,7 @@ fn hash_content(
                 pane.dead,
                 &pane.title,
                 &pane.model,
+                &pane.opencode_session,
                 &pane.tag,
             )
         })
@@ -788,5 +1039,6 @@ fn hash_content(
     for entry in entries {
         entry.hash(&mut hasher);
     }
+    headless.hash(&mut hasher);
     hasher.finish()
 }

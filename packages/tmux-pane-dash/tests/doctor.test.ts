@@ -4,7 +4,7 @@ import { DOCTOR_CHECK_IDS, doctor, renderDoctorHuman, renderDoctorJson } from ".
 import { managedTmuxBlock } from "../src/config-tmux"
 import type { Dependencies, DoctorFs } from "../src/runtime"
 
-const root = "/data/tmux-pane-dash", version = "0.1.0", versionRoot = `${root}/versions/${version}`, config = "/home/.config/opencode/opencode.json"
+const root = "/data/tmux-pane-dash", version = "0.1.0", versionRoot = `${root}/versions/${version}`, config = "/home/.config/opencode/opencode.json", tuiConfig = "/home/.config/opencode/tui.json"
 const digest = (value: string) => createHash("sha256").update(value).digest("hex")
 const payload = [["bin/pane-dash", "binary", 0o755], ["pane_dash.tmux", "tmux", 0o755], ["scripts/open.sh", "open", 0o755], ["scripts/tag.sh", "tag", 0o755], ["README.md", "readme", 0o644], ["LICENSE", "license", 0o644], ["VERSION", "0.1.0\n", 0o644]] as const
 
@@ -13,9 +13,9 @@ function fixture(fault?: string, tmuxTmpdir?: string) {
   const files = payload.map(([path, content, mode]) => ({ logicalPath: `${versionRoot}/${path}`, resolvedPath: `${versionRoot}/${path}`, sha256: digest(content), mode, type: "file" as const }))
   if (fault === "ownership.paths" || fault === "ownership.managed-paths") files[0] = { ...files[0]!, logicalPath: "/outside/pane-dash", resolvedPath: "/outside/pane-dash" }
   const tmuxConfig = fault === "tmux.config" ? "set -g @pane-dash-engine old\n" : marker, openCodeConfig = fault === "opencode.config" ? "not json" : '{"plugin":["@xiopt/pane-dash-opencode@0.1.0"]}'
-  const ownership = { schemaVersion: 1, packageVersion: version, releaseVersion: version, archive: { target: "x86_64-unknown-linux-musl", sha256: "0".repeat(64) }, files, currentTarget: `versions/${version}`, components: { tmux: { logicalPath: "/home/.tmux.conf", resolvedPath: "/home/.tmux.conf", marker, packageEntries: [], baselineBackup: { logicalPath: "/home/.tmux.conf", sha256: digest(tmuxConfig) } }, opencode: { logicalPath: config, resolvedPath: config, marker: "@xiopt/pane-dash-opencode@0.1.0", packageEntries: ["@xiopt/pane-dash-opencode@0.1.0"], baselineBackup: { logicalPath: config, sha256: digest(openCodeConfig) } } }, migrations: [] }
+  const ownership = { schemaVersion: 1, packageVersion: version, releaseVersion: version, archive: { target: "x86_64-unknown-linux-musl", sha256: "0".repeat(64) }, files, currentTarget: `versions/${version}`, components: { tmux: { logicalPath: "/home/.tmux.conf", resolvedPath: "/home/.tmux.conf", marker, packageEntries: [], baselineBackup: { logicalPath: "/home/.tmux.conf", sha256: digest(tmuxConfig) } }, opencode: { logicalPath: config, resolvedPath: config, marker: "@xiopt/pane-dash-opencode@0.1.0", packageEntries: ["@xiopt/pane-dash-opencode@0.1.0"], baselineBackup: { logicalPath: config, sha256: digest(openCodeConfig) } }, opencodeTui: { logicalPath: tuiConfig, resolvedPath: tuiConfig, marker: "@xiopt/pane-dash-opencode@0.1.0", packageEntries: ["@xiopt/pane-dash-opencode@0.1.0"], baselineBackup: { logicalPath: tuiConfig, sha256: digest(openCodeConfig) } } }, migrations: [] }
   const manifest = { schemaVersion: 1, product: "tmux-pane-dash", version, target: ownership.archive.target, asset: "asset", files: payload.map(([path, content, mode]) => ({ path, sha256: digest(content), size: content.length, mode: mode.toString(8).padStart(4, "0") })) }
-  const bytes = new Map<string, string>([[`${root}/state/ownership.json`, JSON.stringify(fault === "ownership.schema" ? { nope: true } : ownership)], [`${versionRoot}/manifest.json`, JSON.stringify(fault === "inventory.metadata" ? { ...manifest, version: "bad" } : manifest)], ["/home/.tmux.conf", tmuxConfig], [config, openCodeConfig]])
+  const bytes = new Map<string, string>([[`${root}/state/ownership.json`, JSON.stringify(fault === "ownership.schema" ? { nope: true } : ownership)], [`${versionRoot}/manifest.json`, JSON.stringify(fault === "inventory.metadata" ? { ...manifest, version: "bad" } : manifest)], ["/home/.tmux.conf", tmuxConfig], [config, openCodeConfig], [tuiConfig, openCodeConfig]])
   for (const [path, content] of payload) bytes.set(`${versionRoot}/${path}`, fault === "inventory.metadata" && path === "README.md" ? "changed" : content)
   const info = (path: string) => {
     if (fault === "current.link" && path === `${root}/current`) return { kind: "file" as const, mode: 0o644, size: 0 }
@@ -25,7 +25,8 @@ function fixture(fault?: string, tmuxTmpdir?: string) {
     throw Object.assign(new Error(`missing ${path}`), { code: "ENOENT" })
   }
   let bindings = [
-    `bind-key -T prefix D run-shell '${root}/current/scripts/open.sh' '${root}/current/bin/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'`,
+    `bind-key -T prefix Tab run-shell '${root}/current/scripts/open.sh' '${root}/current/bin/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'`,
+    `bind-key -T prefix j run-shell '${root}/current/scripts/open.sh' --notification-list '${root}/current/bin/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'`,
     `bind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle '#{pane_id}'`,
     `bind-key -T prefix M command-prompt -p 'pane-dash label:' \"set-option -p @pane_dash_label_input \\\"%%%\\\" ; run-shell '\"${root}/current/scripts/tag.sh\" label-from-option \\\"#{pane_id}\\\"'\"`,
   ].join("\n")
@@ -43,7 +44,9 @@ function fixture(fault?: string, tmuxTmpdir?: string) {
     expect(options.timeoutMs).toBe(5_000); expect(options.maxOutputBytes).toBe(path === "tmux" && args[0] === "list-keys" ? 256 * 1024 : 8 * 1024); expect(options.env).toEqual(expectedChildEnv)
     if (fault === "binary.version" && path.includes("pane-dash")) return { code: 1, stdout: "bad\n", stderr: "" }
     if (fault === "tmux.version" && args[0] === "-V") return { code: 0, stdout: "tmux 3.5\n", stderr: "" }
+    if (fault === "opencode.version" && path === "opencode") return { code: 0, stdout: "1.17.20\n", stderr: "" }
     if (args[0] === "-V") return { code: 0, stdout: "tmux 3.6\n", stderr: "" }
+    if (path === "opencode") return { code: 0, stdout: "1.18.15\n", stderr: "" }
     if (fault === "tmux.server") return { code: 1, stdout: "", stderr: "no server" }
     return { code: 0, stdout: path === "tmux" ? bindings : "pane-dash 0.1.0\n", stderr: "" }
   } }
@@ -53,6 +56,10 @@ function fixture(fault?: string, tmuxTmpdir?: string) {
     tmuxEnvironments,
     tree: () => JSON.stringify([...bytes].sort(([left], [right]) => left.localeCompare(right))),
     mutate: (path: string, value: string) => bytes.set(path, value),
+    useLegacyOwnership: () => {
+      const { opencodeTui: _opencodeTui, ...components } = ownership.components
+      bytes.set(`${root}/state/ownership.json`, JSON.stringify({ ...ownership, components }))
+    },
     setBindings: (value: string) => { bindings = value },
   }
 }
@@ -67,6 +74,15 @@ test("doctor is offline read-only and stable", async () => {
     { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" },
   ])
   expect(h.tree()).toBe(before)
+})
+
+test("doctor accepts legacy ownership with only tmux and opencode components", async () => {
+  const h = fixture()
+  h.useLegacyOwnership()
+  const report = await doctor(h.deps)
+  expect(report.healthy).toBeTrue()
+  expect(report.checks.find(check => check.id === "ownership.schema")?.status).toBe("ok")
+  expect(report.checks.find(check => check.id === "ownership.paths")?.status).toBe("ok")
 })
 
 test.each([undefined, "", "relative/socket"]) ("doctor ignores non-absolute TMUX_TMPDIR values", async tmuxTmpdir => {
@@ -87,7 +103,7 @@ test("doctor forwards only an absolute TMUX_TMPDIR to both tmux calls", async ()
   ])
 })
 
-test.each(["ownership.schema", "ownership.paths", "transaction.complete", "current.link", "current.target", "inventory.entries", "inventory.metadata", "binary.version", "tmux.version", "tmux.config", "opencode.config", "ownership.managed-paths"])("doctor records %s failures without mutation", async id => {
+test.each(["ownership.schema", "ownership.paths", "transaction.complete", "current.link", "current.target", "inventory.entries", "inventory.metadata", "binary.version", "tmux.version", "tmux.config", "opencode.version", "opencode.config", "ownership.managed-paths"])("doctor records %s failures without mutation", async id => {
   const h = fixture(id), before = h.tree(), report = await doctor(h.deps)
   expect(report.healthy).toBeFalse()
   expect(report.checks.find(check => check.id === id)?.status).toBe("error")
@@ -124,12 +140,17 @@ test("doctor detects changes to its exact managed markers and package entry", as
   const opencode = fixture()
   opencode.mutate(config, '{"plugin":["@xiopt/pane-dash-opencode@0.1.1"]}')
   expect((await doctor(opencode.deps)).checks.find(check => check.id === "opencode.config")?.status).toBe("error")
+
+  const tui = fixture()
+  tui.mutate(tuiConfig, '{"plugin":["@xiopt/pane-dash-opencode@0.1.1"]}')
+  expect((await doctor(tui.deps)).checks.find(check => check.id === "opencode.config")?.status).toBe("error")
 })
 
 test("doctor accepts distinct custom tmux binding records", async () => {
   const h = fixture(), before = h.tree()
   h.setBindings([
     `bind-key -T prefix F run-shell '${root}/current/scripts/open.sh'`,
+    `bind-key -T prefix j run-shell '${root}/current/scripts/open.sh' --notification-list`,
     `bind-key -T prefix g run-shell \"${root}/current/scripts/tag.sh\" toggle`,
     `bind-key -T prefix C-l command-prompt label-from-option '${root}/current/scripts/tag.sh'`,
     `bind-key -T root D run-shell '${root}/old/current/scripts/open.sh'`,
@@ -141,13 +162,14 @@ test("doctor accepts distinct custom tmux binding records", async () => {
 })
 
 test("doctor rejects invalid or non-distinct tmux binding records without mutation", async () => {
-  const dashboard = `bind-key -T prefix F run-shell '${root}/current/scripts/open.sh'`, tag = `bind-key -T prefix g run-shell \"${root}/current/scripts/tag.sh\" toggle`, label = `bind-key -T prefix C-l command-prompt label-from-option '${root}/current/scripts/tag.sh'`
+  const dashboard = `bind-key -T prefix F run-shell '${root}/current/scripts/open.sh'`, notifications = `bind-key -T prefix j run-shell '${root}/current/scripts/open.sh' --notification-list`, tag = `bind-key -T prefix g run-shell \"${root}/current/scripts/tag.sh\" toggle`, label = `bind-key -T prefix C-l command-prompt label-from-option '${root}/current/scripts/tag.sh'`
   for (const [description, bindings] of [
-    ["missing label", `${dashboard}\n${tag}`],
+    ["missing label", `${dashboard}\n${notifications}\n${tag}`],
+    ["missing notifications", `${dashboard}\n${tag}\n${label}`],
     ["one record cannot satisfy actions", `bind-key -T prefix F run-shell '${root}/current/scripts/open.sh' command-prompt '${root}/current/scripts/tag.sh' toggle label-from-option`],
-    ["stale current route", `bind-key -T prefix F run-shell '${root}/old/current/scripts/open.sh'\n${tag}\n${label}`],
-    ["wrong tag action", `${dashboard}\nbind-key -T prefix g run-shell \"${root}/current/scripts/tag.sh\" toggles\n${label}`],
-    ["duplicate dashboard", `${dashboard}\n${dashboard}\n${tag}\n${label}`],
+    ["stale current route", `bind-key -T prefix F run-shell '${root}/old/current/scripts/open.sh'\n${notifications}\n${tag}\n${label}`],
+    ["wrong tag action", `${dashboard}\n${notifications}\nbind-key -T prefix g run-shell \"${root}/current/scripts/tag.sh\" toggles\n${label}`],
+    ["duplicate dashboard", `${dashboard}\n${dashboard}\n${notifications}\n${tag}\n${label}`],
   ]) {
     const h = fixture(), before = h.tree()
     h.setBindings(bindings)

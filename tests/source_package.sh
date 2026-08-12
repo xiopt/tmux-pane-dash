@@ -390,8 +390,8 @@ tmux_stub_dir="$scratch_root/tmux stub"
 mkdir -p "$tmux_stub_dir/global"
 : > "$tmux_stub_dir/calls.log"
 PATH="$extracted/tests/stubs:$sentinel_bin:$PATH" TMUX_STUB_DIR="$tmux_stub_dir" "$extracted/pane_dash.tmux"
-expected_binding="bind-key$(printf '\037')D$(printf '\037')run-shell$(printf '\037')$(shell_quote "$extracted/scripts/open.sh") $(shell_quote "$binary") '#{client_tty}' '#{session_id}' '#{pane_id}'$(printf '\037')"
-actual_binding="$(sed -n '5p' "$tmux_stub_dir/calls.log")"
+expected_binding="bind-key$(printf '\037')Tab$(printf '\037')run-shell$(printf '\037')$(shell_quote "$extracted/scripts/open.sh") $(shell_quote "$binary") '#{client_tty}' '#{session_id}' '#{pane_id}'$(printf '\037')"
+actual_binding="$(awk -v expected="$expected_binding" 'index($0, expected) == 1 { print; exit }' "$tmux_stub_dir/calls.log")"
 [ "$actual_binding" = "$expected_binding" ] || fail 'absent engine did not bind the exact extracted local binary'
 
 wrapped_binary_backup="$binary.actual"
@@ -400,8 +400,10 @@ route_log="$scratch_root/route.argv"
 route_pid="$scratch_root/route.pid"
 cat > "$binary" <<EOF
 #!/usr/bin/env bash
-printf '%s\n' "\$\$" > "$route_pid"
-printf '%s\n' "\$@" > "$route_log"
+if [[ "\${1:-}" != notify ]]; then
+  printf '%s\n' "\$\$" > "$route_pid"
+  printf '%s\n' "\$@" > "$route_log"
+fi
 exec "$wrapped_binary_backup" "\$@"
 EOF
 chmod 755 "$binary"
@@ -425,8 +427,11 @@ for _ in $(seq 1 30); do
 done
 [ "${client_count:-0}" = 2 ] || fail 'two PTY clients did not attach'
 PATH="$sentinel_bin:$PATH" "$extracted/pane_dash.tmux"
-real_binding="$(TMUX='' "$tmux_bin" -L "$socket" list-keys -T prefix | awk '$4 == "D" { print; exit }')"
+real_binding="$(TMUX='' "$tmux_bin" -L "$socket" list-keys -T prefix | awk '$4 == "Tab" { print; exit }')"
 [[ "$real_binding" == *'/bin/pane-dash'* ]] || fail "extracted shim did not bind a local binary [$real_binding]"
+status_binding="$(TMUX='' "$tmux_bin" -L "$socket" list-keys -T root)"
+[[ "$status_binding" == *'notify click --range'* ]] || fail 'extracted shim did not install notification status click'
+[[ "$status_binding" == *'switch-client -t ='* ]] || fail 'extracted shim did not preserve default status click routing'
 expected_tty="$(TMUX='' "$tmux_bin" -L "$socket" list-clients -t two -F '#{client_tty}')"
 client_one_tty="$(TMUX='' "$tmux_bin" -L "$socket" list-clients -t one -F '#{client_tty}')"
 expected_session="$(TMUX='' "$tmux_bin" -L "$socket" list-clients -t two -F '#{session_id}')"
@@ -437,7 +442,7 @@ for _ in $(seq 1 30); do
   sleep 0.1
 done
 [ "${best_tty:-}" = "$client_one_tty" ] || fail 'noninvoking client did not become tmux best client'
-TMUX='' "$tmux_bin" -L "$socket" send-keys -K -c "$expected_tty" C-b D
+TMUX='' "$tmux_bin" -L "$socket" send-keys -K -c "$expected_tty" C-b Tab
 for _ in $(seq 1 50); do
   [ -s "$route_log" ] && [ -s "$route_pid" ] && break
   sleep 0.1

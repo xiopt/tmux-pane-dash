@@ -62,9 +62,10 @@ check_legacy_drift() {
 check_options() {
   local file=$1
   for row in \
-    '| `@pane-dash-key` | `D` | Dashboard prefix binding |' \
+    '| `@pane-dash-key` | `Tab` | Dashboard prefix binding |' \
     '| `@pane-dash-tag-key` | `T` | Tag-toggle prefix binding |' \
     '| `@pane-dash-label-key` | `M` | Typed-label prefix binding |' \
+    '| `@pane-dash-notifications-key` | `j` | Notification-list prefix binding |' \
     '| `@pane-dash-width` | `90%` | Popup width; empty uses default |' \
     '| `@pane-dash-height` | `85%` | Popup height; empty uses default |' \
     '| `@pane-dash-match` | `opencode` | Command match for auto-discovery; explicit empty disables command matching |' \
@@ -92,7 +93,8 @@ check_status() {
 check_keys() {
   local file=$1
   for row in \
-    '| `<prefix> D` | Open dashboard |' \
+    '| `<prefix> Tab` | Open dashboard |' \
+    '| `<prefix> j` | Open notifications |' \
     '| `<prefix> T` | Toggle manual tag using the current command as label |' \
     '| `<prefix> M` | Prompt for and set a manual label |' \
     '| `j` / `k`, `Down` / `Up` | Move down/up |' \
@@ -196,7 +198,7 @@ PY
 
 @test "OpenCode companion status plugin setup and removal are actionable" {
   for text in \
-     '@xiopt/pane-dash-opencode@0.1.2' \
+      '@xiopt/pane-dash-opencode@0.1.6' \
     '--no-opencode' \
     'OpenCode >=1.17.20' \
     'mkdir -p "$HOME/.config/opencode/plugin"' \

@@ -32,7 +32,7 @@ export function fixtureDependencies(input: { responses?: FetchResponse[]; fault?
   const deps: Dependencies = {
     manifest: releaseManifest(), platform: "linux", arch: "x64", executingVersion: "0.1.0", fs, nowMs: () => 0,
     fetch: async (url, init) => { calls.fetch += 1; call("fetch", url, init); return input.responses?.shift() ?? { status: 500 } },
-    spawn: async (path, args, options) => { calls.child += 1; call("spawn", path, args, options); return { code: 0, stdout: "pane-dash 0.1.0\n", stderr: "" } },
+    spawn: async (path, args, options) => { calls.child += 1; call("spawn", path, args, options); return { code: 0, stdout: path === "opencode" ? "1.18.15\n" : "pane-dash 0.1.0\n", stderr: "" } },
     timers: input.timers ?? { setTimeout: (callback, milliseconds) => { calls.timer += 1; call("timer.setTimeout", milliseconds); return callback }, clearTimeout: (timer) => { call("timer.clearTimeout", timer) } },
     signals: input.signals ?? { on: (signal, callback) => { calls.signal += 1; call("signal.on", signal, callback) }, off: (signal, callback) => { calls.signal += 1; call("signal.off", signal, callback) } },
   }

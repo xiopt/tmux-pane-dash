@@ -67,6 +67,147 @@ function normalize(raw) {
   }
 }
 
+// opencode-plugin/src/mode.ts
+function isServeInvocation(argv) {
+  return argv[2] === "serve";
+}
+
+// opencode-plugin/src/sanitize.ts
+function sanitize(value) {
+  return value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 120);
+}
+
+// opencode-plugin/src/notifications.ts
+var NOTIFY_BINARY_OPTION = "@pane_dash_notify_binary";
+var MAX_EVENT_ID_BYTES = 128;
+var SPAWN_OPTIONS = { stdout: "ignore", stderr: "ignore" };
+function object2(value) {
+  return value !== null && typeof value === "object" ? value : {};
+}
+function text(value) {
+  if (typeof value !== "string")
+    return;
+  const result = sanitize(value).trim();
+  return result || undefined;
+}
+function properties(raw) {
+  return object2(raw.properties);
+}
+function validEventID(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_EVENT_ID_BYTES && /^[\x20-\x7e]+$/.test(value);
+}
+function eventID(raw) {
+  return validEventID(raw.id) ? raw.id : undefined;
+}
+function message(prefix, value) {
+  return sanitize(`${prefix}: ${value}`);
+}
+function questionDetail(raw) {
+  const questions = properties(raw).questions;
+  const first = Array.isArray(questions) ? questions[0] : undefined;
+  const question = object2(first);
+  return text(question.header) ?? text(question.question) ?? "question";
+}
+function sessionLabel(raw, context) {
+  return text(context.after.title) ?? text(context.activeSessionID) ?? text(properties(raw).sessionID) ?? "session";
+}
+function isIdleTransition(raw, context) {
+  if (context.before.status !== "working" || context.after.status !== "idle")
+    return false;
+  if (raw.type !== "session.idle" && raw.type !== "session.status")
+    return false;
+  return context.normalized.some((event) => event.type === "status" && event.status === "idle");
+}
+function decideNotification(raw, context) {
+  const id = eventID(raw);
+  if (!id)
+    return;
+  switch (raw.type) {
+    case "permission.asked":
+      return {
+        eventId: id,
+        kind: "permission",
+        message: message("OpenCode permission", text(properties(raw).permission) ?? "request")
+      };
+    case "question.asked":
+      return {
+        eventId: id,
+        kind: "question",
+        message: message("OpenCode question", questionDetail(raw))
+      };
+    case "session.error":
+      if (!context.normalized.some((event) => event.type === "error"))
+        return;
+      return {
+        eventId: id,
+        kind: "error",
+        message: message("OpenCode error", sessionLabel(raw, context))
+      };
+    case "session.idle":
+    case "session.status":
+      return isIdleTransition(raw, context) ? {
+        eventId: id,
+        kind: "finished",
+        message: message("OpenCode finished", sessionLabel(raw, context))
+      } : undefined;
+    default:
+      return;
+  }
+}
+function binaryOutput(stdout) {
+  let value;
+  try {
+    value = typeof stdout === "string" ? stdout : new TextDecoder("utf-8", { fatal: true }).decode(stdout);
+  } catch {
+    return;
+  }
+  if (value.endsWith(`\r
+`))
+    value = value.slice(0, -2);
+  else if (value.endsWith(`
+`))
+    value = value.slice(0, -1);
+  if (!value.startsWith("/") || value.length > 1024 || /[\x00-\x1f\x7f]/.test(value))
+    return;
+  return value;
+}
+var defaultSync = (command, options) => Bun.spawnSync(command, options);
+function resolveNotificationBinary(sync = defaultSync) {
+  try {
+    const result = sync(["tmux", "show-options", "-gqv", NOTIFY_BINARY_OPTION], {
+      stdout: "pipe",
+      stderr: "ignore"
+    });
+    return result.exitCode === 0 ? binaryOutput(result.stdout) : undefined;
+  } catch {
+    return;
+  }
+}
+function notificationArgv(binary, notification) {
+  return [
+    binary,
+    "notify",
+    "publish",
+    "--event-id",
+    notification.eventId,
+    "--kind",
+    notification.kind,
+    "--message",
+    notification.message
+  ];
+}
+var defaultSpawn = (command, options) => Bun.spawn(command, options);
+function createNotificationPublisher(binary, spawn = defaultSpawn) {
+  return (notification) => {
+    if (!binary || !notification)
+      return;
+    try {
+      const child = spawn(notificationArgv(binary, notification), SPAWN_OPTIONS);
+      child.exited.catch(() => {});
+    } catch {}
+  };
+}
+
 // opencode-plugin/src/state.ts
 function createStore() {
   return { sessions: new Map };
@@ -191,14 +332,9 @@ function derive(store) {
   return { status, title, model: store.model };
 }
 
-// opencode-plugin/src/sanitize.ts
-function sanitize(value) {
-  return value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 120);
-}
-
 // opencode-plugin/src/writer.ts
-var SPAWN_OPTIONS = { stdout: "ignore", stderr: "ignore" };
-var defaultSpawn = (command, options) => Bun.spawn(command, options);
+var SPAWN_OPTIONS2 = { stdout: "ignore", stderr: "ignore" };
+var defaultSpawn2 = (command, options) => Bun.spawn(command, options);
 
 class TmuxWriter {
   pane;
@@ -209,7 +345,7 @@ class TmuxWriter {
   completedGeneration = 0;
   desired = new Map;
   confirmed = new Map;
-  constructor(pane, spawn = defaultSpawn) {
+  constructor(pane, spawn = defaultSpawn2) {
     this.pane = pane;
     this.spawn = spawn;
   }
@@ -274,7 +410,7 @@ class TmuxWriter {
         command.push("set-option", "-pt", this.pane, name, value);
     }
     try {
-      if (await this.spawn(command, SPAWN_OPTIONS).exited === 0) {
+      if (await this.spawn(command, SPAWN_OPTIONS2).exited === 0) {
         for (const [name, value] of changes)
           this.confirmed.set(name, value);
       }
@@ -284,6 +420,7 @@ class TmuxWriter {
 
 // opencode-plugin/pane-dash.ts
 var HEARTBEAT_MS = 20000;
+var HIDDEN_STATUS = "hidden";
 var STARTUP_OPTIONS = [
   "@pane_dash_status",
   "@pane_dash_status_since",
@@ -294,8 +431,17 @@ var PaneDash = async () => {
   const pane = process.env.TMUX_PANE;
   if (!pane)
     return {};
-  const store = createStore();
   const writer = new TmuxWriter(pane);
+  if (isServeInvocation(process.argv)) {
+    for (const name of STARTUP_OPTIONS)
+      writer.unsetOption(name, true);
+    writer.unsetOption("@pane_dash_heartbeat", true);
+    writer.setOption("@pane_dash_status", HIDDEN_STATUS, true);
+    process.on("exit", () => writer.clearSync());
+    return {};
+  }
+  const store = createStore();
+  const notify = createNotificationPublisher(resolveNotificationBinary());
   const publish = () => {
     const derived = derive(store);
     const previousStatus = writer.get("@pane_dash_status");
@@ -325,9 +471,19 @@ var PaneDash = async () => {
   publish();
   return {
     event: async ({ event }) => {
-      for (const normalized of normalize(event)) {
-        apply(store, normalized);
+      const raw = event;
+      const before = derive(store);
+      const normalized = normalize(raw);
+      for (const normalizedEvent of normalized) {
+        apply(store, normalizedEvent);
       }
+      const after = derive(store);
+      notify(decideNotification(raw, {
+        before,
+        after,
+        normalized,
+        activeSessionID: store.activeSessionID
+      }));
       publish();
     }
   };

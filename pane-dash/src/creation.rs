@@ -139,6 +139,19 @@ pub struct CreateRequest {
     pub command: Option<String>,
 }
 
+pub fn attach_command(source_url: &str, directory: &str, session_id: &str) -> String {
+    format!(
+        "exec opencode attach {} --dir {} --session {}",
+        shell_single_quote(source_url),
+        shell_single_quote(directory),
+        shell_single_quote(session_id),
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 pub const CREATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn run_creation(
@@ -490,8 +503,8 @@ mod tests {
 
     use super::{
         CreateContext, CreateDraft, CreateStage, CreationError, CreationField, CreationId,
-        CreationProgress, CreationResolution, SplitDirection, ValidatedCwd, build_request,
-        display_error, run_creation, run_creation_until,
+        CreationProgress, CreationResolution, SplitDirection, ValidatedCwd, attach_command,
+        build_request, display_error, run_creation, run_creation_until,
     };
     use crate::model::{PaneId, SessionId};
     use crate::tmux_exec::TmuxExec;
@@ -503,6 +516,22 @@ mod tests {
             cwd: cwd.into(),
             command: command.into(),
         }
+    }
+
+    #[test]
+    fn attach_command_single_quotes_every_exact_hostile_value() {
+        assert_eq!(
+            attach_command(
+                "http://127.0.0.1:53550/a'b;$(touch nope)",
+                "/work/a b/'quoted';$(touch nope)",
+                "ses_'x;$(touch nope)",
+            ),
+            "exec opencode attach 'http://127.0.0.1:53550/a'\"'\"'b;$(touch nope)' --dir '/work/a b/'\"'\"'quoted'\"'\"';$(touch nope)' --session 'ses_'\"'\"'x;$(touch nope)'"
+        );
+        assert_eq!(
+            attach_command("", "", ""),
+            "exec opencode attach '' --dir '' --session ''"
+        );
     }
 
     fn split(direction: SplitDirection) -> CreateContext {

@@ -222,11 +222,13 @@ export async function buildPackages(input: PackageBuildInput): Promise<void> {
     const cli = await buildBundle({ entrypoint: join(packageRoot, "src", "cli.ts"), outdir: nodeBundleDirectory, filename: "cli.js", target: "node", format: "esm", plugins: [manifestPlugin] })
     const runtime = await buildBundle({ entrypoint: join(packageRoot, "src", "runtime.ts"), outdir: nodeBundleDirectory, filename: "runtime.js", target: "node", format: "esm", plugins: [manifestPlugin] })
     const opencode = await buildBundle({ entrypoint: join(root, "opencode-plugin", "pane-dash.ts"), outdir: join(buildRoot, "opencode"), filename: "index.js", target: "bun" })
+    const opencodeTui = await buildBundle({ entrypoint: join(root, "opencode-plugin", "tui.ts"), outdir: join(buildRoot, "opencode-tui"), filename: "tui.js", target: "bun" })
 
     const cliText = decoder.decode(cli), runtimeText = decoder.decode(runtime)
     assertNoBuildResidue(cliText, buildRoot, "CLI")
     assertNoBuildResidue(runtimeText, buildRoot, "runtime")
     assertNoBuildResidue(decoder.decode(opencode), buildRoot, "OpenCode")
+    assertNoBuildResidue(decoder.decode(opencodeTui), buildRoot, "OpenCode TUI")
     assertPackedNodeBundle(cliText)
     assertPackedNodeBundle(runtimeText)
     assertManifestIdentities(cliText, release.manifest)
@@ -236,6 +238,7 @@ export async function buildPackages(input: PackageBuildInput): Promise<void> {
       { target: join(packageRoot, "dist", "cli.js"), bytes: cli, mode: 0o755 },
       { target: join(packageRoot, "dist", "runtime.js"), bytes: runtime, mode: 0o644 },
       { target: join(root, "opencode-plugin", "dist", "index.js"), bytes: opencode, mode: 0o644 },
+      { target: join(root, "opencode-plugin", "dist", "tui.js"), bytes: opencodeTui, mode: 0o644 },
     ], input.requireChange === true)
   } finally {
     await rm(buildRoot, { recursive: true, force: true })

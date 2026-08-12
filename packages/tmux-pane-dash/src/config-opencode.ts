@@ -25,6 +25,11 @@ export async function selectOpenCodeConfig(env: Dependencies["env"], deps: Depen
   return json
 }
 
+export function selectOpenCodeTuiConfig(env: Dependencies["env"]): string {
+  const root = env?.XDG_CONFIG_HOME ? join(env.XDG_CONFIG_HOME, "opencode") : env?.HOME ? join(env.HOME, ".config", "opencode") : fail("E_ROOT")
+  return join(root, "tui.json")
+}
+
 /** Plans, but never performs, removal of the one historical global plugin link. */
 export async function planOpenCodeMigration(input: { configDirectory: string; migrate: boolean }): Promise<readonly PlannedOpenCodeMigration[]> {
   const names = new Set(["pane-dash.ts", "pane-dash.js", "pane_dash.ts", "pane_dash.js"]), candidates: string[] = []
@@ -121,7 +126,7 @@ function insertPlugin(text: string, plugin: Plugin, desired: string): string {
   return `${text.slice(0, entry.end)}${insertion}${text.slice(entry.end)}`
 }
 export function planOpenCodeEdit(input: OpenCodeEditInput): PlannedConfigMutation {
-  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.2", text = decoder.decode(input.bytes), plugin = rootPlugin(text)
+  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.6", text = decoder.decode(input.bytes), plugin = rootPlugin(text)
   if (plugin) {
     const managed = plugin.entries.filter(entry => validPaneDash(entry.value))
     const desiredEntries = managed.filter(entry => entry.value === desired)

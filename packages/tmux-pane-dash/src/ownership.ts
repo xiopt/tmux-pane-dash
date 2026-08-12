@@ -4,9 +4,9 @@ import { CliError } from "./errors"
 import type { Dependencies } from "./runtime"
 
 export type ArchiveFileRecord = { logicalPath: string; resolvedPath: string; sha256: string; mode: number; type: "file" | "directory" | "symlink"; symlinkChain?: readonly string[] }
-export type OwnedConfig = { logicalPath: string; resolvedPath: string; marker: string; packageEntries: readonly string[]; baselineBackup: { logicalPath: string; sha256: string } }
+export type OwnedConfig = { logicalPath: string; resolvedPath: string; marker: string; packageEntries: readonly string[]; baselineBackup: { logicalPath: string; sha256: string }; created?: true }
 export type MigrationAction = { from: string; to: string; sha256: string }
-export interface OwnershipRecord { schemaVersion: 1; packageVersion: string; releaseVersion: string; archive: { target: string; sha256: string }; files: ArchiveFileRecord[]; currentTarget: string; components: { tmux: OwnedConfig | null; opencode: OwnedConfig | null }; migrations: readonly MigrationAction[] }
+export interface OwnershipRecord { schemaVersion: 1; packageVersion: string; releaseVersion: string; archive: { target: string; sha256: string }; files: ArchiveFileRecord[]; currentTarget: string; components: { tmux: OwnedConfig | null; opencode: OwnedConfig | null; opencodeTui?: OwnedConfig | null }; migrations: readonly MigrationAction[] }
 
 const missing = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT"
 const fail = (code: "E_ROOT" | "E_CONFLICT" | "E_OWNERSHIP") => { throw new CliError(code) }

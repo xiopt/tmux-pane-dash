@@ -1,13 +1,14 @@
 {
   "name": "@xiopt/pane-dash-opencode",
-  "version": "0.1.2",
+  "version": "0.1.6",
   "type": "module",
   "main": "./dist/index.js",
   "exports": {
     ".": "./dist/index.js",
-    "./server": "./dist/index.js"
+    "./server": "./dist/index.js",
+    "./tui": "./dist/tui.js"
   },
-  "files": ["dist/index.js", "README.md", "LICENSE"],
+  "files": ["dist/index.js", "dist/tui.js", "README.md", "LICENSE"],
   "engines": {
     "opencode": ">=1.17.20"
   },

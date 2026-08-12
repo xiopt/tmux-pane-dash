@@ -303,6 +303,176 @@ pane_dash_process() {
   command="$(ps -o command= -p "$pid" 2>/dev/null)"
   [[ "$command" == "$BIN"* ]]
 }
+notification_service_count() {
+  ps -axo command= | awk -v binary="$BIN" -v socket="$SOCKET" \
+    'index($0, binary) == 1 && index($0, socket) && $0 ~ / notify serve --tmux-socket / { count++ } END { print count + 0 }'
+}
+notification_service_one() { (( $(notification_service_count) == 1 )); }
+notification_service_ready() {
+  local output
+  output="$(TMUX="$(notification_identity)" TMUX_PANE="$pane" "$BIN" notify list 2>/dev/null)" || return 1
+  [[ "$output" == *'"ok":true'* && "$output" == *'"outcome":"listed"'* ]]
+}
+notification_service_gone() { (( $(notification_service_count) == 0 )); }
+notification_identity() { printf '%s,%s,0\n' "$SOCKET" "$(admin display-message -p '#{pid}')"; }
+notify_client() {
+  local pane="$1"
+  shift
+  TMUX="$(notification_identity)" TMUX_PANE="$pane" "$BIN" notify "$@"
+}
+notification_run_shell() {
+  local server_pid command argument
+  server_pid="$(admin display-message -p '#{pid}')"
+  command="TMUX=$(pd_posix_shell_quote "$SOCKET,$server_pid,0") $(pd_posix_shell_quote "$BIN")"
+  for argument in notify "$@"; do
+    command+=" $(pd_posix_shell_quote "$argument")"
+  done
+  admin run-shell -b "$command"
+}
+notification_list_pids() {
+  local pid command
+  while read -r pid command; do
+    [[ "$command" == "$BIN --notification-list "* ]] || continue
+    printf '%s\n' "$pid"
+  done < <(ps -axo pid=,command=)
+}
+new_notification_list_process() {
+  local before="$1" pid
+  while read -r pid; do
+    grep -Fqx "$pid" <<< "$before" || {
+      NEW_NOTIFICATION_LIST_PID="$pid"
+      return 0
+    }
+  done < <(notification_list_pids)
+  return 1
+}
+notification_open_list_popup() {
+  local index="$1" session_id="$2" pane_id="$3" tty="$4" before server_pid command popup_pid
+  before="$(notification_list_pids)"
+  server_pid="$(admin display-message -p '#{pid}')"
+  command="TMUX=$(pd_posix_shell_quote "$SOCKET,$server_pid,0") $(pd_posix_shell_quote "$BIN") notify click --range m --client $(pd_posix_shell_quote "$tty") >/dev/null 2>&1 && $(pd_posix_shell_quote "$ROOT/scripts/open.sh") --notification-list $(pd_posix_shell_quote "$BIN") $(pd_posix_shell_quote "$tty") $(pd_posix_shell_quote "$session_id") $(pd_posix_shell_quote "$pane_id")"
+  admin run-shell -b "$command"
+  wait_for 'notification list popup process' 3 new_notification_list_process "$before"
+  popup_pid="$NEW_NOTIFICATION_LIST_PID"
+  pane_dash_process "$popup_pid" || die "notification list popup process is not pane-dash: $popup_pid"
+  POPUP_CONTROLS[index]=''
+  POPUP_PIDS[index]="$popup_pid"
+}
+notification_status() { admin show-options -gv @pane_dash_notify_status 2>/dev/null || true; }
+notification_status_contains() { [[ "$(notification_status)" == *"$1"* ]]; }
+notification_list_count() {
+  notify_client "$1" list | perl -MJSON::PP -0777 -e \
+    '$value = decode_json(<STDIN>); print scalar @{$value->{snapshot} // []}'
+}
+notification_list_has_event() {
+  local pane="$1" event="$2" expected="$3"
+  [[ "$(notify_client "$pane" list | perl -MJSON::PP -0777 -e \
+    '$value = decode_json(<STDIN>); print scalar grep { $_->{event_id} eq $ARGV[0] } @{$value->{snapshot} // []}' "$event")" == "$expected" ]]
+}
+tmux_hook_failure_count() {
+  admin show-messages -t "$1" 2>/dev/null | grep -Ec 'returned 1|hook.*(failed|returned)' || true
+}
+transcript_has_hook_failure_since() {
+  tail -c "+$2" "${TRANSCRIPTS[$1]}" | grep -aEq 'returned 1|hook.*(failed|returned)'
+}
+notification_scenario() {
+  local session session_id origin target exit_target tty status list_tag list_offset list_popup_pid list_control list_exited
+  local selection_offset hook_failures_before hook_failures_after
+  session="notify-$RANDOM-$RANDOM"
+  list_tag="notification-list-$RANDOM$RANDOM"
+  admin new-session -d -s "$session" -x 120 -y 40 'exec cat'
+  session_id="$(admin display-message -p -t "$session:0.0" '#{session_id}')"
+  origin="$(admin display-message -p -t "$session:0.0" '#{pane_id}')"
+  target="$(admin split-window -d -P -F '#{pane_id}' -t "$origin" 'exec cat')"
+  exit_target="$(admin split-window -d -P -F '#{pane_id}' -t "$origin" 'exec cat')"
+  tty="${CLIENT_TTYS[0]}"
+  [[ -n "$tty" && -n "$target" ]] || die 'notification selection identities were empty'
+
+  admin switch-client -c "$tty" -t "$session"
+  # switch-client deterministically runs the installed client-session-changed
+  # hook; allow its background run-shell notification command to complete.
+  sleep .2
+  status="$(notify_client "$origin" publish --event-id focused-origin --kind question --message suppressed --pane "$origin")"
+  [[ "$status" == *'"outcome":"suppressed"'* ]] || die "focused origin was not suppressed: $status"
+
+  # A real attached-client pane switch must expand the generic client_tty and
+  # pane_id formats supplied by after-select-pane.  The old hook used the
+  # unavailable hook_client/hook_pane formats and left the service focused on
+  # the previous pane while painting a tmux run-shell failure.
+  selection_offset="$(ansi_size 0)"
+  hook_failures_before="$(tmux_hook_failure_count "$tty")"
+  admin select-pane -t "$target"
+  sleep .2
+  status="$(notify_client "$target" publish --event-id focused-target-by-selection --kind question --message suppressed --pane "$target")"
+  [[ "$status" == *'"outcome":"suppressed"'* ]] || die "selected target was not suppressed: $status"
+  admin select-pane -t "$origin"
+  sleep .2
+  hook_failures_after="$(tmux_hook_failure_count "$tty")"
+  [[ "$hook_failures_after" == "$hook_failures_before" ]] || die 'pane selection added a tmux hook failure message'
+  ! transcript_has_hook_failure_since 0 "$((selection_offset + 1))" || die 'pane selection displayed a tmux hook failure message'
+
+  notify_client "$origin" publish --event-id finished-oldest --kind finished --message oldest-finished --pane "$target" >/dev/null
+  notify_client "$origin" publish --event-id error-oldest --kind error --message oldest-error --pane "$target" >/dev/null
+  notify_client "$origin" publish --event-id error-newer --kind error --message newer-error --pane "$exit_target" >/dev/null
+  notify_client "$origin" publish --event-id question-newer --kind question --message "newer-question-$list_tag" --pane "$target" >/dev/null
+  wait_for 'priority and oldest notification status' 3 notification_status_contains 'range=user|v2'
+  notification_status_contains 'error: oldest-error' || die 'visible notification was not the oldest highest-priority item'
+  notification_status_contains 'range=user|m' || die 'notification more range missing'
+  notification_status_contains '+3 more' || die 'notification more count missing'
+  ! notification_status_contains 'range=user|v3' || die 'newer equal-priority notification was visible'
+  [[ "$(notification_list_count "$origin")" == 4 ]] || die 'notification list publish count'
+
+  # This is the same tmux run-shell action used by the visible status binding;
+  # a PTY mouse escape is not deterministic across the macOS script harness.
+  notification_run_shell click --range v2 --client "$tty"
+  wait_for 'notification click routes client' 3 client_is "$tty" "$session_id" "$target"
+  wait_for 'notification click acknowledges target pane' 3 notification_list_count "$origin"
+  [[ "$(notification_list_count "$origin")" == 1 ]] || die 'notification click did not acknowledge all target pane items'
+  notification_list_has_event "$origin" error-oldest 0 || die 'clicked notification remained queued'
+  notification_list_has_event "$origin" finished-oldest 0 || die 'focused pane retained older notification'
+  notification_list_has_event "$origin" error-newer 1 || die 'newer notification disappeared with clicked item'
+  notification_list_has_event "$origin" question-newer 0 || die 'focused pane retained question notification'
+
+  admin select-pane -t "$origin"
+  sleep .2
+  notify_client "$origin" publish --event-id popup-question --kind question --message "newer-question-$list_tag" --pane "$target" >/dev/null
+  notify_client "$origin" publish --event-id popup-finished --kind finished --message popup-finished --pane "$target" >/dev/null
+  [[ "$(notification_list_count "$origin")" == 3 ]] || die 'notification list popup setup count'
+
+  # Exercise the installed +N branch and the real notification-list popup. The
+  # unique message plus transcript byte offset keeps this assertion causal.
+  list_offset="$(ansi_size 0)"
+  notification_open_list_popup 0 "$session_id" "$origin" "$tty"
+  list_popup_pid="${POPUP_PIDS[0]}"; list_control="${POPUP_CONTROLS[0]}"
+  wait_for 'notification list popup first frame' 3 ansi_tail_has 0 "$((list_offset + 1))" "$list_tag"
+  send_bytes 0 j; send_bytes 0 '\r'
+  wait_for 'notification list selection routes client' 3 client_is "$tty" "$session_id" "$target"
+  wait_for 'notification list popup exits after selection' 3 popup_closed 0
+  [[ -z "$list_control" ]] || ! control_present "$list_control" || die 'notification list control survived selection'
+  ! pane_dash_process "$list_popup_pid" || die 'notification list pane-dash process survived selection'
+  list_exited="$(now)"
+  assert_no_popup_runtime_after_exit 'notification-list' "$list_popup_pid" "$list_exited"
+  [[ "$(notification_list_count "$origin")" == 1 ]] || die 'notification list focus acknowledgment count'
+  notification_list_has_event "$origin" popup-question 0 || die 'selected notification remained queued'
+  notification_list_has_event "$origin" popup-finished 0 || die 'focused pane retained unselected notification'
+  notification_list_has_event "$origin" error-newer 1 || die 'unselected error notification disappeared'
+
+  notify_client "$target" hook focus --client "$tty" --pane "$target" --width 120 --focused 1 --acknowledge 1 >/dev/null
+  status="$(notify_client "$target" publish --event-id focused-target --kind question --message suppressed --pane "$target")"
+  [[ "$status" == *'"outcome":"suppressed"'* ]] || die "focused routed target was not suppressed: $status"
+
+  notify_client "$origin" publish --event-id exited-target --kind permission --message gone --pane "$exit_target" >/dev/null
+  [[ "$(notification_list_count "$origin")" == 2 ]] || die 'pane-exit setup count'
+  admin send-keys -t "$exit_target" C-d
+  wait_for 'exited pane closes' 3 target_gone "$exit_target"
+  wait_for 'pane-exited notification cleanup' 3 notification_list_has_event "$origin" exited-target 0
+  notification_list_has_event "$origin" error-newer 0 || die 'pane-exited cleanup left stale target'
+
+  admin kill-session -a -t "$session"
+  admin kill-session -t "$session"
+  wait_for 'notification service teardown' 3 notification_service_gone
+  printf 'notifications origin=%s target=%s click=acknowledged list=j+enter route=acknowledged pane-exit=clean service=gone\n' "$origin" "$target"
+}
 control_parent_pid() {
   local control="$1" parent
   pid_is_alive "$control" || return 1
@@ -327,7 +497,7 @@ popup_replaced() {
 open_popup() {
   local index="$1" before popup_pid
   before="$(controls)"
-  send_bytes "$index" '\002'; send_bytes "$index" D
+  send_bytes "$index" '\002'; send_bytes "$index" '\t'
   wait_for "popup $index control" 3 new_control "$before"
   POPUP_CONTROLS[index]="$NEW_CONTROL_PID"
   popup_pid="$(control_parent_pid "$NEW_CONTROL_PID")" || die "popup $index control pid invalid: $NEW_CONTROL_PID"
@@ -471,6 +641,11 @@ phase6_theme_help_isolation() {
 }
 target_gone() { ! admin list-panes -a -F '#{pane_id}' | grep -Fxq "$1"; }
 target_present() { admin list-panes -a -F '#{pane_id}' | grep -Fxq "$1"; }
+selected_pane_contains() {
+  if pane_contains "$pane" "$hostile"; then selected_pane="$pane"; return 0; fi
+  if pane_contains "$target" "$hostile"; then selected_pane="$target"; return 0; fi
+  return 1
+}
 runtime_count() { local start="$1" end="$2"; local total=0 command; for command in capture-pane list-panes show-options -C; do total=$((total + $(record_count "$start" "$end" "$command"))); done; printf '%s\n' "$total"; }
 assert_no_popup_runtime_after_exit() {
   local label="$1" popup_pid="$2" exited="$3" observed captures lists duration
@@ -1070,12 +1245,43 @@ main() {
   TMUX='' "$REAL_TMUX" -S "$SOCKET" -f /dev/null new-session -d -s live -x 120 -y 40 'exec cat'
   admin new-session -d -s other -x 120 -y 40 'exec cat'
   local pane target startup old_control t before after captures status_commit
+  local status_format_before status_left_before status_right_before status_style_before
+  local window_status_before window_status_current_before window_style_before window_current_style_before
   pane="$(admin display-message -p -t live:0.0 '#{pane_id}')"; target="$(admin split-window -d -P -F '#{pane_id}' -t live:0 'exec cat')"
   admin set-option -g @pane-dash-width 100%; admin set-option -g @pane-dash-height 100%; admin set-option -p -t "$pane" @pane_dash_tag live-test; admin set-option -p -t "$target" @pane_dash_tag live-spare
+  admin set-option -g 'status-format[0]' '#[fg=colour123]task3-first-row #{session_name}'
+  admin set-option -g status-left 'task3-left'
+  admin set-option -g status-right 'task3-right'
+  admin set-option -g status-style 'fg=colour45,bg=colour234'
+  admin set-option -g window-status-format 'task3-window-#I'
+  admin set-option -g window-status-current-format 'task3-current-#I'
+  admin set-option -g window-status-style 'fg=colour33'
+  admin set-option -g window-status-current-style 'fg=colour44'
+  status_format_before="$(admin show-options -gv 'status-format[0]')"
+  status_left_before="$(admin show-options -gv status-left)"
+  status_right_before="$(admin show-options -gv status-right)"
+  status_style_before="$(admin show-options -gv status-style)"
+  window_status_before="$(admin show-options -gv window-status-format)"
+  window_status_current_before="$(admin show-options -gv window-status-current-format)"
+  window_style_before="$(admin show-options -gv window-status-style)"
+  window_current_style_before="$(admin show-options -gv window-status-current-style)"
   TASK9_MARKER="$TMP/task9-marker"
   admin set-environment -g PATH "$WRAP:$PATH"; admin set-environment -g PD_REAL_TMUX "$REAL_TMUX"; admin set-environment -g PD_SOCKET "$SOCKET"; admin set-environment -g PD_LOG "$LOG"; admin set-environment -g PD_OWNER_LOG "$OWNER_LOG"; admin set-environment -g PD_REJECT "$REJECT"; admin set-environment -g PD_TASK9_MARKER "$TASK9_MARKER"
   # Install pane_dash.tmux through the wrapper; do not directly run pane-dash.
   PATH="$WRAP:$PATH" PD_REAL_TMUX="$REAL_TMUX" PD_SOCKET="$SOCKET" PD_LOG="$LOG" PD_OWNER_LOG="$OWNER_LOG" PD_REJECT="$REJECT" TMUX='' "$ROOT/pane_dash.tmux"
+  PATH="$WRAP:$PATH" PD_REAL_TMUX="$REAL_TMUX" PD_SOCKET="$SOCKET" PD_LOG="$LOG" PD_OWNER_LOG="$OWNER_LOG" PD_REJECT="$REJECT" TMUX='' "$ROOT/pane_dash.tmux"
+  [[ "$(admin show-options -gv 'status-format[0]')" == "$status_format_before" ]] || die 'notification row changed status-format[0]'
+  [[ "$(admin show-options -gv status-left)" == "$status_left_before" ]] || die 'notification row changed status-left'
+  [[ "$(admin show-options -gv status-right)" == "$status_right_before" ]] || die 'notification row changed status-right'
+  [[ "$(admin show-options -gv status-style)" == "$status_style_before" ]] || die 'notification row changed status-style'
+  [[ "$(admin show-options -gv window-status-format)" == "$window_status_before" ]] || die 'notification row changed window-status-format'
+  [[ "$(admin show-options -gv window-status-current-format)" == "$window_status_current_before" ]] || die 'notification row changed window-status-current-format'
+  [[ "$(admin show-options -gv window-status-style)" == "$window_style_before" ]] || die 'notification row changed window-status-style'
+  [[ "$(admin show-options -gv window-status-current-style)" == "$window_current_style_before" ]] || die 'notification row changed window-status-current-style'
+  [[ "$(admin show-options -gv status)" == 2 ]] || die 'notification status line count is not exactly two'
+  wait_for 'notification service after idempotent reload' 3 notification_service_ready
+  wait_for 'one notification service after idempotent reload' 3 notification_service_one
+  [[ -z "$(notification_status)" ]] || die 'empty notification queue rendered a nonblank row'
   [[ "$(admin show-options -gv focus-events)" == on ]] || die 'production plugin did not enable focus-events'
   terminal_features="$(admin show-options -sv terminal-features)"
   grep -Fxq '*:focus' <<< "$terminal_features" || die 'production plugin did not enable terminal focus feature'
@@ -1121,10 +1327,11 @@ main() {
   (( $(record_count "$t" "$(now)" show-options)==0 )) || die 'status polling used show-options'
   # The selected visible cat pane receives literal hostile text before it is
   # killed. $target remains alive to keep the attached session/popup valid.
-  local sentinel="$TMP/sentinel" hostile="; touch $TMP/sentinel #"
-  send_bytes 0 '\023'; send_bytes 0 "$hostile"; send_bytes 0 '\r'
-  wait_for 'literal hostile send reaches selected cat pane' 2 pane_contains "$pane" "$hostile"
+  local sentinel="$TMP/sentinel" hostile="; touch $TMP/sentinel #" selected_pane
+  send_bytes 0 '\023'; send_bytes 0 "$hostile"; sleep .25; send_bytes 0 '\r'
+  wait_for 'literal hostile send reaches selected cat pane' 2 selected_pane_contains
   [[ ! -e "$sentinel" ]] || die 'hostile send sentinel'
+  [[ "$selected_pane" == "$pane" ]] || send_bytes 0 k
   send_bytes 0 x; send_bytes 0 y; wait_for 'confirmed selected-pane kill' 2 target_gone "$pane"; target_present "$target" || die 'spare pane did not survive selected kill'
   send_bytes 0 q; wait_for 'healthy popup pane-dash exit' 2 popup_closed 0; t="$(now)"; ! control_present "${POPUP_CONTROLS[0]}" || die 'healthy popup control survived pane-dash exit'; sleep .2; (( $(runtime_count "$t" "$(now)")==0 )) || die 'closed popup runtime work'
   rm -f "$REJECT"
@@ -1138,6 +1345,7 @@ main() {
   ! grep -Fxq '*:RGB' <<< "$terminal_features" || die 'phase6 RGB capability leaked after scenario cleanup'
   grep -Fxq '*:focus' <<< "$terminal_features" || die 'phase6 RGB cleanup did not preserve terminal-features entries'
   creation_scenarios
+  notification_scenario
    printf 'ok: controls startup=2 replacement=1 rejected=1; process budgets passed\n'
 }
 session_gone() { ! admin has-session -t "$1" 2>/dev/null; }

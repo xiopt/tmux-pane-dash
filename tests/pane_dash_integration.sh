@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091 # Local helper contains definitions only.
 source "$ROOT/tests/pane_dash_pty.sh"
-SOCK="pd-label-$$"
+SOCK=""
+CASE=0
 MARKER="/tmp/pd-$$"
 tmux_bin_candidate="${TMUX_BIN:-tmux}"
 tmux_bin="$(command -v "$tmux_bin_candidate")"
@@ -22,6 +23,9 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 assert_label() {
   local label="$1" pane tag pending client_pid
+
+  CASE=$((CASE + 1))
+  SOCK="pd-label-$$-$CASE"
 
   TMUX='' "$tmux_bin" -L "$SOCK" -f /dev/null new-session -d -s t
   pane="$(TMUX='' "$tmux_bin" -L "$SOCK" display-message -p -t t '#{pane_id}')"

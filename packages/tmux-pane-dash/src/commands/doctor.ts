@@ -3,12 +3,12 @@ import { dirname, join, relative, resolve } from "node:path"
 import { parseJsonc } from "../config-opencode"
 import { managedTmuxBlock } from "../config-tmux"
 import { managedRoot, type OwnershipRecord } from "../ownership"
-import type { Dependencies, DoctorFs } from "../runtime"
+import { compareVersions, type Dependencies, type DoctorFs } from "../runtime"
 
 export const DOCTOR_CHECK_IDS = [
   "ownership.schema", "ownership.paths", "transaction.complete", "current.link", "current.target",
   "inventory.entries", "inventory.metadata", "binary.version", "tmux.version", "tmux.config",
-  "tmux.server", "opencode.config", "ownership.managed-paths",
+  "tmux.server", "opencode.version", "opencode.config", "ownership.managed-paths",
 ] as const
 
 export type DoctorStatus = "ok" | "warning" | "error"
@@ -44,7 +44,8 @@ function check(id: typeof DOCTOR_CHECK_IDS[number], status: DoctorStatus, code: 
 function ownershipValid(value: unknown): value is OwnershipRecord {
   if (!exactKeys(value, ["schemaVersion", "packageVersion", "releaseVersion", "archive", "files", "currentTarget", "components", "migrations"])) return false
   const record = value as any
-  return record.schemaVersion === 1 && typeof record.packageVersion === "string" && typeof record.releaseVersion === "string" && exactKeys(record.archive, ["target", "sha256"]) && typeof record.archive.target === "string" && /^[a-f0-9]{64}$/.test(record.archive.sha256) && Array.isArray(record.files) && exactKeys(record.components, ["tmux", "opencode"]) && Array.isArray(record.migrations)
+  const componentsValid = exactKeys(record.components, ["tmux", "opencode"]) || exactKeys(record.components, ["tmux", "opencode", "opencodeTui"])
+  return record.schemaVersion === 1 && typeof record.packageVersion === "string" && typeof record.releaseVersion === "string" && exactKeys(record.archive, ["target", "sha256"]) && typeof record.archive.target === "string" && /^[a-f0-9]{64}$/.test(record.archive.sha256) && Array.isArray(record.files) && componentsValid && Array.isArray(record.migrations)
 }
 async function loadOwnership(fs: DoctorFs, installRoot: string): Promise<OwnershipRecord> {
   const value = JSON.parse(text.decode(await read(fs, join(installRoot, "state", "ownership.json"))))
@@ -53,7 +54,8 @@ async function loadOwnership(fs: DoctorFs, installRoot: string): Promise<Ownersh
 }
 function inRoot(installRoot: string, path: string): boolean { const rel = relative(resolve(installRoot), resolve(path)); return rel !== "" && !rel.startsWith("..") && !rel.includes("/../") }
 function tmuxVersion(value: string): boolean { const match = /^tmux\s+(\d+)\.(\d+)(?:\.|[a-z]|\s|$)/.exec(value.trim()); return !!match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 6) }
-async function run(deps: Dependencies, path: string, args: readonly string[], maxOutputBytes = 8 * 1024) { if (!deps.spawn) throw new Error("child execution unavailable"); return deps.spawn(path, args, { timeoutMs: 5_000, env: childEnv(deps.env?.TMUX_TMPDIR), maxOutputBytes }) }
+function companionPackage(value: string): boolean { return /^@xiopt\/pane-dash-opencode@(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value) }
+async function run(deps: Dependencies, path: string, args: readonly string[], maxOutputBytes = 8 * 1024, callerPath = false) { if (!deps.spawn) throw new Error("child execution unavailable"); const env = childEnv(deps.env?.TMUX_TMPDIR); if (callerPath && deps.env?.PATH) env.PATH = deps.env.PATH; return deps.spawn(path, args, { timeoutMs: 5_000, env, maxOutputBytes }) }
 type TmuxBinding = { action: string }
 function tmuxBindings(output: string): TmuxBinding[] {
   return output.split("\n").flatMap(line => {
@@ -77,8 +79,9 @@ export async function doctor(deps: Dependencies): Promise<DoctorReport> {
     const version = ownership?.releaseVersion ?? null, versionRoot = version ? join(installRoot, "versions", version) : null
     try {
       const components = ownership?.components
-      const validComponent = (value: any) => value === null || exactKeys(value, ["logicalPath", "resolvedPath", "marker", "packageEntries", "baselineBackup"]) && typeof value.logicalPath === "string" && typeof value.resolvedPath === "string" && typeof value.marker === "string" && Array.isArray(value.packageEntries) && exactKeys(value.baselineBackup, ["logicalPath", "sha256"]) && typeof value.baselineBackup.logicalPath === "string" && /^[a-f0-9]{64}$/.test(value.baselineBackup.sha256)
-      if (!ownership || !versionRoot || ownership.currentTarget !== `versions/${version}` || ownership.files.some(file => !inRoot(installRoot, file.logicalPath) || !inRoot(installRoot, file.resolvedPath)) || !validComponent(components?.tmux) || !validComponent(components?.opencode)) throw new Error("owned paths are invalid")
+      const validComponent = (value: any) => value === null || (exactKeys(value, ["logicalPath", "resolvedPath", "marker", "packageEntries", "baselineBackup"]) || exactKeys(value, ["logicalPath", "resolvedPath", "marker", "packageEntries", "baselineBackup", "created"])) && typeof value.logicalPath === "string" && typeof value.resolvedPath === "string" && typeof value.marker === "string" && Array.isArray(value.packageEntries) && exactKeys(value.baselineBackup, ["logicalPath", "sha256"]) && typeof value.baselineBackup.logicalPath === "string" && /^[a-f0-9]{64}$/.test(value.baselineBackup.sha256) && (!("created" in value) || value.created === true)
+      const tuiValid = !components || !("opencodeTui" in components) || validComponent(components.opencodeTui)
+      if (!ownership || !versionRoot || ownership.currentTarget !== `versions/${version}` || ownership.files.some(file => !inRoot(installRoot, file.logicalPath) || !inRoot(installRoot, file.resolvedPath)) || !validComponent(components?.tmux) || !validComponent(components?.opencode) || !tuiValid) throw new Error("owned paths are invalid")
       checks.push(check("ownership.paths", "ok", null, "ownership paths match"))
     } catch (error) { checks.push(check("ownership.paths", "error", "E_OWNERSHIP_PATH", clean(error))) }
     try {
@@ -131,7 +134,8 @@ export async function doctor(deps: Dependencies): Promise<DoctorReport> {
        else {
          const current = join(installRoot, "current"), bindings = tmuxBindings(result.stdout)
           const valid = hasDistinctBindings(bindings, [
-            action => action.includes("run-shell") && action.includes(`${current}/scripts/open.sh`),
+            action => action.includes("run-shell") && action.includes(`${current}/scripts/open.sh`) && !action.includes("--notification-list"),
+            action => action.includes("run-shell") && action.includes(`${current}/scripts/open.sh`) && action.includes("--notification-list"),
             action => action.includes("run-shell") && action.includes(`${current}/scripts/tag.sh`) && /\btoggle\b/.test(action),
             action => action.includes("command-prompt") && action.includes(`${current}/scripts/tag.sh`) && /\blabel-from-option\b/.test(action),
           ])
@@ -140,13 +144,21 @@ export async function doctor(deps: Dependencies): Promise<DoctorReport> {
        }
     } catch { checks.push(check("tmux.server", "warning", "W_TMUX_SERVER", "tmux server is not running")) }
     try {
+      const result = await run(deps, "opencode", ["--version"], 8 * 1024, true), match = /^v?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\s*$/.exec(result.stdout)
+      if (result.code !== 0 || result.stderr !== "" || !match || compareVersions(match[1]!, "1.18.0") < 0) throw new Error("OpenCode 1.18.0 or newer is required")
+      checks.push(check("opencode.version", "ok", null, "OpenCode TUI plugins are supported"))
+    } catch (error) { checks.push(check("opencode.version", "error", "E_OPENCODE_VERSION", clean(error))) }
+    try {
       const owned = ownership?.components.opencode
-      if (!owned) throw new Error("OpenCode ownership is missing")
-      const selected = await selectDoctorOpenCodeConfig(fs, deps.env), expected = `@xiopt/pane-dash-opencode@${deps.executingVersion}`
-      if (selected !== owned.logicalPath || owned.packageEntries.length !== 1 || owned.packageEntries[0] !== expected) throw new Error("OpenCode selection or ownership differs")
-       const config = parseJsonc(text.decode(await read(fs, owned.resolvedPath))) as { plugin?: unknown }, entries = config?.plugin
-       if (!Array.isArray(entries) || entries.filter((entry: unknown) => entry === expected).length !== 1) throw new Error("OpenCode plugin entries differ")
-      checks.push(check("opencode.config", "ok", null, "OpenCode plugin entry matches"))
+      const tuiOwned = ownership?.components.opencodeTui
+      const hasTuiOwnership = !!ownership && "opencodeTui" in ownership.components
+      if (!owned || hasTuiOwnership && !tuiOwned) throw new Error("OpenCode ownership is missing")
+      const selected = await selectDoctorOpenCodeConfig(fs, deps.env), expected = owned.packageEntries[0]
+      if (selected !== owned.logicalPath || owned.packageEntries.length !== 1 || !expected || !companionPackage(expected)) throw new Error("OpenCode selection or ownership differs")
+       if (tuiOwned && (tuiOwned.logicalPath !== join(dirname(selected), "tui.json") || tuiOwned.packageEntries.length !== 1 || tuiOwned.packageEntries[0] !== expected)) throw new Error("OpenCode TUI selection or ownership differs")
+       const configs = await Promise.all([owned.resolvedPath, ...(tuiOwned ? [tuiOwned.resolvedPath] : [])].map(path => read(fs, path)))
+       for (const bytes of configs) { const entries = (parseJsonc(text.decode(bytes)) as { plugin?: unknown })?.plugin; if (!Array.isArray(entries) || entries.filter((entry: unknown) => entry === expected).length !== 1) throw new Error("OpenCode plugin entries differ") }
+      checks.push(check("opencode.config", "ok", null, tuiOwned ? "OpenCode server and TUI plugin entries match" : "OpenCode plugin entry matches"))
     } catch (error) { checks.push(check("opencode.config", "error", "E_OPENCODE", clean(error))) }
     try {
       if (!ownership) throw new Error("ownership is unavailable")

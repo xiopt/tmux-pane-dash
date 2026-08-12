@@ -114,7 +114,7 @@ startup does not run a package-manager operation or access the network.
 ## OpenCode integration
 
 OpenCode integration is optional. The npm setup command adds the exact package
-entry `@xiopt/pane-dash-opencode@0.1.2` to the selected global OpenCode config;
+entry `@xiopt/pane-dash-opencode@0.1.6` to the selected global OpenCode config;
 use `--no-opencode` to skip it. The companion package requires OpenCode >=1.17.20.
 It does not edit a project-local OpenCode configuration file.
 
@@ -134,13 +134,47 @@ rm "$HOME/.config/opencode/plugin/pane-dash.ts"
 
 Without the plugin, command-matched panes remain visible with `? unknown` status.
 
+## tmux notifications
+
+Notifications are tmux-native and volatile for the tmux server/service lifetime;
+they do not depend on Ghostty or macOS. When the entrypoint is loaded, pane-dash
+owns the second status row (`status 2`, `status-format[1]`) and preserves row
+zero. It also installs the root `MouseDown1Status` binding for notification
+clicks. Load-order matters: a later custom second-row format or root mouse
+binding overrides pane-dash's display or clicks, so reload the entrypoint after
+those customizations when pane-dash should own them.
+
+The row keeps one visible persistent notification and shows `+N more` for the
+rest. Clicking the visible item dismisses it and routes to its pane; clicking
+`+N more` opens the notification list. Ordering is deterministic and shared by
+tmux clients: error > permission > question > finished, then oldest first.
+Notifications from the focused origin are suppressed, and queued items for
+exited panes are removed.
+
+With the companion plugin installed, OpenCode automatically produces all four
+notification kinds. Other producers can publish directly:
+
+```sh
+pane-dash notify publish --event-id <id> --kind <error|permission|question|finished> --message <text> [--pane <%id>]
+```
+
+The queue capacity is 64 notifications; outcomes `queued`, `duplicate`, and
+`suppressed` exit zero.
+
+`--pane` defaults to `TMUX_PANE`. A missing notification service or a full
+queue returns a nonzero status. If the second row is missing, check that
+`bin/pane-dash` is built and executable, then reload `pane_dash.tmux`; if the
+service or binary is unavailable, run `make build` in the checkout and reload
+the entrypoint.
+
 ## tmux options
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `@pane-dash-key` | `D` | Dashboard prefix binding |
+| `@pane-dash-key` | `Tab` | Dashboard prefix binding |
 | `@pane-dash-tag-key` | `T` | Tag-toggle prefix binding |
 | `@pane-dash-label-key` | `M` | Typed-label prefix binding |
+| `@pane-dash-notifications-key` | `j` | Notification-list prefix binding |
 | `@pane-dash-width` | `90%` | Popup width; empty uses default |
 | `@pane-dash-height` | `85%` | Popup height; empty uses default |
 | `@pane-dash-match` | `opencode` | Command match for auto-discovery; explicit empty disables command matching |
@@ -162,12 +196,14 @@ Without the plugin, command-matched panes remain visible with `? unknown` status
 
 ## Dashboard keys
 
-The default tmux bindings are `<prefix> D` for the dashboard, `<prefix> T` for
-a manual tag using the current command, and `<prefix> M` for a prompted label.
+The default tmux bindings are `<prefix> Tab` for the dashboard, `<prefix> j` for
+notifications, `<prefix> T` for a manual tag using the current command, and
+`<prefix> M` for a prompted label.
 
 | Key | Action |
 | --- | --- |
-| `<prefix> D` | Open dashboard |
+| `<prefix> Tab` | Open dashboard |
+| `<prefix> j` | Open notifications |
 | `<prefix> T` | Toggle manual tag using the current command as label |
 | `<prefix> M` | Prompt for and set a manual label |
 | `j` / `k`, `Down` / `Up` | Move down/up |

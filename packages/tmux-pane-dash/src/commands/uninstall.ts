@@ -11,6 +11,7 @@ import { executeTransaction, type PlannedConfigMutation } from "../transaction"
 
 const missing = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT"
 const digest = (value: Uint8Array) => createHash("sha256").update(value).digest("hex")
+const generatedEmptyOpenCodeConfig = '{\n  "plugin": []\n}\n'
 async function bytes(path: string) { return new Uint8Array(await readFile(path)) }
 function planned(mutation: PlannedConfigMutation, resolved: ResolvedConfigPath, content: Uint8Array): PlannedConfigMutation { return { ...mutation, expectedPreimage: { state: { type: "file", sha256: digest(content), mode: resolved.mode ?? 0o600 }, bytes: content, symlinkChain: resolved.symlinkChain } } }
 export async function uninstall(deps: Dependencies): Promise<void> {
@@ -26,5 +27,6 @@ export async function uninstall(deps: Dependencies): Promise<void> {
   const edits: PlannedConfigMutation[] = []
   if (ownership.components.tmux) { const item = ownership.components.tmux, resolved = await resolveConfigPath(item.logicalPath, deps), content = await bytes(resolved.resolvedPath); edits.push(planned(planTmuxRemoval({ ...resolved, bytes: content, installRoot: root, mode: resolved.mode ?? 0o600 }), resolved, content)) }
   if (ownership.components.opencode) { const item = ownership.components.opencode, resolved = await resolveConfigPath(item.logicalPath, deps), content = await bytes(resolved.resolvedPath); edits.push(planned(planOpenCodeRemoval({ ...resolved, bytes: content, ownedEntries: item.packageEntries, mode: resolved.mode ?? 0o600 }), resolved, content)) }
+  if (ownership.components.opencodeTui) { const item = ownership.components.opencodeTui, resolved = await resolveConfigPath(item.logicalPath, deps), content = await bytes(resolved.resolvedPath), removal = planned(planOpenCodeRemoval({ ...resolved, bytes: content, ownedEntries: item.packageEntries, mode: resolved.mode ?? 0o600 }), resolved, content); edits.push(item.created === true && new TextDecoder().decode(removal.bytes) === generatedEmptyOpenCodeConfig ? { ...removal, remove: true } : removal) }
   await executeTransaction({ command: "uninstall", components: { tmux: ownership.components.tmux !== null, opencode: ownership.components.opencode !== null }, desiredVersion: ownership.releaseVersion, previousCurrent: ownership.currentTarget, configMutations: edits, uninstall: { tombstoneVersions: true, removeCurrent: true, removeOwnership: true } }, deps)
 }

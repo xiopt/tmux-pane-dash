@@ -16,8 +16,12 @@ use pane_dash::actions::{execute_jump, kill_pane, send_text};
 use pane_dash::app::{Action, ActionOutcome, AppState, CompletedAction, Event, reduce};
 use pane_dash::config::load_ui_config;
 use pane_dash::control::{ControlEvent, ControlHandle, is_safe_client_tty};
-use pane_dash::creation::{CreateRequest, CreationId, CreationProgress, run_creation};
-use pane_dash::model::{Model, ModelConfig};
+use pane_dash::creation::{
+    CreateContext, CreateDraft, CreateRequest, CreationError, CreationId, CreationProgress,
+    attach_command, build_request, run_creation,
+};
+use pane_dash::model::{HeadlessSessionId, Model, ModelConfig, SessionId};
+use pane_dash::notification_ui;
 use pane_dash::options::parse_show_options;
 use pane_dash::preview::parse_preview;
 use pane_dash::snapshot::parse;
@@ -261,11 +265,16 @@ impl Drop for TerminalGuard {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    match parse_args()? {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "notify") {
+        return pane_dash::notification_service::run_cli(&args[1..]).await;
+    }
+    match parse_args_from(args)? {
         StartupArgs::Version => {
             println!("pane-dash {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        StartupArgs::NotificationList { client_tty, .. } => notification_ui::run(client_tty).await,
         StartupArgs::Run {
             client_tty,
             session_id,
@@ -322,6 +331,8 @@ async fn run_dashboard(
     let (creation_tx, mut creation_progress) = mpsc::unbounded_channel();
     let mut creation_task = None;
     let (connection_tx, mut connection_messages) = mpsc::unbounded_channel();
+    let mut headless_updates = pane_dash::opencode::spawn_poller();
+    let mut headless_closed = false;
     let (mut coordinator, directives) = TransportCoordinator::new();
     let mut control = None;
     let mut pending_connection_generation = None;
@@ -349,24 +360,13 @@ async fn run_dashboard(
         &mut in_flight_snapshot,
     );
     let result = async {
-    let _ = apply_event(
-        &mut terminal,
-        &mut app,
-        Event::PreviewTick,
-        &tmux,
-        control.as_ref(),
-        &client_tty,
-        &mut preview_tick,
-        &preview_tx,
-        &creation_tx,
-        &mut creation_task,
-    )
+    let _ = apply_event(&mut terminal, &mut app, Event::PreviewTick, &tmux, control.as_ref(), &client_tty, &session_id, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task)
     .await?;
     while !app.should_quit {
         tokio::select! {
             event = input.next() => match event {
                 Some(Ok(CrosstermEvent::Key(key))) => {
-                    let effects = apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
+                    let effects = apply_event(&mut terminal, &mut app, Event::Key(key), &tmux, control.as_ref(), &client_tty, &session_id, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
                     process_action_effects(
                         effects, &mut coordinator, &tmux, &session_id, &client_tty, &connection_tx,
                         &mut control, &mut pending_connection_generation,
@@ -376,10 +376,10 @@ async fn run_dashboard(
                     );
                 },
                 Some(Ok(CrosstermEvent::FocusGained)) => {
-                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(true), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
+                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(true), &tmux, control.as_ref(), &client_tty, &session_id, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
                 },
                 Some(Ok(CrosstermEvent::FocusLost)) => {
-                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(false), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
+                    let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(false), &tmux, control.as_ref(), &client_tty, &session_id, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
                 },
                 Some(Ok(CrosstermEvent::Resize(_, _))) => redraw(&mut terminal, &mut app)?,
                 Some(Ok(_)) => {},
@@ -438,7 +438,7 @@ async fn run_dashboard(
                         coordinator.input(pane_dash::transport::TransportInput::TopologyChanged)
                     }
                     (ConnectionRoute::FocusChanged, ConnectionMessage::Event { event: ControlEvent::FocusChanged(focused), .. }) => {
-                        let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(focused), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
+                        let _ = apply_event(&mut terminal, &mut app, Event::TerminalFocus(focused), &tmux, control.as_ref(), &client_tty, &session_id, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
                         Vec::new()
                     }
                     (ConnectionRoute::SessionChanged, ConnectionMessage::Event { event: ControlEvent::SessionChanged(changed_session_id), .. }) => {
@@ -517,7 +517,7 @@ async fn run_dashboard(
                     };
                     if !source_session_alive {
                         app.should_quit = true;
-                    } else if apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?.mutated {
+                    } else if apply_event(&mut terminal, &mut app, event, &tmux, control.as_ref(), &client_tty, &session_id, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?.mutated {
                         snapshot_generation.record_successful_mutation();
                     }
                 }
@@ -534,14 +534,36 @@ async fn run_dashboard(
                     &tmux,
                     control.as_ref(),
                     &client_tty,
+                    &session_id,
                     &mut preview_tick,
                     &preview_tx,
                     &creation_tx, &mut creation_task,
                 ).await?;
             },
             progress = creation_progress.recv() => if let Some(progress) = progress {
-                let effects = apply_event(&mut terminal, &mut app, Event::CreationProgress(progress), &tmux, control.as_ref(), &client_tty, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
+                let effects = apply_event(&mut terminal, &mut app, Event::CreationProgress(progress), &tmux, control.as_ref(), &client_tty, &session_id, &mut preview_tick, &preview_tx, &creation_tx, &mut creation_task).await?;
                 process_action_effects(effects, &mut coordinator, &tmux, &session_id, &client_tty, &connection_tx, &mut control, &mut pending_connection_generation, &mut active_connection_generation, &mut next_connection_generation, &mut debounce_deadline, &snapshot_tx, &mut next_snapshot_seq, &mut snapshot_generation, &mut in_flight_snapshot);
+            },
+            update = headless_updates.recv(), if !headless_closed => match update {
+                Some(update) => {
+                    let _ = apply_event(
+                        &mut terminal,
+                        &mut app,
+                        Event::HeadlessSnapshot {
+                            records: update.records,
+                            warning: update.warning,
+                        },
+                        &tmux,
+                        control.as_ref(),
+                        &client_tty,
+                        &session_id,
+                        &mut preview_tick,
+                        &preview_tx,
+                        &creation_tx,
+                        &mut creation_task,
+                    ).await?;
+                }
+                None => headless_closed = true,
             },
         }
     }
@@ -633,6 +655,7 @@ where
                 tmux,
                 control.as_ref(),
                 client_tty,
+                session_id,
                 preview_tick,
                 preview_tx,
                 creation_tx,
@@ -652,6 +675,7 @@ where
                 tmux,
                 control.as_ref(),
                 client_tty,
+                session_id,
                 preview_tick,
                 preview_tx,
                 creation_tx,
@@ -832,6 +856,7 @@ async fn apply_event<B>(
     tmux: &TmuxExec,
     control: Option<&ControlHandle>,
     client_tty: &str,
+    launch_session_id: &str,
     preview_interval: &mut tokio::time::Interval,
     preview_tx: &mpsc::UnboundedSender<PreviewResponse>,
     creation_tx: &mpsc::UnboundedSender<CreationProgress>,
@@ -899,6 +924,31 @@ where
                     redraw(terminal, app)?;
                 }
             }
+            Action::AttachHeadless {
+                id,
+                source_url,
+                directory,
+                session_id,
+            } => {
+                match attach_create_request(launch_session_id, &source_url, &directory, &session_id)
+                {
+                    Ok(request) => {
+                        start_creation(creation_task, creation_tx, tmux.clone(), id, request).await;
+                    }
+                    Err(error) => {
+                        let completion = reduce(
+                            app,
+                            Event::CreationProgress(CreationProgress::CreateFailed {
+                                id,
+                                error: error.to_string(),
+                            }),
+                        );
+                        if completion.changed {
+                            redraw(terminal, app)?;
+                        }
+                    }
+                }
+            }
             Action::Quit => {}
             Action::StartCreation { id, request } => {
                 start_creation(creation_task, creation_tx, tmux.clone(), id, request).await;
@@ -911,6 +961,25 @@ where
         redraw(terminal, app)?;
     }
     Ok(effects)
+}
+
+fn attach_create_request(
+    launch_session_id: &str,
+    source_url: &str,
+    directory: &str,
+    session_id: &HeadlessSessionId,
+) -> Result<CreateRequest, CreationError> {
+    let draft = CreateDraft {
+        name: String::new(),
+        cwd: directory.to_owned(),
+        command: attach_command(source_url, directory, &session_id.0),
+    };
+    build_request(
+        CreateContext::NewWindow {
+            target: SessionId::from(launch_session_id),
+        },
+        &draft,
+    )
 }
 
 async fn reap_finished_creation_task(
@@ -1031,6 +1100,11 @@ where
 #[derive(Debug, PartialEq, Eq)]
 enum StartupArgs {
     Version,
+    NotificationList {
+        client_tty: String,
+        session_id: String,
+        pane_id: String,
+    },
     Run {
         client_tty: String,
         session_id: String,
@@ -1039,12 +1113,30 @@ enum StartupArgs {
     },
 }
 
-fn parse_args() -> Result<StartupArgs> {
-    parse_args_from(std::env::args().skip(1))
-}
-
 fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<StartupArgs> {
     let args: Vec<_> = args.into_iter().collect();
+    if args.first().is_some_and(|arg| arg == "--notification-list") {
+        if args.len() != 4 {
+            anyhow::bail!("expected --notification-list client_tty session_id pane_id");
+        }
+        let client_tty = args[1].clone();
+        if !is_safe_client_tty(&client_tty) {
+            anyhow::bail!("invalid client tty");
+        }
+        let session_id = args[2].clone();
+        if !pane_dash::notification_service::is_valid_machine_id(&session_id, '$') {
+            anyhow::bail!("invalid session ID");
+        }
+        let pane_id = args[3].clone();
+        if !pane_dash::notification_service::is_valid_machine_id(&pane_id, '%') {
+            anyhow::bail!("invalid pane ID");
+        }
+        return Ok(StartupArgs::NotificationList {
+            client_tty,
+            session_id,
+            pane_id,
+        });
+    }
     if args.first().is_some_and(|arg| arg == "--version") {
         if args.len() == 1 {
             return Ok(StartupArgs::Version);
@@ -1097,19 +1189,19 @@ fn install_panic_cleanup() {
 mod tests {
     use super::{
         ActionEffects, ConnectionMessageKind, ConnectionRoute, RuntimeTimer, SnapshotGeneration,
-        SnapshotInFlight, SnapshotSource, StartupArgs, apply_event, bench_config_to_frame_message,
-        bench_first_frame_message, classify_connection_message, classify_snapshot_payload,
-        cleanup_creation_task, clear_terminated_connection_state, dispatch_directives,
-        next_runtime_timer, parse_args_from, preview_interval, process_action_effects, redraw,
-        run_runtime_timer_step, snapshot_interval, snapshot_keeps_launch_session,
-        source_session_changed_requires_quit, spawn_preview_capture, start_creation,
-        start_preview_capture, sync_transport_degraded,
+        SnapshotInFlight, SnapshotSource, StartupArgs, apply_event, attach_create_request,
+        bench_config_to_frame_message, bench_first_frame_message, classify_connection_message,
+        classify_snapshot_payload, cleanup_creation_task, clear_terminated_connection_state,
+        dispatch_directives, next_runtime_timer, parse_args_from, preview_interval,
+        process_action_effects, redraw, run_runtime_timer_step, snapshot_interval,
+        snapshot_keeps_launch_session, source_session_changed_requires_quit, spawn_preview_capture,
+        start_creation, start_preview_capture, sync_transport_degraded,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pane_dash::app::{Action, AppState, Event, HelpState, Modal, reduce};
     use pane_dash::config::LoadedUiConfig;
     use pane_dash::creation::{CreateContext, CreateDraft, CreationProgress, build_request};
-    use pane_dash::model::{Model, ModelConfig};
+    use pane_dash::model::{HeadlessSessionId, Model, ModelConfig};
     use pane_dash::options::DashConfig;
     use pane_dash::preview::parse_preview;
     use pane_dash::snapshot::parse;
@@ -1125,8 +1217,59 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn valid_record() -> Vec<u8> {
-        b"\x1e$1\x1fsession\x1f@1\x1f0\x1fwindow\x1f%1\x1f0\x1f1\x1fopencode\x1f/tmp\x1f0\x1fworking\x1f1\x1f1\x1f\x1f\x1f\x1f1\n"
+        b"\x1e$1\x1fsession\x1f@1\x1f0\x1fwindow\x1f%1\x1f0\x1f1\x1fopencode\x1f/tmp\x1f0\x1fworking\x1f1\x1f1\x1f\x1f\x1f\x1f\x1f1\n"
             .to_vec()
+    }
+
+    #[test]
+    fn attach_action_conversion_targets_launch_session_with_exact_cwd_and_command() {
+        let request = attach_create_request(
+            "$73",
+            "http://127.0.0.1:53550",
+            "/work/a b/'quoted'",
+            &HeadlessSessionId::from("ses_'hostile;$(touch nope)"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.context,
+            CreateContext::NewWindow {
+                target: "$73".into()
+            }
+        );
+        assert_eq!(
+            request.argv,
+            ["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "$73"]
+        );
+        assert_eq!(
+            request.cwd.unwrap().as_path(),
+            std::path::Path::new("/work/a b/'quoted'")
+        );
+        assert_eq!(
+            request.command.as_deref(),
+            Some(
+                "exec opencode attach 'http://127.0.0.1:53550' --dir '/work/a b/'\"'\"'quoted'\"'\"'' --session 'ses_'\"'\"'hostile;$(touch nope)'"
+            )
+        );
+
+        assert!(
+            attach_create_request(
+                "$73",
+                "http://127.0.0.1:53550",
+                "/work/bad\npath",
+                &HeadlessSessionId::from("ses_ok"),
+            )
+            .is_err()
+        );
+        assert!(
+            attach_create_request(
+                "$73",
+                "http://127.0.0.1:53550\0bad",
+                "/work/ok",
+                &HeadlessSessionId::from("ses_ok"),
+            )
+            .is_err()
+        );
     }
 
     fn fake_snapshot_tmux(dir: &TempDir) -> (TmuxExec, std::path::PathBuf) {
@@ -1135,7 +1278,7 @@ mod tests {
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nprintf '%s\\0' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nif [ \"$1\" = list-panes ]; then\n    printf '%b' '\\0036$1\\0037session\\0037@1\\00370\\0037window\\0037%1\\00370\\00371\\0037opencode\\0037/tmp\\00370\\0037working\\00371\\00371\\0037\\0037\\0037\\00371\\n'\nfi\n",
+                "#!/bin/sh\nprintf '%s\\0' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nif [ \"$1\" = list-panes ]; then\n    printf '%b' '\\0036$1\\0037session\\0037@1\\00370\\0037window\\0037%1\\00370\\00371\\0037opencode\\0037/tmp\\00370\\0037working\\00371\\00371\\0037\\0037\\0037\\0037\\00371\\n'\nfi\n",
                 log.display(),
                 log.display(),
             ),
@@ -1834,6 +1977,7 @@ mod tests {
                 &tmux,
                 None,
                 "/dev/ttys001",
+                "",
                 &mut preview_tick,
                 &preview_tx,
                 &creation_tx,
@@ -1873,6 +2017,7 @@ mod tests {
             &tmux,
             None,
             "/dev/ttys001",
+            "",
             &mut preview_tick,
             &preview_tx,
             &creation_tx,
@@ -1927,6 +2072,7 @@ mod tests {
             &tmux,
             None,
             "/dev/ttys001",
+            "",
             &mut preview_tick,
             &preview_tx,
             &creation_tx,
@@ -1983,6 +2129,7 @@ mod tests {
                         &tmux,
                         None,
                         "/dev/ttys001",
+                        "",
                         &mut preview_tick,
                         &preview_tx,
                         &creation_tx,
@@ -2054,6 +2201,7 @@ mod tests {
                         &tmux,
                         None,
                         "/dev/ttys001",
+                        "",
                         &mut preview_tick,
                         &preview_tx,
                         &creation_tx,
@@ -2080,6 +2228,7 @@ mod tests {
             &tmux,
             None,
             "/dev/ttys001",
+            "",
             &mut preview_tick,
             &preview_tx,
             &creation_tx,
@@ -2118,6 +2267,7 @@ mod tests {
                 &tmux,
                 None,
                 "/dev/ttys001",
+                "",
                 &mut preview_tick,
                 &preview_tx,
                 &creation_tx,
@@ -2196,6 +2346,7 @@ mod tests {
             &tmux,
             None,
             "/dev/ttys001",
+            "",
             &mut preview_tick,
             &preview_tx,
             &creation_tx,
@@ -2378,6 +2529,45 @@ mod tests {
                 bench_first_frame: false,
             }
         );
+    }
+
+    #[test]
+    fn parses_notification_list_before_dashboard_arguments() {
+        assert_eq!(
+            parse_args_from([
+                "--notification-list".to_owned(),
+                "/dev/ttys001".to_owned(),
+                "$7".to_owned(),
+                "%3".to_owned(),
+            ])
+            .unwrap(),
+            StartupArgs::NotificationList {
+                client_tty: "/dev/ttys001".to_owned(),
+                session_id: "$7".to_owned(),
+                pane_id: "%3".to_owned(),
+            }
+        );
+        assert!(
+            parse_args_from([
+                "--notification-list".to_owned(),
+                "/dev/ttys001".to_owned(),
+                "$7".to_owned(),
+                "%3".to_owned(),
+                "--bench-first-frame".to_owned(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_notification_list_identity_arguments() {
+        for args in [
+            ["--notification-list", "/dev/tty:1", "$7", "%3"],
+            ["--notification-list", "/dev/ttys001", "session", "%3"],
+            ["--notification-list", "/dev/ttys001", "$7", "%pane"],
+        ] {
+            assert!(parse_args_from(args.map(str::to_owned)).is_err());
+        }
     }
 
     #[test]

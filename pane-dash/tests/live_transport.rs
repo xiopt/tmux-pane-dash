@@ -61,8 +61,8 @@ impl Drop for EnvRestore {
 }
 
 #[test]
-fn parses_new_window_ids_from_one_rs_terminated_tab_delimited_record() {
-    let (window_id, pane_id) = parse_new_window_ids("@17\t%42\u{001e}\n");
+fn parses_new_window_ids_from_one_pipe_delimited_line() {
+    let (window_id, pane_id) = parse_new_window_ids("@17|%42\n");
 
     assert_eq!(window_id, WindowId::from("@17"));
     assert_eq!(pane_id, PaneId::from("%42"));
@@ -479,8 +479,10 @@ async fn raw_channel_model(control: &ControlHandle) -> Model {
         .expect("channel snapshot failed");
     let outcome = parse(&bytes);
     assert_eq!(
-        outcome.dropped, 0,
-        "channel snapshot contained malformed records"
+        outcome.dropped,
+        0,
+        "channel snapshot contained malformed records: {:?}",
+        String::from_utf8_lossy(&bytes)
     );
     assert!(!outcome.records.is_empty(), "channel snapshot was empty");
     Model::build(&outcome.records, &ModelConfig::default(), unix_seconds())
@@ -565,13 +567,12 @@ fn metric(label: &str, elapsed: Duration, budget: Duration) {
 fn parse_new_window_ids(output: &str) -> (WindowId, PaneId) {
     let record = output
         .strip_suffix('\n')
-        .and_then(|line| line.strip_suffix('\u{001e}'))
-        .expect("new-window -P output was not one RS-terminated line");
+        .unwrap_or_else(|| panic!("new-window -P output was not one line: {output:?}"));
     let (window_id, pane_id) = record
-        .split_once('\t')
+        .split_once('|')
         .expect("new-window -P output did not contain window and pane IDs");
     assert!(
-        !pane_id.contains('\t'),
+        !pane_id.contains('|'),
         "new-window -P output contained more than two fields"
     );
     assert!(
@@ -709,7 +710,7 @@ impl Harness {
             "-d",
             "-P",
             "-F",
-            "#{window_id}\t#{pane_id}\u{001e}",
+            "#{window_id}|#{pane_id}",
             "-t",
             target,
             "-n",

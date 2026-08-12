@@ -1,6 +1,6 @@
 [package]
 name = "pane-dash"
-version = "0.1.2"
+version = "0.1.6"
 edition = "2024"
 autotests = false
 
@@ -32,6 +32,10 @@ path = "tests/config_startup.rs"
 name = "version"
 path = "tests/version.rs"
 
+[[test]]
+name = "notifications"
+path = "tests/notifications.rs"
+
 [dependencies]
 ansi-to-tui = "8.0.1"
 anyhow = "1"
@@ -39,9 +43,11 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "=0.3.32"
 nucleo-matcher = "0.3.1"
 ratatui = "0.30"
+reqwest = { version = "0.12", default-features = false }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "macros", "time", "process", "sync", "io-util", "test-util"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "process", "sync", "io-util", "net", "signal", "test-util"] }
 toml = "0.9"
 unicode-width = "0.2"
 unicode-segmentation = "1"

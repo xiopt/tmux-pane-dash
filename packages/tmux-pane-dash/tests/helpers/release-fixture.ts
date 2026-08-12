@@ -20,7 +20,7 @@ const run = async (argv: readonly string[], input: { cwd: string; env: Record<st
   const timer = setTimeout(() => child.kill("SIGKILL"), input.timeoutMs)
   try {
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
-    if (code !== 0) throw new Error(`child failed (${code}): ${stderr.slice(0, 2_000)}`)
+    if (code !== 0) throw new Error(`child failed (${code}): stdout=${stdout.slice(0, 2_000)} stderr=${stderr.slice(0, 2_000)}`)
     return { stdout, stderr, code }
   } finally { clearTimeout(timer) }
 }

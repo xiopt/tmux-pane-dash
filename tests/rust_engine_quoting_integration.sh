@@ -37,6 +37,9 @@ start_clients() { # socket
 write_recorder() { # binary log executed-marker
   cat > "$1" <<EOF
 #!/usr/bin/env bash
+if [[ "\${1:-}" == notify ]]; then
+  exit 0
+fi
 printf '%s\\n' "\$@" > "$2"
 touch "$3"
 exit 42
@@ -73,7 +76,7 @@ EOF
 
   TMUX='' PATH="$wrapper:$PATH" "$plugin/pane_dash.tmux"
 
-  binding="$(TMUX='' "$TMUX_BIN" -S "$socket" list-keys -T prefix | awk '$4 == "D" { print; exit }')"
+  binding="$(TMUX='' "$TMUX_BIN" -S "$socket" list-keys -T prefix | awk '$4 == "Tab" { print; exit }')"
   [[ "$binding" != *dash.sh* ]] || fail "$mode unexpectedly bound legacy dashboard"
   ! [ -e "$local_sentinel" ] || fail "$mode dollar command substitution executed"
   ! [ -e "$backtick_sentinel" ] || fail "$mode backtick substitution executed"
@@ -82,12 +85,12 @@ EOF
   expected_tty="$(TMUX='' "$TMUX_BIN" -S "$socket" list-clients -t two -F '#{client_tty}')"
   expected_session="$(TMUX='' "$TMUX_BIN" -S "$socket" list-clients -t two -F '#{session_id}')"
   expected_pane="$(TMUX='' "$TMUX_BIN" -S "$socket" list-clients -t two -F '#{pane_id}')"
-  TMUX='' "$TMUX_BIN" -S "$socket" send-keys -K -c "$expected_tty" C-b D
+  TMUX='' "$TMUX_BIN" -S "$socket" send-keys -K -c "$expected_tty" C-b Tab
   wait_for "$mode recorder" test -s "$log"
   actual="$(paste -sd $'\t' "$log")"
   [[ "$actual" = "$expected_tty"$'\t'"$expected_session"$'\t'"$expected_pane" ]] || fail "$mode argv [$actual]"
   [ -e "$executed" ] || fail "$mode recorder marker did not prove invocation"
-  binding="$(TMUX='' "$TMUX_BIN" -S "$socket" list-keys -T prefix | awk '$4 == "D" { print; exit }')"
+  binding="$(TMUX='' "$TMUX_BIN" -S "$socket" list-keys -T prefix | awk '$4 == "Tab" { print; exit }')"
   [[ "$binding" != *dash.sh* ]] || fail "$mode runtime failure rebound dashboard"
   ! [ -e "$local_sentinel" ] || fail "$mode substitution executed on launch"
   ! [ -e "$backtick_sentinel" ] || fail "$mode backtick executed on launch"

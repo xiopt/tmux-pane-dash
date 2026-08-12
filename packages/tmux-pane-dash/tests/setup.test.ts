@@ -19,6 +19,28 @@ test("conflicts are rejected before fetch and leave the tree unchanged", async (
   } finally { await h.cleanup() }
 })
 
+test("OpenCode setup rejects unsupported TUI versions before fetch", async () => {
+  const h = await transactionFixture()
+  try {
+    const directory = join(h.outside, ".config", "opencode")
+    await mkdir(directory, { recursive: true }); await writeFile(join(directory, "opencode.json"), "{}\n")
+    const deps = { ...h.deps, env: { XDG_DATA_HOME: join(h.outside, "data"), HOME: h.outside }, manifest: manifest(), spawn: async () => ({ code: 0, stdout: "1.17.20\n", stderr: "" }) }
+    await expect(setup({ name: "setup", tmux: false, opencode: true, migrate: false, allowDowngrade: false }, deps)).rejects.toMatchObject({ code: "E_OPENCODE_VERSION" })
+    expect(h.calls.fetch).toBe(0)
+  } finally { await h.cleanup() }
+})
+
+test("TUI config conflicts are rejected before fetch", async () => {
+  const h = await transactionFixture()
+  try {
+    const directory = join(h.outside, ".config", "opencode")
+    await mkdir(directory, { recursive: true }); await writeFile(join(directory, "opencode.json"), "{}\n"); await writeFile(join(directory, "tui.json"), '{"plugin":["custom-pane-dash"]}\n')
+    const deps = { ...h.deps, env: { XDG_DATA_HOME: join(h.outside, "data"), HOME: h.outside }, manifest: manifest() }
+    await expect(setup({ name: "setup", tmux: false, opencode: true, migrate: false, allowDowngrade: false }, deps)).rejects.toMatchObject({ code: "E_CONFIG_CONFLICT" })
+    expect(h.calls.fetch).toBe(0)
+  } finally { await h.cleanup() }
+})
+
 test("fresh setup owns both components and equal setup reuses the verified payload", async () => {
   const h = await transactionFixture(), archive = releaseArchive()
   try {
@@ -29,6 +51,8 @@ test("fresh setup owns both components and equal setup reuses the verified paylo
     const versionRoot = join(await managedRoot(deps.env), "versions", deps.executingVersion)
     expect(ownership?.components.tmux?.marker).toContain("schema=1")
     expect(ownership?.components.opencode?.packageEntries).toEqual(["@xiopt/pane-dash-opencode@0.1.0"])
+    expect(ownership?.components.opencodeTui?.packageEntries).toEqual(["@xiopt/pane-dash-opencode@0.1.0"])
+    expect(await readFile(join(h.outside, ".config", "opencode", "tui.json"), "utf8")).toContain("@xiopt/pane-dash-opencode@0.1.0")
     expect(ownership?.files.every(file => file.logicalPath.startsWith(`${versionRoot}/`) && file.resolvedPath.startsWith(`${versionRoot}/`) && !file.logicalPath.includes("/transactions/") && !file.resolvedPath.includes("/transactions/"))).toBeTrue()
     await Promise.all(ownership!.files.flatMap(file => [lstat(file.logicalPath), lstat(file.resolvedPath)]))
     const report = await doctor({ ...deps, doctorFs: { readFile: async path => new Uint8Array(await readFile(path)), stat: async path => {
@@ -78,6 +102,7 @@ test("disabled setup preserves ownership and config for the omitted component", 
     expect((await readOwnership(await managedRoot(deps.env), deps))?.components.opencode).not.toBeNull()
     await uninstall(deps)
     expect(await readFile(config, "utf8")).not.toContain("@xiopt/pane-dash-opencode")
+    expect(await Bun.file(join(h.outside, ".config", "opencode", "tui.json")).exists()).toBeFalse()
     expect(await readFile(join(h.outside, ".tmux.conf"), "utf8")).not.toContain("tmux-pane-dash (@xiopt/tmux-pane-dash)")
   } finally { await h.cleanup() }
 })

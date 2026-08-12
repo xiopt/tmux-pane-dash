@@ -858,6 +858,14 @@ fn alert_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
             width,
         );
     }
+    if let Some(warning) = &app.kimaki_warning {
+        push_alert(
+            &mut alerts,
+            warning,
+            Style::default().fg(app.palette().degrade),
+            width,
+        );
+    }
     if app.consecutive_failures > 0 {
         push_alert(
             &mut alerts,
@@ -918,6 +926,72 @@ fn scroll_offset(selected: Option<usize>, row_count: usize, height: usize) -> us
 
 fn row_line(row: &Row, app: &AppState, selected: bool, now: u64, width: u16) -> Line<'static> {
     let mut spans = match row {
+        Row::HeadlessHeader {
+            session_count,
+            working_count,
+        } => {
+            let mut spans = vec![Span::styled(
+                format!("▾ kimaki ({session_count})"),
+                Style::default().fg(app.palette().accent),
+            )];
+            if *working_count > 0 {
+                let suffix = format!("{working_count} working");
+                let used = spans.iter().map(|span| span.content.width()).sum::<usize>();
+                spans.push(Span::raw(
+                    " ".repeat(
+                        usize::from(width)
+                            .saturating_sub(used + suffix.width())
+                            .max(1),
+                    ),
+                ));
+                spans.push(Span::styled(
+                    suffix,
+                    Style::default().fg(app.palette().working),
+                ));
+            }
+            spans
+        }
+        Row::Headless {
+            title,
+            directory,
+            model,
+            status,
+            status_since,
+            ..
+        } => {
+            let indent = if matches!(app.mode, Mode::Grouped) {
+                "  "
+            } else {
+                ""
+            };
+            let status_field = format!("{:<11}", status_text(*status));
+            let suffix = format!(" {:>3} kimaki     ", format_age(*status_since, now));
+            let context = pad_to_width(&truncate_to_width(&path_basename(directory), 12), 12);
+            let mut spans = vec![
+                Span::raw(indent),
+                Span::styled(
+                    status_glyph(*status),
+                    Style::default().fg(status_color(*status, app.palette())),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    status_field,
+                    Style::default().fg(status_color(*status, app.palette())),
+                ),
+                Span::raw(suffix),
+                Span::styled(context, Style::default().fg(app.palette().dim)),
+                Span::raw(" "),
+                Span::styled(model.clone(), Style::default().fg(app.palette().dim)),
+                Span::raw("  "),
+            ];
+            let label = truncate_to_width(
+                title,
+                usize::from(width)
+                    .saturating_sub(spans.iter().map(|span| span.content.width()).sum::<usize>()),
+            );
+            spans.push(Span::styled(label, Style::default().fg(app.palette().text)));
+            spans
+        }
         Row::SessionHeader {
             session_id,
             name,
@@ -1039,6 +1113,11 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
         Status::Unknown,
         Status::Stale,
     ];
+    let total_label = if app.model.headless().is_empty() {
+        "panes"
+    } else {
+        "items"
+    };
     let verbose_counts = statuses
         .into_iter()
         .filter_map(|status| {
@@ -1046,7 +1125,7 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
             (count > 0).then(|| format!("{} {count}", status_text(status)))
         })
         .chain(std::iter::once(format!(
-            "{} panes",
+            "{} {total_label}",
             counts.iter().sum::<usize>()
         )))
         .collect::<Vec<_>>()
@@ -1058,7 +1137,12 @@ fn status_bar(app: &AppState, counts: [usize; 6], width: u16) -> Paragraph<'stat
             (count > 0).then(|| format!("{}{}", compact_status_token(status), count))
         })
         .chain(std::iter::once(format!(
-            "P{}",
+            "{}{}",
+            if app.model.headless().is_empty() {
+                "P"
+            } else {
+                "I"
+            },
             counts.iter().sum::<usize>()
         )))
         .collect::<String>();
@@ -1265,6 +1349,7 @@ mod tests {
             heartbeat: Some(1_000),
             title: "task".into(),
             model: "model".into(),
+            opencode_session: String::new(),
             tag: String::new(),
             group: "1".into(),
         };
