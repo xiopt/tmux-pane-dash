@@ -349,8 +349,19 @@ jobs:
           export NODE_24_BIN="$(command -v node)"
            export VERIFIED_HANDOFF="$RUNNER_TEMP/verified-handoff/verified-handoff.json"
            export VERIFIER_BUNDLE="$RUNNER_TEMP/verified-handoff/verify-npm-provenance.mjs"
-           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/draft" --skip-existing
-          test "$(find "$RUNNER_TEMP/draft" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 6
+           release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '[.[] | select(.tag_name == env.GITHUB_REF_NAME and .draft == true)] | if length == 1 then .[0].id else error("expected one draft release") end')"
+           mkdir -p "$RUNNER_TEMP/draft"
+           mapfile -t assets < <(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" --jq '.[] | [.id, .name] | @tsv')
+           test "${#assets[@]}" -eq 6
+           for asset in "${assets[@]}"; do
+             IFS=$'\t' read -r asset_id asset_name <<< "$asset"
+             case "$asset_name" in
+               SHA256SUMS|release-manifest.json|tmux-pane-dash-v0.1.6-aarch64-apple-darwin.tar.gz|tmux-pane-dash-v0.1.6-aarch64-unknown-linux-musl.tar.gz|tmux-pane-dash-v0.1.6-x86_64-apple-darwin.tar.gz|tmux-pane-dash-v0.1.6-x86_64-unknown-linux-musl.tar.gz) ;;
+               *) echo "unexpected draft asset: $asset_name" >&2; exit 1 ;;
+             esac
+             gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$RUNNER_TEMP/draft/$asset_name"
+           done
+           test "$(find "$RUNNER_TEMP/draft" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 6
           "$NODE_24_BIN" --input-type=module - "$VERIFIED_HANDOFF" <<'NODE'
           import { createHash } from "node:crypto";
           import { readFileSync } from "node:fs";
