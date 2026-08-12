@@ -21,7 +21,7 @@ function assertPackageAssemblyOrder(body: string): void {
   const markers = [
     "bun scripts/release/build.ts --assemble",
     "bun scripts/release/package-build.ts --release-manifest \"$release_dir/release-manifest.json\" --require-change",
-    "tests/release/with-node20.sh -- bun scripts/release/verify-artifacts.ts --packages --release-manifest \"$release_dir/release-manifest.json\"",
+    "PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- bun scripts/release/verify-artifacts.ts --packages --release-manifest \"$release_dir/release-manifest.json\"",
     "npm pack --workspace packages/tmux-pane-dash --workspace opencode-plugin --pack-destination \"$npm_dir\"",
   ]
   let previous = body.indexOf("bun install --frozen-lockfile")
@@ -35,6 +35,16 @@ function assertPackageAssemblyOrder(body: string): void {
   if (upload < 0 || upload <= previous) throw new Error("npm package upload is missing or out of order")
   if (body.includes("with-npa.sh")) throw new Error("package verification does not require the NPA wrapper")
   if (/git (?:status|diff|clean)|source[_-](?:package|manifest)|buildSourceArchive/.test(body.slice(previous))) throw new Error("package handoff must not depend on later tree or source-archive checks")
+}
+
+function assertAssembleNodeTools(body: string): void {
+  const node20 = body.indexOf('node-version: "20.0.0"')
+  const preserve = body.indexOf("NODE_20_BIN=", node20)
+  const node24 = body.indexOf('node-version: "24.12.0"', preserve)
+  const verify = body.indexOf("PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh --", node24)
+  if (node20 < 0 || preserve <= node20 || node24 <= preserve || verify <= node24) {
+    throw new Error("assemble-verified must preserve exact Node20 tools before restoring Node24")
+  }
 }
 
 const setupNode = (body: string, version: string) => {
@@ -1042,8 +1052,9 @@ test("draft mutation is non-clobbering and draft validation binds all six assets
 test("assemble-verified stages the assembled manifest before expected package verification and pack", async () => {
   const body = job(await workflow("release.yml"), "assemble-verified")
   const stage = "bun scripts/release/package-build.ts --release-manifest \"$release_dir/release-manifest.json\" --require-change"
-  const verify = "tests/release/with-node20.sh -- bun scripts/release/verify-artifacts.ts --packages --release-manifest \"$release_dir/release-manifest.json\""
+  const verify = "PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- bun scripts/release/verify-artifacts.ts --packages --release-manifest \"$release_dir/release-manifest.json\""
   const pack = "npm pack --workspace packages/tmux-pane-dash --workspace opencode-plugin --pack-destination \"$npm_dir\""
+  expect(() => assertAssembleNodeTools(body)).not.toThrow()
   expect(() => assertPackageAssemblyOrder(body)).not.toThrow()
   expect(() => assertPackageAssemblyOrder(body.replace(`${stage}\n`, ""))).toThrow(/missing or out of order/)
   const reordered = body.replace(stage, "__stage__").replace(verify, stage).replace("__stage__", verify)
