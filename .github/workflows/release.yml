@@ -490,8 +490,15 @@ jobs:
            mkdir -p "$audit_dir" "$RUNNER_TEMP/npm-audit-cache"
            printf '%s\n' 'registry=https://registry.npmjs.org/' 'audit=false' 'fund=false' > "$audit_dir/.npmrc"
            printf '%s\n' '{"name":"task14-npm-signature-audit","private":true}' > "$audit_dir/package.json"
-            npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm install --prefix "$audit_dir" --ignore-scripts --no-audit --no-fund --package-lock=false @xiopt/pane-dash-opencode@0.1.6 @xiopt/tmux-pane-dash@0.1.6
-           npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm audit signatures --prefix "$audit_dir"
+           for attempt in 1 2 3 4 5 6; do
+             rm -rf "$audit_dir/node_modules"
+             if npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm install --prefix "$audit_dir" --ignore-scripts --no-audit --no-fund --package-lock=false @xiopt/pane-dash-opencode@0.1.6 @xiopt/tmux-pane-dash@0.1.6 \
+               && npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm audit signatures --prefix "$audit_dir"; then
+               break
+             fi
+             test "$attempt" -lt 6 || exit 1
+             sleep 10
+           done
           "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/pane-dash-opencode --version 0.1.6 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.6
           "$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/tmux-pane-dash --version 0.1.6 --handoff "$VERIFIED_HANDOFF" --repository xiopt/tmux-pane-dash --workflow .github/workflows/release.yml --ref refs/tags/v0.1.6
 
