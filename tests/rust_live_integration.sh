@@ -307,7 +307,11 @@ notification_service_count() {
   ps -axo pid=,command= | awk -v binary="$BIN" -v socket="$SOCKET" \
     'index($0, binary) && index($0, socket) && $0 ~ / notify serve --tmux-socket / { count++ } END { print count + 0 }'
 }
-notification_service_one() { (( $(notification_service_count) == 1 )); }
+notification_service_ready() {
+  local output
+  output="$(TMUX="$(notification_identity)" TMUX_PANE="$pane" "$BIN" notify list 2>/dev/null)" || return 1
+  [[ "$output" == *'"ok":true'* && "$output" == *'"outcome":"listed"'* ]]
+}
 notification_service_gone() { (( $(notification_service_count) == 0 )); }
 notification_identity() { printf '%s,%s,0\n' "$SOCKET" "$(admin display-message -p '#{pid}')"; }
 notify_client() {
@@ -1274,7 +1278,8 @@ main() {
   [[ "$(admin show-options -gv window-status-style)" == "$window_style_before" ]] || die 'notification row changed window-status-style'
   [[ "$(admin show-options -gv window-status-current-style)" == "$window_current_style_before" ]] || die 'notification row changed window-status-current-style'
   [[ "$(admin show-options -gv status)" == 2 ]] || die 'notification status line count is not exactly two'
-  wait_for 'one notification service after idempotent reload' 3 notification_service_one
+  wait_for 'notification service after idempotent reload' 3 notification_service_ready
+  (( $(notification_service_count) <= 1 )) || die 'duplicate notification services after idempotent reload'
   [[ -z "$(notification_status)" ]] || die 'empty notification queue rendered a nonblank row'
   [[ "$(admin show-options -gv focus-events)" == on ]] || die 'production plugin did not enable focus-events'
   terminal_features="$(admin show-options -sv terminal-features)"
