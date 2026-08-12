@@ -497,7 +497,7 @@ popup_replaced() {
 open_popup() {
   local index="$1" before popup_pid
   before="$(controls)"
-  send_bytes "$index" '\002'; send_bytes "$index" D
+  send_bytes "$index" '\002'; send_bytes "$index" '\t'
   wait_for "popup $index control" 3 new_control "$before"
   POPUP_CONTROLS[index]="$NEW_CONTROL_PID"
   popup_pid="$(control_parent_pid "$NEW_CONTROL_PID")" || die "popup $index control pid invalid: $NEW_CONTROL_PID"
