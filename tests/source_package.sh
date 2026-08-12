@@ -427,7 +427,7 @@ for _ in $(seq 1 30); do
 done
 [ "${client_count:-0}" = 2 ] || fail 'two PTY clients did not attach'
 PATH="$sentinel_bin:$PATH" "$extracted/pane_dash.tmux"
-real_binding="$(TMUX='' "$tmux_bin" -L "$socket" list-keys -T prefix | awk '$4 == "D" { print; exit }')"
+real_binding="$(TMUX='' "$tmux_bin" -L "$socket" list-keys -T prefix | awk '$4 == "Tab" { print; exit }')"
 [[ "$real_binding" == *'/bin/pane-dash'* ]] || fail "extracted shim did not bind a local binary [$real_binding]"
 status_binding="$(TMUX='' "$tmux_bin" -L "$socket" list-keys -T root)"
 [[ "$status_binding" == *'notify click --range'* ]] || fail 'extracted shim did not install notification status click'
@@ -442,7 +442,7 @@ for _ in $(seq 1 30); do
   sleep 0.1
 done
 [ "${best_tty:-}" = "$client_one_tty" ] || fail 'noninvoking client did not become tmux best client'
-TMUX='' "$tmux_bin" -L "$socket" send-keys -K -c "$expected_tty" C-b D
+TMUX='' "$tmux_bin" -L "$socket" send-keys -K -c "$expected_tty" C-b Tab
 for _ in $(seq 1 50); do
   [ -s "$route_log" ] && [ -s "$route_pid" ] && break
   sleep 0.1

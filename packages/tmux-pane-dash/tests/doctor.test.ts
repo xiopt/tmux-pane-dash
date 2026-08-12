@@ -25,7 +25,7 @@ function fixture(fault?: string, tmuxTmpdir?: string) {
     throw Object.assign(new Error(`missing ${path}`), { code: "ENOENT" })
   }
   let bindings = [
-    `bind-key -T prefix D run-shell '${root}/current/scripts/open.sh' '${root}/current/bin/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'`,
+    `bind-key -T prefix Tab run-shell '${root}/current/scripts/open.sh' '${root}/current/bin/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'`,
     `bind-key -T prefix j run-shell '${root}/current/scripts/open.sh' --notification-list '${root}/current/bin/pane-dash' '#{client_tty}' '#{session_id}' '#{pane_id}'`,
     `bind-key -T prefix T run-shell \"${root}/current/scripts/tag.sh\" toggle '#{pane_id}'`,
     `bind-key -T prefix M command-prompt -p 'pane-dash label:' \"set-option -p @pane_dash_label_input \\\"%%%\\\" ; run-shell '\"${root}/current/scripts/tag.sh\" label-from-option \\\"#{pane_id}\\\"'\"`,
