@@ -390,7 +390,7 @@ tmux_stub_dir="$scratch_root/tmux stub"
 mkdir -p "$tmux_stub_dir/global"
 : > "$tmux_stub_dir/calls.log"
 PATH="$extracted/tests/stubs:$sentinel_bin:$PATH" TMUX_STUB_DIR="$tmux_stub_dir" "$extracted/pane_dash.tmux"
-expected_binding="bind-key$(printf '\037')D$(printf '\037')run-shell$(printf '\037')$(shell_quote "$extracted/scripts/open.sh") $(shell_quote "$binary") '#{client_tty}' '#{session_id}' '#{pane_id}'$(printf '\037')"
+expected_binding="bind-key$(printf '\037')Tab$(printf '\037')run-shell$(printf '\037')$(shell_quote "$extracted/scripts/open.sh") $(shell_quote "$binary") '#{client_tty}' '#{session_id}' '#{pane_id}'$(printf '\037')"
 actual_binding="$(awk -v expected="$expected_binding" 'index($0, expected) == 1 { print; exit }' "$tmux_stub_dir/calls.log")"
 [ "$actual_binding" = "$expected_binding" ] || fail 'absent engine did not bind the exact extracted local binary'
 
