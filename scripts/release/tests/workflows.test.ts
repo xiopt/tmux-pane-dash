@@ -209,7 +209,7 @@ function assertGhAuthentication(workflow: ParsedWorkflow, text: string): void {
   }
   const expected: Record<string, Record<string, string>> = {
     "draft-release": { contents: "write", "id-token": "write", attestations: "write" },
-    "validate-draft": { contents: "read" },
+    "validate-draft": { contents: "write" },
     "promote-release": { contents: "write", actions: "read", deployments: "read" },
   }
   for (const [name, permissions] of Object.entries(expected)) {
@@ -890,6 +890,9 @@ test("release graph has exact least-privilege jobs, environments, handoff, and t
   expect(draft).toContain("id-token: write")
   expect(draft).toContain("attestations: write")
   expect(permissions(draft)).toEqual({ contents: "write", "id-token": "write", attestations: "write" })
+  const validateDraft = job(text, "validate-draft")
+  expect(permissions(validateDraft)).toEqual({ contents: "write" })
+  expect(validateDraft).not.toMatch(/gh release (?:create|upload|edit|delete)/)
   const npm = job(text, "npm-production")
   expect(npm).toContain("environment: npm-production")
   expect(npm).toContain("runs-on: ubuntu-24.04")
