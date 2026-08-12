@@ -155,10 +155,19 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "24.12.0"
+          node-version: "20.0.0"
+      - name: Preserve exact Node 20 tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e 'if (process.version !== "v20.0.0") process.exit(1)'
+          printf 'NODE_20_BIN=%s\nNPM_20_CLI=%s\n' "$(command -v node)" "$(command -v npm)" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.1.2
         with:
           bun-version: 1.3.14
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.12.0"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: target-*
@@ -188,7 +197,7 @@ jobs:
           bun scripts/release/build.ts --assemble --tag-commit "$GITHUB_SHA" --output "$release_dir"
           test ! -e release/dist
           bun scripts/release/package-build.ts --release-manifest "$release_dir/release-manifest.json" --require-change
-          tests/release/with-node20.sh -- bun scripts/release/verify-artifacts.ts --packages --release-manifest "$release_dir/release-manifest.json"
+          PANE_DASH_NODE20_PREPROVIDED=1 tests/release/with-node20.sh -- bun scripts/release/verify-artifacts.ts --packages --release-manifest "$release_dir/release-manifest.json"
           npm pack --workspace packages/tmux-pane-dash --workspace opencode-plugin --pack-destination "$npm_dir"
           test -n "${NPM_TRUSTED_PUBLISHER_BINDING:?NPM_TRUSTED_PUBLISHER_BINDING is required}"
           test "$NPM_TRUSTED_PUBLISHER_BINDING" = "$NPM_TRUSTED_PUBLISHER_EXPECTED"
