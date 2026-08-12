@@ -9,6 +9,7 @@ import { verifyPackages } from "../verify-artifacts"
 const root = process.cwd()
 const outputPaths = [
   "packages/tmux-pane-dash/generated/release-manifest.json",
+  "packages/tmux-pane-dash/payload/tmux-pane-dash-v0.1.6-aarch64-apple-darwin.tar.gz",
   "packages/tmux-pane-dash/dist/cli.js",
   "packages/tmux-pane-dash/dist/runtime.js",
   "opencode-plugin/dist/index.js",
@@ -38,11 +39,13 @@ async function fixtureRoot(): Promise<string> {
 
 async function expectedManifest(fixture: string, mutate?: (manifest: Record<string, any>) => void): Promise<{ path: string; bytes: Uint8Array; value: Record<string, any> }> {
   const value = JSON.parse(await readFile(join(root, "packages/tmux-pane-dash/generated/release-manifest.json"), "utf8")) as Record<string, any>
+  const sourceAsset = (value.assets as Record<string, { asset: string }>)["darwin-arm64"]!.asset
   for (const [index, [key, asset]] of Object.entries(value.assets as Record<string, { sha256: string }>).entries()) if (key !== "darwin-arm64") asset.sha256 = String(index + 1).repeat(64)
   mutate?.(value)
   const bytes = canonicalJson(value)
   const path = join(fixture, "release-manifest.json")
   await writeFile(path, bytes)
+  await copy(join(root, "packages/tmux-pane-dash/payload", sourceAsset), join(fixture, sourceAsset))
   return { path, bytes, value }
 }
 
@@ -85,7 +88,8 @@ test("package build atomically publishes exact outputs, embeds every release ide
     const expected = await expectedManifest(fixture)
     await buildPackages({ root: fixture, releaseManifestPath: expected.path, requireChange: true })
     expect(await readFile(join(fixture, outputPaths[0]!))).toEqual(expected.bytes)
-    const cli = await readFile(join(fixture, outputPaths[1]!), "utf8")
+    expect(await readFile(join(fixture, outputPaths[1]!))).toEqual(await readFile(join(fixture, expected.value.assets["darwin-arm64"].asset)))
+    const cli = await readFile(join(fixture, outputPaths[2]!), "utf8")
     expect(cli).toContain("0.1.6")
     expect(cli).toContain("v0.1.6")
     for (const asset of Object.values(expected.value.assets) as Array<{ asset: string; url: string; sha256: string }>) {
@@ -93,7 +97,7 @@ test("package build atomically publishes exact outputs, embeds every release ide
       expect(cli).toContain(asset.url)
       expect(cli).toContain(asset.sha256)
     }
-    for (const [path, mode] of [[outputPaths[0], 0o644], [outputPaths[1], 0o755], [outputPaths[2], 0o644], [outputPaths[3], 0o644]] as const) expect((await stat(join(fixture, path))).mode & 0o7777).toBe(mode)
+    for (const [path, mode] of [[outputPaths[0], 0o644], [outputPaths[1], 0o644], [outputPaths[2], 0o755], [outputPaths[3], 0o644], [outputPaths[4], 0o644]] as const) expect((await stat(join(fixture, path))).mode & 0o7777).toBe(mode)
     const directBuild = await mkdtemp(join(tmpdir(), "tmux-pane-dash-direct-build-test-"))
     try {
       for (const [entry, filename] of [["cli.ts", "cli.js"], ["runtime.ts", "runtime.js"]] as const) {
@@ -122,6 +126,19 @@ test("package build leaves all committed outputs unchanged and cleans temporary 
     await expect(buildPackages({ root: fixture, releaseManifestPath: expected.path })).rejects.toThrow()
     expect(await snapshots(fixture)).toEqual(before)
     await assertNoTemporaryOutputs(fixture)
+  } finally {
+    await rm(fixture, { recursive: true, force: true })
+  }
+})
+
+test("package build rejects a release payload that does not match its manifest without mutation", async () => {
+  const fixture = await fixtureRoot()
+  try {
+    const expected = await expectedManifest(fixture)
+    const before = await snapshots(fixture)
+    await writeFile(join(fixture, expected.value.assets["darwin-arm64"].asset), "wrong payload")
+    await expect(buildPackages({ root: fixture, releaseManifestPath: expected.path })).rejects.toThrow("payload differs")
+    expect(await snapshots(fixture)).toEqual(before)
   } finally {
     await rm(fixture, { recursive: true, force: true })
   }
