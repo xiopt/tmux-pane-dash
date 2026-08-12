@@ -74,7 +74,7 @@ for _ in $(seq 1 30); do
 done
 [[ "${best_tty:-}" = "$client1_tty" ]] || fail "test invalid: client 1 did not become the untargeted best client"
 [[ "$best_tty" != "$expected_tty" ]] || fail "test invalid: client 2 is the untargeted best client"
-TMUX='' "$TMUX_BIN" -L "$SOCK" send-keys -K -c "$expected_tty" C-b D
+TMUX='' "$TMUX_BIN" -L "$SOCK" send-keys -K -c "$expected_tty" C-b Tab
 for _ in $(seq 1 50); do
   [[ -s "$LOG" ]] && break
   sleep 0.1
