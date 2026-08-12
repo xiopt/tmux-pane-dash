@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import type { ReleaseManifest } from "../../packages/tmux-pane-dash/src/contracts"
@@ -50,6 +51,10 @@ function missing(error: unknown): boolean {
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return Buffer.from(left).equals(Buffer.from(right))
+}
+
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex")
 }
 
 function usage(): never {
@@ -212,6 +217,9 @@ export async function publishAtomicallyForTest(files: readonly BuiltFile[], fail
 
 export async function buildPackages(input: PackageBuildInput): Promise<void> {
   const release = await readReleaseManifest(input.releaseManifestPath)
+  const payload = release.manifest.assets["darwin-arm64"]
+  const payloadBytes = new Uint8Array(await readFile(join(dirname(resolve(input.releaseManifestPath)), payload.asset)))
+  if (payloadBytes.length !== payload.size || sha256(payloadBytes) !== payload.sha256) throw new Error("darwin-arm64 package payload differs from release manifest")
   const root = resolve(input.root)
   const packageRoot = join(root, "packages", "tmux-pane-dash")
   const buildRoot = await mkdtemp(join(tmpdir(), "tmux-pane-dash-package-build-"))
@@ -235,6 +243,7 @@ export async function buildPackages(input: PackageBuildInput): Promise<void> {
 
     await publishAtomically([
       { target: join(packageRoot, "generated", "release-manifest.json"), bytes: release.bytes, mode: 0o644 },
+      { target: join(packageRoot, "payload", payload.asset), bytes: payloadBytes, mode: 0o644 },
       { target: join(packageRoot, "dist", "cli.js"), bytes: cli, mode: 0o755 },
       { target: join(packageRoot, "dist", "runtime.js"), bytes: runtime, mode: 0o644 },
       { target: join(root, "opencode-plugin", "dist", "index.js"), bytes: opencode, mode: 0o644 },
