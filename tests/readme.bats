@@ -198,7 +198,7 @@ PY
 
 @test "OpenCode companion status plugin setup and removal are actionable" {
   for text in \
-      '@xiopt/pane-dash-opencode@0.1.6' \
+      '@xiopt/pane-dash-opencode@0.1.7' \
     '--no-opencode' \
     'OpenCode >=1.17.20' \
     'mkdir -p "$HOME/.config/opencode/plugin"' \

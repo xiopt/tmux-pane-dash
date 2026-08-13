@@ -310,7 +310,7 @@ const rustGateCommands = [
 const rustBuildCommands = [
   "make build",
   "test -x bin/pane-dash",
-  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.6"',
+  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.7"',
 ] as const
 
 function assertRustLiveBinaryBuild(workflow: ParsedWorkflow): void {
@@ -523,7 +523,7 @@ const ciCliMuslBuildCommands = [
   "mkdir -p bin",
   `install -m0755 pane-dash/target/${ciCliMuslTarget}/release/pane-dash bin/pane-dash`,
   "test -x bin/pane-dash",
-  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.6"',
+  'test "$(bin/pane-dash --version)" = "pane-dash 0.1.7"',
 ] as const
 
 function assertCiCliMuslFixture(workflow: ParsedWorkflow): void {
@@ -925,7 +925,7 @@ test("release graph has exact least-privilege jobs, environments, handoff, and t
     expect(body).toContain('j.verifier.sha256!==c.createHash("sha256")')
     expect(body).not.toMatch(/npm install.*sigstore|bun build/)
   }
-  expect(text).toContain('npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.6.tgz" --access public --provenance')
+  expect(text).toContain('npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.7.tgz" --access public --provenance')
   expect(text).toContain("npm publish")
   expect(text).toContain("vars.NPM_TRUSTED_PUBLISHER_BINDING")
   expect(text).toContain("trustedPublishers")
@@ -1080,8 +1080,8 @@ test("npm production audits signatures without fallback bindings and verifies pu
   expect(npm).toContain("npm audit signatures")
   expect(npm).toContain('NPM_TRUSTED_PUBLISHER_BINDING:?')
   expect(npm).not.toMatch(/NPM_TRUSTED_PUBLISHER_BINDING:-/)
-  const plugin = npm.indexOf("xiopt-pane-dash-opencode-0.1.6.tgz")
-  const cli = npm.indexOf("xiopt-tmux-pane-dash-0.1.6.tgz")
+  const plugin = npm.indexOf("xiopt-pane-dash-opencode-0.1.7.tgz")
+  const cli = npm.indexOf("xiopt-tmux-pane-dash-0.1.7.tgz")
   expect(plugin).toBeGreaterThanOrEqual(0)
   expect(cli).toBeGreaterThan(plugin)
   expect(npm.indexOf("--package @xiopt/pane-dash-opencode")).toBeLessThan(npm.indexOf("--package @xiopt/tmux-pane-dash"))
@@ -1090,7 +1090,7 @@ test("npm production audits signatures without fallback bindings and verifies pu
 test("npm production audits only the exact published versions in an isolated no-auth project", async () => {
   const text = await workflow("release.yml")
   const npm = job(text, "npm-production")
-  const install = 'npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm install --prefix "$audit_dir" --ignore-scripts --no-audit --no-fund --package-lock=false @xiopt/pane-dash-opencode@0.1.6 @xiopt/tmux-pane-dash@0.1.6'
+  const install = 'npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm install --prefix "$audit_dir" --ignore-scripts --no-audit --no-fund --package-lock=false @xiopt/pane-dash-opencode@0.1.7 @xiopt/tmux-pane-dash@0.1.7'
   const signatures = 'npm_config_userconfig="$audit_dir/.npmrc" npm_config_cache="$RUNNER_TEMP/npm-audit-cache" npm audit signatures --prefix "$audit_dir"'
   expect(npm).toContain('audit_dir="$RUNNER_TEMP/npm-audit"')
   expect(npm).toContain('registry=https://registry.npmjs.org/')
@@ -1099,8 +1099,8 @@ test("npm production audits only the exact published versions in an isolated no-
   expect(npm).not.toContain("--package-lock=true")
   expect(npm).not.toContain('"dependencies"')
   expect(npm).not.toContain("# npm publish <tarball>")
-  const pluginPublish = npm.indexOf('npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.6.tgz"')
-  const cliPublish = npm.indexOf('npm publish "$RUNNER_TEMP/npm/xiopt-tmux-pane-dash-0.1.6.tgz"')
+  const pluginPublish = npm.indexOf('npm publish "$RUNNER_TEMP/npm/xiopt-pane-dash-opencode-0.1.7.tgz"')
+  const cliPublish = npm.indexOf('npm publish "$RUNNER_TEMP/npm/xiopt-tmux-pane-dash-0.1.7.tgz"')
   const installIndex = npm.indexOf(install)
   const auditIndex = npm.indexOf(signatures)
   const provenanceIndex = npm.indexOf('"$NODE_24_BIN" "$VERIFIER_BUNDLE" --package @xiopt/pane-dash-opencode')
@@ -1116,17 +1116,17 @@ test("draft validation verifies each exact release asset with the tagged workflo
   const text = await workflow("release.yml")
   const validation = job(text, "validate-draft")
   for (const asset of [
-    "tmux-pane-dash-v0.1.6-aarch64-apple-darwin.tar.gz",
-    "tmux-pane-dash-v0.1.6-x86_64-apple-darwin.tar.gz",
-    "tmux-pane-dash-v0.1.6-aarch64-unknown-linux-musl.tar.gz",
-    "tmux-pane-dash-v0.1.6-x86_64-unknown-linux-musl.tar.gz",
+    "tmux-pane-dash-v0.1.7-aarch64-apple-darwin.tar.gz",
+    "tmux-pane-dash-v0.1.7-x86_64-apple-darwin.tar.gz",
+    "tmux-pane-dash-v0.1.7-aarch64-unknown-linux-musl.tar.gz",
+    "tmux-pane-dash-v0.1.7-x86_64-unknown-linux-musl.tar.gz",
     "release-manifest.json",
     "SHA256SUMS",
   ]) expect(validation).toContain(`$RUNNER_TEMP/draft/${asset}`)
   expect(validation).toContain("attestation_assets=(")
   expect(validation).toContain("--repo \"$GITHUB_REPOSITORY\"")
   expect(validation).toContain("--signer-workflow xiopt/tmux-pane-dash/.github/workflows/release.yml")
-  expect(validation).toContain("--source-ref refs/tags/v0.1.6")
+  expect(validation).toContain("--source-ref refs/tags/v0.1.7")
   expect(validation).toContain("--source-digest \"$GITHUB_SHA\"")
   expect(validation).toContain("--signer-digest \"$GITHUB_SHA\"")
   expect(validation).not.toContain('"$RUNNER_TEMP/draft"/*.tar.gz')

@@ -422,7 +422,7 @@ function insertPlugin(text, plugin, desired) {
   return `${text.slice(0, entry.end)}${insertion}${text.slice(entry.end)}`;
 }
 function planOpenCodeEdit(input) {
-  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.6", text = decoder.decode(input.bytes), plugin = rootPlugin(text);
+  const desired = input.packageEntry ?? "@xiopt/pane-dash-opencode@0.1.7", text = decoder.decode(input.bytes), plugin = rootPlugin(text);
   if (plugin) {
     const managed = plugin.entries.filter((entry) => validPaneDash(entry.value));
     const desiredEntries = managed.filter((entry) => entry.value === desired);
