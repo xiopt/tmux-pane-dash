@@ -57,7 +57,7 @@ jobs:
           cargo test --workspace --locked --manifest-path pane-dash/Cargo.toml -- --ignored --test-threads=1
           make build
           test -x bin/pane-dash
-          test "$(bin/pane-dash --version)" = "pane-dash 0.1.6"
+          test "$(bin/pane-dash --version)" = "pane-dash 0.1.7"
       - run: |
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- bats tests
           tests/release/with-rust.sh -- scripts/release/clean-room.sh -- shellcheck pane_dash.tmux scripts/*.sh tests/*.sh spike/*.sh spike/probes/*.sh spike/perf/*.sh
@@ -104,7 +104,7 @@ jobs:
           mkdir -p bin
           install -m0755 pane-dash/target/x86_64-unknown-linux-musl/release/pane-dash bin/pane-dash
           test -x bin/pane-dash
-          test "$(bin/pane-dash --version)" = "pane-dash 0.1.6"
+          test "$(bin/pane-dash --version)" = "pane-dash 0.1.7"
       - run: node -e 'if (process.version !== "v20.0.0") process.exit(1)'
       - run: |
           echo "NODE_20_BIN=$(command -v node)" >> "$GITHUB_ENV"
