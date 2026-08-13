@@ -307,6 +307,7 @@ pub struct AppState {
     pub preview: PreviewState,
     pub modal: Option<Modal>,
     pub pending_creation: Option<PendingCreation>,
+    attach_creation_id: Option<CreationId>,
     pub ephemeral_panes: HashSet<PaneId>,
     reducer_now: Option<u64>,
     creation_verification_deadline: Option<u64>,
@@ -348,6 +349,7 @@ impl AppState {
             preview: PreviewState::default(),
             modal: None,
             pending_creation: None,
+            attach_creation_id: None,
             ephemeral_panes: HashSet::new(),
             reducer_now: None,
             creation_verification_deadline: None,
@@ -779,6 +781,7 @@ fn expire_creation_verification(state: &mut AppState, now: u64) -> bool {
     else {
         return false;
     };
+    state.attach_creation_id = None;
     state.creation_verification_deadline = None;
     state.banner = Some(format!(
         "unable to verify pane {} after creation",
@@ -1453,6 +1456,7 @@ fn reduce_create_form_key(
                     },
                     state: PendingCreationState::Creating,
                 });
+                state.attach_creation_id = None;
                 form.submitting = true;
                 form.error = None;
                 state.modal = Some(Modal::Create(CreateModal::Form(form.clone())));
@@ -1528,6 +1532,7 @@ fn reduce_creation_progress(state: &mut AppState, progress: CreationProgress) ->
                 form.error = Some(error);
             } else {
                 state.pending_creation = None;
+                state.attach_creation_id = None;
                 state.banner = Some(error);
             }
             state.invalidate_render_cache();
@@ -1595,6 +1600,7 @@ fn reduce_creation_progress(state: &mut AppState, progress: CreationProgress) ->
                     form.error = Some(error);
                 } else {
                     state.pending_creation = None;
+                    state.attach_creation_id = None;
                     state.banner = Some(error);
                 }
                 state.invalidate_render_cache();
@@ -1707,6 +1713,9 @@ fn finish_creation(
             if bound == &pane_id
     ) {
         return ReduceResult::default();
+    }
+    if !matches!(resolution, CreationResolution::Success) {
+        state.attach_creation_id = None;
     }
     let resolution = match resolution {
         CreationResolution::TagFailed(error) => {
@@ -1835,6 +1844,7 @@ fn emit_jump(state: &mut AppState, zoom: bool, result: &mut ReduceResult) {
                 initiating_session: None,
                 state: PendingCreationState::Creating,
             });
+            state.attach_creation_id = Some(id);
             result.actions.push(Action::AttachHeadless {
                 id,
                 source_url: record.source_url.clone(),
@@ -1906,13 +1916,20 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
     state
         .collapsed
         .retain(|session_id| state.model.sessions().contains_key(session_id));
-    if let Some((initiating_session, pane_id)) = selection {
+    let mut actions = Vec::new();
+    if let Some((initiating_session, pane_id, jump_to_pane)) = selection {
         state.filter_query.clear();
         state.input_mode = InputMode::Navigation;
         if let Some(session_id) = initiating_session.as_ref() {
             state.collapsed.remove(session_id);
         }
         state.focus = selection_focus(&state.model, initiating_session.as_ref(), &pane_id);
+        if jump_to_pane {
+            actions.push(Action::Jump {
+                target: JumpTarget::Pane(pane_id),
+                zoom: false,
+            });
+        }
     } else {
         let visible = state.visible_rows();
         state.focus = old_focus
@@ -1930,7 +1947,7 @@ fn reduce_snapshot(state: &mut AppState, outcome: ParseOutcome, observed_at: u64
     }
     state.sync_selection();
     ReduceResult {
-        actions: Vec::new(),
+        actions,
         changed: true,
     }
 }
@@ -1974,7 +1991,7 @@ fn reconcile_snapshot_presence(
     outcome: &ParseOutcome,
     model_config: &ModelConfig,
     now: u64,
-) -> Option<(Option<SessionId>, PaneId)> {
+) -> Option<(Option<SessionId>, PaneId, bool)> {
     state.ephemeral_panes.retain(|pane_id| {
         let raw_present = outcome.raw_panes.contains(&pane_id.0);
         let records: Vec<_> = outcome
@@ -2010,6 +2027,7 @@ fn reconcile_snapshot_presence(
     let known_dead = records.iter().any(|record| record.pane_dead);
 
     if live {
+        let jump_to_pane = state.attach_creation_id == Some(pending.id);
         let tag_uncertain = matches!(
             resolution,
             CreationResolution::TagFailed(_)
@@ -2025,15 +2043,17 @@ fn reconcile_snapshot_presence(
             state.ephemeral_panes.insert(pane_id.clone());
         }
         state.pending_creation = None;
+        state.attach_creation_id = None;
         state.creation_verification_deadline = None;
         state.banner = creation_snapshot_banner(&pane_id, &resolution, false);
-        return Some((pending.initiating_session, pane_id));
+        return Some((pending.initiating_session, pane_id, jump_to_pane));
     }
     if known_dead
         || (!outcome.raw_panes.contains(&pane_id.0) && absence_is_trustworthy(outcome, &pane_id))
     {
         state.ephemeral_panes.remove(&pane_id);
         state.pending_creation = None;
+        state.attach_creation_id = None;
         state.creation_verification_deadline = None;
         state.banner = creation_snapshot_banner(&pane_id, &resolution, true);
     }
@@ -3572,6 +3592,136 @@ mod tests {
         assert!(second.actions.is_empty());
         assert_eq!(app.next_creation_id, next_creation_id);
         assert_eq!(app.pending_creation, pending);
+    }
+
+    #[test]
+    fn verified_headless_attach_jumps_to_created_pane() {
+        let mut app = state(Vec::new());
+        reduce(
+            &mut app,
+            Event::HeadlessSnapshot {
+                records: vec![HeadlessRecord {
+                    source_url: "http://127.0.0.1:53550".into(),
+                    session_id: HeadlessSessionId::from("ses_live"),
+                    title: "Live task".into(),
+                    directory: "/work/live".into(),
+                    model: "model".into(),
+                    status: Status::NeedsInput,
+                    status_since: Some(9),
+                }],
+                warning: None,
+            },
+        );
+        reduce(&mut app, key(KeyCode::Down));
+        reduce(&mut app, key(KeyCode::Enter));
+        let id = CreationId(1);
+        let pane_id = PaneId::from("%new");
+        for progress in [
+            CreationProgress::Created {
+                id,
+                pane_id: pane_id.clone(),
+            },
+            CreationProgress::Stage {
+                id,
+                stage: CreateStage::Tag,
+                pane_id: Some(pane_id.clone()),
+            },
+            CreationProgress::Stage {
+                id,
+                stage: CreateStage::SendCommand,
+                pane_id: Some(pane_id.clone()),
+            },
+            CreationProgress::Stage {
+                id,
+                stage: CreateStage::SendEnter,
+                pane_id: Some(pane_id.clone()),
+            },
+            CreationProgress::Finished {
+                id,
+                pane_id: pane_id.clone(),
+                resolution: CreationResolution::Success,
+            },
+        ] {
+            reduce(&mut app, Event::CreationProgress(progress));
+        }
+
+        let result = reduce(
+            &mut app,
+            snapshot(vec![record("$tmux", "@new", "%new", 0)], 10),
+        );
+        let [
+            Action::Jump {
+                target,
+                zoom: false,
+            },
+            Action::CapturePreview { .. },
+        ] = result.actions.as_slice()
+        else {
+            panic!("verified attach must jump before preview capture");
+        };
+        assert_eq!(target, &JumpTarget::Pane(pane_id));
+        assert!(app.pending_creation.is_none());
+    }
+
+    #[test]
+    fn failed_headless_attach_does_not_leave_jump_pending() {
+        let mut app = state(Vec::new());
+        app.pending_creation = Some(PendingCreation {
+            id: CreationId(1),
+            initiating_session: None,
+            state: PendingCreationState::Creating,
+        });
+        app.attach_creation_id = Some(CreationId(1));
+
+        let failed = reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::CreateFailed {
+                id: CreationId(1),
+                error: "failed".into(),
+            }),
+        );
+        assert!(failed.actions.is_empty());
+        assert!(app.pending_creation.is_none());
+        assert!(app.attach_creation_id.is_none());
+    }
+
+    #[test]
+    fn post_create_headless_attach_failure_verifies_pane_without_jumping() {
+        let mut app = state(vec![record("$tmux", "@old", "%old", 0)]);
+        let id = CreationId(1);
+        let pane_id = PaneId::from("%new");
+        app.pending_creation = Some(PendingCreation {
+            id,
+            initiating_session: None,
+            state: PendingCreationState::Entering {
+                pane_id: pane_id.clone(),
+            },
+        });
+        app.attach_creation_id = Some(id);
+        reduce(
+            &mut app,
+            Event::CreationProgress(CreationProgress::Finished {
+                id,
+                pane_id: pane_id.clone(),
+                resolution: CreationResolution::CommandFailed {
+                    stage: CreateStage::SendEnter,
+                    error: "failed".into(),
+                },
+            }),
+        );
+
+        let result = reduce(
+            &mut app,
+            snapshot(vec![record("$tmux", "@new", "%new", 0)], 10),
+        );
+        assert!(
+            result
+                .actions
+                .iter()
+                .all(|action| !matches!(action, Action::Jump { .. }))
+        );
+        assert!(app.attach_creation_id.is_none());
+        assert!(app.pending_creation.is_none());
     }
 
     #[test]
