@@ -395,6 +395,30 @@ impl AppState {
         }
     }
 
+    pub fn focus_pane_in_session(&mut self, session_id: &SessionId, pane_id: &PaneId) -> bool {
+        let Some(membership) = self
+            .model
+            .memberships()
+            .iter()
+            .find(|membership| {
+                &membership.session_id == session_id && &membership.pane_id == pane_id
+            })
+            .cloned()
+        else {
+            return false;
+        };
+        if self.collapsed.remove(session_id) {
+            self.invalidate_render_cache();
+        }
+        self.focus = Some(Focus::Pane((
+            membership.session_id,
+            membership.window_id,
+            membership.pane_id,
+        )));
+        self.sync_selection();
+        true
+    }
+
     pub(crate) fn render_cache(&self) -> RefMut<'_, RenderCache> {
         let mut cache = self.render_cache.borrow_mut();
         if cache.revision != Some(self.render_revision) {
@@ -2223,6 +2247,35 @@ mod tests {
             config,
             LoadedUiConfig::default(),
         )
+    }
+
+    #[test]
+    fn startup_focus_uses_exact_launch_session_membership_and_expands_it() {
+        let mut app = state(vec![
+            record("$1", "@1", "%1", 0),
+            record("$2", "@2", "%1", 0),
+        ]);
+        app.collapsed.insert(SessionId::from("$2"));
+
+        assert!(app.focus_pane_in_session(&SessionId::from("$2"), &PaneId::from("%1")));
+
+        assert_eq!(
+            app.focus(),
+            Some(&Focus::Pane((
+                SessionId::from("$2"),
+                WindowId::from("@2"),
+                PaneId::from("%1"),
+            )))
+        );
+        assert!(!app.session_is_collapsed(&SessionId::from("$2")));
+    }
+
+    #[test]
+    fn startup_focus_leaves_fallback_unchanged_when_launch_pane_is_not_listed() {
+        let mut app = state(vec![record("$1", "@1", "%1", 0)]);
+
+        assert!(!app.focus_pane_in_session(&SessionId::from("$1"), &PaneId::from("%9")));
+        assert_eq!(app.focus(), None);
     }
 
     fn key(code: KeyCode) -> Event {
