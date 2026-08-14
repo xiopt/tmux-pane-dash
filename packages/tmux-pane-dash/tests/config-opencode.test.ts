@@ -25,7 +25,7 @@ test("JSONC editor inserts a plugin without rewriting existing plugin-array byte
   const source = "{\r\n  // keep\r\n  \"x\": 1,\r\n  \"plugin\": [\r\n    /* before */ \"other\\u002fplugin\", // after\r\n  ],\r\n}\r\n"
   const input = { logicalPath: "/x/opencode.json", resolvedPath: "/x/opencode.json", bytes: new TextEncoder().encode(source), migrate: false }
   const planned = planOpenCodeEdit(input)
-  expect(decode(planned.bytes)).toBe("{\r\n  // keep\r\n  \"x\": 1,\r\n  \"plugin\": [\r\n    /* before */ \"other\\u002fplugin\",\r\n    \"@xiopt/pane-dash-opencode@0.1.7\", // after\r\n  ],\r\n}\r\n")
+  expect(decode(planned.bytes)).toBe("{\r\n  // keep\r\n  \"x\": 1,\r\n  \"plugin\": [\r\n    /* before */ \"other\\u002fplugin\",\r\n    \"@xiopt/pane-dash-opencode@0.1.8\", // after\r\n  ],\r\n}\r\n")
   expect(planOpenCodeEdit({ ...input, bytes: planned.bytes }).bytes).toEqual(planned.bytes)
 })
 
@@ -33,7 +33,7 @@ test("JSONC editor replaces only one ownership-proven prior plugin string", () =
   const source = "{\n\t\"plugin\" : [ /* keep */ \"unrelated\\u002fplugin\" ,\n\t\t\"@xiopt/pane-dash-opencode@0.0.9\" /* tail */ ],\n\t\"odd\" : true\n}\n"
   const input = { logicalPath: "/x/opencode.json", resolvedPath: "/x/opencode.json", bytes: new TextEncoder().encode(source), migrate: false, ownedEntries: ["@xiopt/pane-dash-opencode@0.0.9"] }
   const planned = planOpenCodeEdit(input)
-  expect(decode(planned.bytes)).toBe("{\n\t\"plugin\" : [ /* keep */ \"unrelated\\u002fplugin\" ,\n\t\t\"@xiopt/pane-dash-opencode@0.1.7\" /* tail */ ],\n\t\"odd\" : true\n}\n")
+  expect(decode(planned.bytes)).toBe("{\n\t\"plugin\" : [ /* keep */ \"unrelated\\u002fplugin\" ,\n\t\t\"@xiopt/pane-dash-opencode@0.1.8\" /* tail */ ],\n\t\"odd\" : true\n}\n")
   expect(planOpenCodeEdit({ ...input, bytes: planned.bytes }).bytes).toEqual(planned.bytes)
   for (const bad of [
     "[]", "{\"plugin\":{}}", "{\"plugin\":[1]}", "{\"plugin\":[],\"plugin\":[]}",

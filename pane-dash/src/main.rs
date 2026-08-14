@@ -20,6 +20,7 @@ use pane_dash::creation::{
     CreateContext, CreateDraft, CreateRequest, CreationError, CreationId, CreationProgress,
     attach_command, build_request, run_creation,
 };
+use pane_dash::model::PaneId;
 use pane_dash::model::{HeadlessSessionId, Model, ModelConfig, SessionId};
 use pane_dash::notification_ui;
 use pane_dash::options::parse_show_options;
@@ -278,15 +279,16 @@ async fn main() -> Result<()> {
         StartupArgs::Run {
             client_tty,
             session_id,
-            pane_id: _,
+            pane_id,
             bench_first_frame,
-        } => run_dashboard(client_tty, session_id, bench_first_frame).await,
+        } => run_dashboard(client_tty, session_id, pane_id, bench_first_frame).await,
     }
 }
 
 async fn run_dashboard(
     client_tty: String,
     session_id: String,
+    pane_id: String,
     bench_first_frame: bool,
 ) -> Result<()> {
     let startup_started = Instant::now();
@@ -305,6 +307,10 @@ async fn run_dashboard(
         now_secs(),
     );
     let mut app = AppState::new(model, cfg, loaded_ui);
+    app.focus_pane_in_session(
+        &SessionId::from(session_id.as_str()),
+        &PaneId::from(pane_id),
+    );
     app.dropped_records = initial_snapshot.dropped;
 
     let _terminal = TerminalGuard::enter()?;
