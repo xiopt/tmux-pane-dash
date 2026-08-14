@@ -9,7 +9,7 @@ import { verifyPackages } from "../verify-artifacts"
 const root = process.cwd()
 const outputPaths = [
   "packages/tmux-pane-dash/generated/release-manifest.json",
-  "packages/tmux-pane-dash/payload/tmux-pane-dash-v0.1.7-aarch64-apple-darwin.tar.gz",
+  "packages/tmux-pane-dash/payload/tmux-pane-dash-v0.1.8-aarch64-apple-darwin.tar.gz",
   "packages/tmux-pane-dash/dist/cli.js",
   "packages/tmux-pane-dash/dist/runtime.js",
   "opencode-plugin/dist/index.js",
@@ -25,7 +25,7 @@ async function fixtureRoot(): Promise<string> {
   const fixture = await mkdtemp(join(tmpdir(), "tmux-pane-dash-package-fixture-"))
   await copy(join(root, "package.json"), join(fixture, "package.json"))
   await copy(join(root, "packages/tmux-pane-dash/src"), join(fixture, "packages/tmux-pane-dash/src"))
-  for (const path of ["package.json", "README.md", "LICENSE", "generated/release-manifest.json", "payload/tmux-pane-dash-v0.1.7-aarch64-apple-darwin.tar.gz", "dist/cli.js", "dist/runtime.js"]) {
+  for (const path of ["package.json", "README.md", "LICENSE", "generated/release-manifest.json", "payload/tmux-pane-dash-v0.1.8-aarch64-apple-darwin.tar.gz", "dist/cli.js", "dist/runtime.js"]) {
     await copy(join(root, "packages/tmux-pane-dash", path), join(fixture, "packages/tmux-pane-dash", path))
   }
   await copy(join(root, "opencode-plugin/pane-dash.ts"), join(fixture, "opencode-plugin/pane-dash.ts"))
@@ -63,7 +63,7 @@ test("package build accepts only the canonical release contract and exact four-a
   const fixture = await fixtureRoot()
   try {
     const invalid = [
-      { name: "wrong version", mutate: (manifest: Record<string, any>) => { manifest.version = "0.1.0"; manifest.tag = "v0.1.0"; for (const asset of Object.values(manifest.assets) as Array<Record<string, string>>) { asset.asset = asset.asset.replace("v0.1.7", "v0.1.0"); asset.url = asset.url.replace("/v0.1.7/", "/v0.1.0/").replace("v0.1.7-", "v0.1.0-") } } },
+      { name: "wrong version", mutate: (manifest: Record<string, any>) => { manifest.version = "0.1.0"; manifest.tag = "v0.1.0"; for (const asset of Object.values(manifest.assets) as Array<Record<string, string>>) { asset.asset = asset.asset.replace("v0.1.8", "v0.1.0"); asset.url = asset.url.replace("/v0.1.8/", "/v0.1.0/").replace("v0.1.8-", "v0.1.0-") } } },
       { name: "wrong tag", mutate: (manifest: Record<string, any>) => { manifest.tag = "v0.1.0" } },
       { name: "wrong inventory", mutate: (manifest: Record<string, any>) => { delete manifest.assets["linux-x64"] } },
       { name: "wrong URL", mutate: (manifest: Record<string, any>) => { manifest.assets["darwin-arm64"].url = "https://example.test/release.tar.gz" } },
@@ -90,8 +90,8 @@ test("package build atomically publishes exact outputs, embeds every release ide
     expect(await readFile(join(fixture, outputPaths[0]!))).toEqual(expected.bytes)
     expect(await readFile(join(fixture, outputPaths[1]!))).toEqual(await readFile(join(fixture, expected.value.assets["darwin-arm64"].asset)))
     const cli = await readFile(join(fixture, outputPaths[2]!), "utf8")
-    expect(cli).toContain("0.1.7")
-    expect(cli).toContain("v0.1.7")
+    expect(cli).toContain("0.1.8")
+    expect(cli).toContain("v0.1.8")
     for (const asset of Object.values(expected.value.assets) as Array<{ asset: string; url: string; sha256: string }>) {
       expect(cli).toContain(asset.asset)
       expect(cli).toContain(asset.url)
